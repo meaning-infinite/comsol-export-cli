@@ -82,3 +82,8 @@ set COMSOL=D:\COMSOL\COMSOL64\Multiphysics
 ## 配方
 
 导出什么、叫什么，全在 `recipes/*.psd1` 里，见 [recipes/README.md](recipes/README.md)。
+
+## 文档
+
+- 接口与扩展指南：[docs/API.md](docs/API.md)
+- 配方字段：[recipes/README.md](recipes/README.md)
