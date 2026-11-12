@@ -686,7 +686,7 @@ function Start-OneJob($job) {
     $logFile = Join-Path $job.jobDir 'driver.log'
     $errFile = Join-Path $job.jobDir 'driver.err'
     $cp = (Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir
-    $argStr = '-Xmx4g -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
+    $argStr = '-Xmx4g -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
     $proc = Start-Process -FilePath $javaExe -ArgumentList $argStr `
                           -RedirectStandardOutput $logFile -RedirectStandardError $errFile `
                           -WindowStyle Hidden -PassThru
@@ -842,8 +842,23 @@ function Invoke-Scheduler {
                         if ($note -eq '已清除') { Write-Host ("`n  已释放锁: " + $job.model) -ForegroundColor DarkGray }
                     }
                     elseif (-not (Test-JobAlive $job.pid $job.jobDir)) {
-                        if (Test-Path -LiteralPath (Join-Path $job.jobDir 'killed')) { $job.status = 'killed' }
-                        else { $job.status = 'failed' }
+                        # 进程刚退出时文件可能还在落盘，等一拍再判
+                        Start-Sleep -Milliseconds 300
+                        if (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported')) {
+                            # 留给下一拍走"已导出"分支
+                        } elseif (Test-Path -LiteralPath (Join-Path $job.jobDir 'killed')) {
+                            $job.status = 'killed'
+                        } else {
+                            $job.status = 'failed'
+                            $code = '?'
+                            $ef = Join-Path $job.jobDir 'exit'
+                            if (Test-Path -LiteralPath $ef) {
+                                try { $code = ([string](Get-Content -LiteralPath $ef -Raw)).Trim() } catch { }
+                            } elseif (-not (Test-Path -LiteralPath (Join-Path $job.jobDir 'started'))) {
+                                $code = 'no-start'
+                            }
+                            Set-JobProp $job 'exitcode' $code
+                        }
                     }
                 }
             }
@@ -914,7 +929,20 @@ function Invoke-Scheduler {
                 if ($job.duration) { $dur = '  用时 ' + (Format-Elapsed $job.duration) }
                 Write-Host ('  [完成] ' + $leaf + $dur) -ForegroundColor Green
             } elseif ($job.status -eq 'failed') {
-                Write-Host ('  [失败] ' + $leaf + '  日志: ' + (Join-Path $job.jobDir 'driver.err')) -ForegroundColor Red
+                $code = [string]$job.exitcode
+                if ($code -eq 'no-start') {
+                    Write-Host ('  [失败] ' + $leaf + '  Java 没起来（作业文件在，驱动没写过任何标记）') -ForegroundColor Red
+                } elseif ($code -eq '0') {
+                    Write-Host ('  [失败] ' + $leaf + '  退出码 0 但没有 exported 标记，导出未完成') -ForegroundColor Red
+                } else {
+                    Write-Host ('  [失败] ' + $leaf + '  退出码 ' + $code) -ForegroundColor Red
+                }
+                foreach ($f in @('driver.err', 'driver.log')) {
+                    $fp = Join-Path $job.jobDir $f
+                    if (-not (Test-Path -LiteralPath $fp)) { continue }
+                    $tail = @(Get-Content -LiteralPath $fp -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch '^\s+at ' } | Select-Object -Last 3)
+                    foreach ($ln in $tail) { Write-Host ('      ' + $f + ': ' + $ln.Trim()) -ForegroundColor DarkGray }
+                }
             } elseif ($job.status -eq 'killed') {
                 Write-Host ('  [已终止] ' + $leaf + '  由本 CLI 手动终止') -ForegroundColor Red
             } elseif ($job.status -eq 'running') {

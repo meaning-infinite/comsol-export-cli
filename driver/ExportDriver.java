@@ -49,7 +49,26 @@ public class ExportDriver {
         HANDLERS.put("eigenslice", ExportDriver::exportEigenSlice); // 每个特征频率 3 张切面图
     }
 
+    static Path CURRENT_JOB_DIR = null;
+
+    // 统一收尾：写 exit 标记（CLI 靠它判断退出码），刷 stdout/stderr，再退出
+    static void finish(Path jobDir, int code) {
+        if (jobDir != null) {
+            try {
+                Files.write(jobDir.resolve("exit"), String.valueOf(code).getBytes(StandardCharsets.UTF_8));
+            } catch (IOException ignore) { }
+        }
+        System.out.flush();
+        System.err.flush();
+        System.exit(code);
+    }
+
     public static void main(String[] args) {
+        // 控制台被重定向时 Java 默认不自动 flush，进程被杀就看得到 0 字节日志；这里强制 UTF-8 + 自动 flush
+        try {
+            System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.out), true, "UTF-8"));
+            System.setErr(new PrintStream(new FileOutputStream(FileDescriptor.err), true, "UTF-8"));
+        } catch (Exception ignore) { }
         if (args.length < 1) { System.err.println("usage: ExportDriver <job.properties>"); System.exit(2); }
 
         Job j = new Job();
@@ -63,11 +82,16 @@ public class ExportDriver {
         j.outname = j.p.get("outname");
         j.blocks = Integer.parseInt(j.p.getOrDefault("blocks", "0").trim());
         j.jobDir = Paths.get(args[0]).toAbsolutePath().getParent();
+        CURRENT_JOB_DIR = j.jobDir;
+        try {
+            Files.write(j.jobDir.resolve("started"),
+                    ("pid=" + ProcessHandle.current().pid()).getBytes(StandardCharsets.UTF_8));
+        } catch (IOException ignore) { }
 
         if (modelPath == null || !Files.isRegularFile(Paths.get(modelPath))) {
-            System.err.println("模型不存在: " + modelPath); System.exit(2);
+            System.err.println("模型不存在: " + modelPath); finish(j.jobDir, 2);
         }
-        if (j.blocks <= 0) { System.err.println("作业文件里没有 Export 块"); System.exit(2); }
+        if (j.blocks <= 0) { System.err.println("作业文件里没有 Export 块"); finish(j.jobDir, 2); }
         j.outdir = Paths.get(outdir).toAbsolutePath();
 
         String modelsDirProp = j.p.getOrDefault("modelsdir", "").trim();
@@ -124,7 +148,7 @@ public class ExportDriver {
                 try {
                     model.study(j.study).run();
                 } catch (Exception e) {
-                    System.err.println("求解失败: " + e.getMessage()); System.exit(3);
+                    System.err.println("求解失败: " + e.getMessage()); finish(j.jobDir, 3);
                 }
                 System.out.println("[driver] 求解完成，耗时 " + (System.currentTimeMillis() - t0) / 1000 + " s");
                 System.out.flush();
@@ -151,7 +175,7 @@ public class ExportDriver {
                 Handler h = HANDLERS.get(type);
                 if (h == null) {
                     System.err.println("暂不支持的导出类型: " + type + "（可用: " + String.join(", ", HANDLERS.keySet()) + "）");
-                    System.exit(4);
+                    finish(j.jobDir, 4);
                 }
                 System.out.println("[driver] 导出块 " + i + ": " + type + " / " + name);
                 System.out.flush();
@@ -159,18 +183,18 @@ public class ExportDriver {
                     h.run(j, i);
                 } catch (Exception e) {
                     System.err.println("导出块 " + name + " 失败: " + e.getMessage());
-                    System.exit(4);
+                    finish(j.jobDir, 4);
                 }
             }
 
             Files.deleteIfExists(mkExporting);
             Files.write(mkExported, "ok".getBytes(StandardCharsets.UTF_8));
             System.out.println("[driver] 全部完成");
-            System.exit(0);
+            finish(j.jobDir, 0);
         } catch (Exception e) {
             System.err.println("驱动异常: " + e);
             e.printStackTrace();
-            System.exit(4);
+            finish(j.jobDir, 4);
         } finally {
             try { ModelUtil.clear(); } catch (Exception ignore) { }
             if (tmp != null) { try { deleteTree(tmp); } catch (Exception ignore) { } }
@@ -398,15 +422,15 @@ public class ExportDriver {
         if (want != null && !want.isEmpty()) {
             for (String t : tags) if (t.equals(want)) return t;
             System.err.println("模型里没有研究 '" + want + "'，可用: " + String.join(", ", tags));
-            System.exit(2);
+            finish(CURRENT_JOB_DIR, 2);
         }
-        if (tags.length == 0) { System.err.println("模型里没有研究"); System.exit(2); }
+        if (tags.length == 0) { System.err.println("模型里没有研究"); finish(CURRENT_JOB_DIR, 2); }
         return tags[0];
     }
 
     static String firstDataset(Model model) {
         String[] ds = model.result().dataset().tags();
-        if (ds.length == 0) { System.err.println("模型里没有数据集（研究可能没有求解）"); System.exit(4); }
+        if (ds.length == 0) { System.err.println("模型里没有数据集（研究可能没有求解）"); finish(CURRENT_JOB_DIR, 4); }
         return ds[0];
     }
 
