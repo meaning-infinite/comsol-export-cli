@@ -19,6 +19,7 @@
     cli.ps1         全部逻辑
     driver/         ExportDriver.java（求解 + 导出 + 写文件）
     recipes/        导出配方，见 recipes/README.md
+    modules/        预制模块，配方用 Use 调用，见下文
     logs/           每个作业一个目录（作业文件 + 日志 + 标记）
   output/           导出的 CSV / PNG，只回传这个目录
 ```
@@ -34,19 +35,36 @@
 | `run.bat -KillJob 2` | 终止第 2 个作业（只杀本 CLI 启动的） |
 | `run.bat -Setup` | 改 COMSOL 路径 / 并发数 / 模型目录 |
 | `run.bat -DryRun` | 只打印作业与导出块，不写队列、不启动计算 |
+| `run.bat -Modules` | 列出所有预制模块与可覆盖参数 |
 
-## 导出类型
+## 预制模块（推荐写法）
 
-配方里每个 Export 块用 `Type` 指定，驱动按类型分派（新增类型只需在 `ExportDriver.java` 的 `HANDLERS` 里加一行）：
+导出能力做成模块放在 `script/modules/*.psd1`，配方只写「用哪个模块、覆盖哪些参数、叫什么」：
 
-| Type | 产出 | 主要字段 |
+```powershell
+@{
+    Task = 'ITO-LN-ITO'; Study = 'std1'
+    NameTemplate = 'ITO-LN-ITO_{model}_{stamp}'
+    Use = @(
+        @{ Module = 'spectrum'; Name = 'spectrum' }
+        @{ Module = 'slice2d';  Name = 'field'; Planes = @('xy','zx','yz') }
+    )
+}
+```
+
+| 模块 | 产出 | 可覆盖 |
 |---|---|---|
-| `global` | CSV，任意表达式 | `Expr` `Cols` |
+| `table` | 数据 CSV（任意表达式，每解一行） | `Expr` `Cols` |
 | `spectrum` | 透射/反射谱 CSV（λ,T,R）+ 可选曲线 PNG | `Plot` |
-| `image` | 单张多切面 PNG | `Expr` `Plane` `At` `Width` `Height` `SolNum` |
-| `eigenslice` | 每个特征频率 3 张切面 PNG（xy/zx/yz） | `Expr` `Planes` `At` `MaxModes` `Width` `Height` |
+| `slice2d` | 每个平面一张**二维正投影** PNG（xy→俯视、zx→侧视、yz→正视） | `Expr` `Planes` `At` `Width` `Height` `Title` |
+| `modes` | 每个模态一行数值 CSV（特征频率等） | `Expr` `Cols` `MaxModes` |
+| `integral` | 线/面积分数值 CSV | `Dim`(surface/line) `Ents`(all 或 `3,4,17`) `Expr` `Cols` |
 
-作图相关的固定口径：取数用 `abs(ewfd.S21)^2` / `abs(ewfd.S11)^2`（模型里没有 `ewfd.T`/`ewfd.R`）；切面平面名是 `xy` `zx` `yz`（COMSOL 用 `zx` 不用 `xz`）。
+- 参数没写在模块 `Keys` 里会直接报错，避免拼错字段悄悄失效。
+- 老的 `Export = @(@{Type=...})` 写法仍然可用，两种可以混写。
+- 加新模块 = 加一个 psd1（复制现有文件改 `Id`/`Kind`/`Defaults`）；加新能力 = 在 `ExportDriver.java` 的 `HANDLERS` 里加一行。
+
+固定口径：取数用 `abs(ewfd.S21)^2` / `abs(ewfd.S11)^2`（模型里没有 `ewfd.T`/`ewfd.R`）；平面名是 `xy` `zx` `yz`（COMSOL 用 `zx` 不用 `xz`）；`At` 单位米，`auto` 取该方向几何中心。
 
 ## 状态与续跑
 

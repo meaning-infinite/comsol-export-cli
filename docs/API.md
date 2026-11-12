@@ -139,6 +139,38 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 
 命名：`<outname>_m<k>_<plane>.png`；模型里有多个解节点时插 `_s<j>`。
 
+### 4.6 slice2d — 多切面二维正投影（2026-11）
+
+字段：`Expr`（默认 `ewfd.normE`）、`Planes`（`xy|zx|yz`，默认三面全出）、`At`（米；`auto` = 该方向几何中心）、`Width`/`Height`（像素）、`Title`。
+实现：每个平面建 `CutPlane` 数据集（`quickplane` + 偏移键）+ `PlotGroup2D`（`Surface` 节点），导出 `<outname>_<name>_<plane>.png`。
+- 几何包围盒 `getBoundingBox()` 返回的是**几何长度单位**（本模型为 nm），必须乘 `lengthUnit()` 的换算系数再当米用，否则 `auto` 位置落在模型外、出空白图（踩过一次）。
+- 2D 图组 + CutPlane 才是真二维投影；用 3D 图组切片的透视投影，画面是斜看的长条。
+
+### 4.7 integral — 线/面积分（2026-11）
+
+字段：`Dim`（`surface`|`line`）、`Ents`（`all` 或编号列表 `3,4,17`）、`Expr`、`Cols`。
+实现：`numerical().create(tag,"IntSurface"/"IntLine")`，`selection().all()` 或 `selection().set(int[])`；逐解节点、逐 `solnum` 取值，去重后写 CSV（一行一个解）。编号不存在时报错并中止该块。
+
+### 4.8 modes — 模态数值表（2026-11）
+
+字段：`Expr`（默认 `ewfd.freq`）、`Cols`、`MaxModes`（默认 50）。
+实现：`EvalGlobal` + 逐 sol 逐 solnum，遇异常即停；输出列 `mode` + 指定列。对波长解模型也能用（每个解一行，值相同则去重）。
+
+### 4.9 预制模块系统（2026-11）
+
+`script/modules/<id>.psd1` 每个文件一个模块：
+
+```powershell
+@{ Id='slice2d'; Kind='slice2d'; Title='多切面（二维视图）'
+   Defaults=@{ Expr='ewfd.normE'; Planes=@('xy','zx','yz'); At='auto' }
+   Keys=@('Expr','Planes','At','Width','Height','Title','Name') }
+```
+
+配方 `Use = @(@{ Module='slice2d'; Name='field'; Planes=@('xy') })` 由 `Expand-Blocks`（cli.ps1）解析：
+1. 取模块 `Defaults`；2. 用调用里的键覆盖（`Name` 单独处理，其余必须在 `Keys` 里，否则报错）；3. 补 `Type=Kind`；4. 与老写法 `Export` 块合并。
+
+新增模块 = 加一个 psd1；新增能力 = `HANDLERS` 一行 + 一个 psd1。
+
 ## 5. 扩展指南
 
 ### 5.1 新增一种导出类型（改两处）
@@ -219,6 +251,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.0.1 | 2026-11-12 | 修首次运行 `state\` 目录不存在导致写配置失败 |
 | v1.1 | 2026-11-12 | 驱动改 handler 分派；新增 `spectrum` / `image` / `eigenslice`；`-DryRun` 不再真正执行 |
 | v1.2 | 2026-11-12 | 新增 `-Mode export`（只导出已求解模型，job.properties 的 `solve=0`）；模型列表支持 `.lnk` 快捷方式（显示快捷方式名、按其命名） |
+| v1.3 | 2026-11-12 | 预制模块系统（`modules/*.psd1` + 配方 `Use`）；新增 `slice2d`（二维正投影切面）、`integral`（线/面积分）、`modes`（模态数值）三个 handler；`-Modules` 列出模块 |
 
 ## 8. 待验证 / 已知缺口
 
