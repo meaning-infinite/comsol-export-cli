@@ -687,9 +687,33 @@ function Start-OneJob($job) {
     $errFile = Join-Path $job.jobDir 'driver.err'
     $cp = (Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir
     $argStr = '-Xmx4g -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
-    $proc = Start-Process -FilePath $javaExe -ArgumentList $argStr `
-                          -RedirectStandardOutput $logFile -RedirectStandardError $errFile `
-                          -WindowStyle Hidden -PassThru
+    # 启动前把实际用的路径写进 launch.txt，出问题能查
+    $launchInfo = @(
+        'time=' + (Get-Date).ToString('o'),
+        'java=' + $javaExe,
+        'java_exists=' + (Test-Path -LiteralPath $javaExe),
+        'cp=' + $cp,
+        'args=' + $argStr,
+        'jobdir=' + $job.jobDir
+    ) -join "`r`n"
+    try {
+        [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'launch.txt'), $launchInfo, (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+    if (-not (Test-Path -LiteralPath $javaExe)) {
+        $job.status = 'failed'
+        Set-JobProp $job 'exitcode' 'no-java'
+        return
+    }
+    try {
+        $proc = Start-Process -FilePath $javaExe -ArgumentList $argStr `
+                              -RedirectStandardOutput $logFile -RedirectStandardError $errFile `
+                              -WindowStyle Hidden -WorkingDirectory $job.jobDir -PassThru
+    } catch {
+        try { Add-Content -LiteralPath (Join-Path $job.jobDir 'launch.txt') -Value ('start-error=' + $_.Exception.Message) -Encoding UTF8 } catch { }
+        Set-JobProp $job 'exitcode' 'launch-error'
+        $job.status = 'failed'
+        return
+    }
     $job.pid = $proc.Id
     $job.started = (Get-Date).ToString('o')
     $job.status = 'running'
@@ -930,10 +954,26 @@ function Invoke-Scheduler {
                 Write-Host ('  [完成] ' + $leaf + $dur) -ForegroundColor Green
             } elseif ($job.status -eq 'failed') {
                 $code = [string]$job.exitcode
+                $ev = @()
+                foreach ($m in @('started','exit','exported','killed','launch.txt')) {
+                    $mp = Join-Path $job.jobDir $m
+                    if (Test-Path -LiteralPath $mp) { $ev += ($m + '=有') } else { $ev += ($m + '=无') }
+                }
+                foreach ($m in @('driver.log','driver.err')) {
+                    $mp = Join-Path $job.jobDir $m
+                    if (Test-Path -LiteralPath $mp) { $ev += ($m + '=' + (Get-Item -LiteralPath $mp).Length + 'B') } else { $ev += ($m + '=无') }
+                }
+                Write-Host ('      现场: ' + ($ev -join '  ')) -ForegroundColor DarkGray
                 if ($code -eq 'no-start') {
                     Write-Host ('  [失败] ' + $leaf + '  Java 没起来（作业文件在，驱动没写过任何标记）') -ForegroundColor Red
                 } elseif ($code -eq '0') {
                     Write-Host ('  [失败] ' + $leaf + '  退出码 0 但没有 exported 标记，导出未完成') -ForegroundColor Red
+                } elseif ($code -eq 'no-java') {
+                    Write-Host ('  [失败] ' + $leaf + '  找不到 Java：' + $javaExe) -ForegroundColor Red
+                } elseif ($code -eq 'launch-error') {
+                    Write-Host ('  [失败] ' + $leaf + '  启动进程失败（见 launch.txt 的 start-error）') -ForegroundColor Red
+                } elseif ($code -eq '?') {
+                    Write-Host ('  [失败] ' + $leaf + '  驱动启动了(started 有)但没有写 exit —— Java 崩溃或被外部杀掉') -ForegroundColor Red
                 } else {
                     Write-Host ('  [失败] ' + $leaf + '  退出码 ' + $code) -ForegroundColor Red
                 }
