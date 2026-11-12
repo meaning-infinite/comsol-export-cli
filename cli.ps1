@@ -26,6 +26,8 @@ param(
     [string]$Recipe,
     [string]$ModelIndex = '',
     [string]$ComsolPath,
+    [ValidateSet('solve','export','')]
+    [string]$Mode = '',
     [int]$KillJob = 0,
     [switch]$Setup,
     [switch]$Help
@@ -188,9 +190,32 @@ function Show-Help {
 }
 
 function Get-ModelFiles {
+    # 支持 .mph 与指向 .mph 的快捷方式（.lnk）；快捷方式只取目标路径，显示仍用 .lnk 的名字
     param([string]$Dir)
     if (-not (Test-Path -LiteralPath $Dir)) { throw "模型目录不存在: $Dir" }
-    return @(Get-ChildItem -LiteralPath $Dir -Filter *.mph | Where-Object { -not $_.PSIsContainer } | Sort-Object Name)
+    $items = @()
+    foreach ($f in (Get-ChildItem -LiteralPath $Dir | Where-Object { -not $_.PSIsContainer } | Sort-Object Name)) {
+        if ($f.Extension -eq '.mph') {
+            $items += [pscustomobject]@{
+                Name = $f.Name; FullName = $f.FullName
+                BaseName = $f.BaseName; IsLink = $false
+            }
+        }
+        elseif ($f.Extension -eq '.lnk') {
+            $target = ''
+            try {
+                $ws = New-Object -ComObject WScript.Shell
+                $target = $ws.CreateShortcut($f.FullName).TargetPath
+            } catch { $target = '' }
+            if ($target -and (Test-Path -LiteralPath $target) -and ([System.IO.Path]::GetExtension($target) -eq '.mph')) {
+                $base = $f.BaseName -replace '\s*-\s*快捷方式$', ''
+                $items += [pscustomobject]@{
+                    Name = $f.Name; FullName = $target; BaseName = $base; IsLink = $true
+                }
+            }
+        }
+    }
+    return @($items)
 }
 
 function Get-Recipes {
@@ -551,7 +576,10 @@ function Get-JobStates {
         $mKilled = Test-Path -LiteralPath (Join-Path $dir 'killed')
         if ($mExported)      { $state = '已导出'; $color = 'Green' }
         elseif ($mKilled)    { $state = '已终止'; $color = 'Red' }
-        elseif ($alive)      { if ($mExporting) { $state = '导出中'; $color = 'Cyan' } else { $state = '求解中'; $color = 'Yellow' } }
+        elseif ($alive)      {
+            $isExportMode = ($entry -and [string]$entry.mode -eq 'export')
+            if ($mExporting -or $isExportMode) { $state = '导出中'; $color = 'Cyan' } else { $state = '求解中'; $color = 'Yellow' }
+        }
         else                 { $state = '断开';   $color = 'Red' }
         $res += [pscustomobject]@{ Name = $d.Name; Dir = $dir; State = $state; Color = $color; Exported = $mExported; Entry = $entry }
     }
@@ -757,7 +785,9 @@ function Get-MedianSeconds($model) {
 
 function Get-JobDisplay($job) {
     # 阶段 + 估算百分比（按历史耗时线性外推，仅提示用）
+    if (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported')) { return [pscustomobject]@{ Stage = '完成'; Pct = 100; Elapsed = 0; Left = 0 } }
     $stage = '求解中'
+    if ([string]$job.mode -eq 'export') { $stage = '导出中' }
     if (Test-Path -LiteralPath (Join-Path $job.jobDir 'exporting')) { $stage = '导出中' }
     $started = $null
     if ($job.started) { try { $started = [datetime]::Parse([string]$job.started) } catch { } }
@@ -960,8 +990,23 @@ if ($Resume) {
 }
 
 
+# 模式：先决定这次是“求解+导出”还是“只导出已有解的模型”
+$doSolve = $true
+if ($Mode -eq 'export') { $doSolve = $false }
+elseif ($Mode -eq 'solve') { $doSolve = $true }
+elseif ([string]::IsNullOrWhiteSpace($ModelIndex)) {
+    Write-Host ''
+    $rows = @(
+        [pscustomobject]@{ Text = '[1] 求解并导出（模型还没算过）'; Color = 'Gray' },
+        [pscustomobject]@{ Text = '[2] 只导出（模型里已经有解，不重新求解）'; Color = 'Gray' }
+    )
+    Write-BoxRows '选择模式' $rows
+    $mv = Read-Host '  模式序号（直接回车=1）'
+    if ($mv -match '^\s*2\s*$') { $doSolve = $false }
+}
+
 $modelFiles = @(Get-ModelFiles $Models)
-if ($modelFiles.Count -eq 0) { throw "目录里没有 .mph 文件: $Models" }
+if ($modelFiles.Count -eq 0) { throw "目录里没有 .mph 或指向 .mph 的快捷方式: $Models" }
 
 $miRaw = [string]$ModelIndex
 $shown = $false
@@ -970,7 +1015,9 @@ while ($true) {
     if (-not $shown) {
         $rows = @()
         for ($i = 0; $i -lt $modelFiles.Count; $i++) {
-            $rows += [pscustomobject]@{ Text = ('[{0}] {1}' -f ($i + 1), $modelFiles[$i].Name); Color = 'Gray' }
+            $label = $modelFiles[$i].Name
+            if ($modelFiles[$i].IsLink) { $label = $label + '  →  ' + [System.IO.Path]::GetFileName($modelFiles[$i].FullName) }
+            $rows += [pscustomobject]@{ Text = ('[{0}] {1}' -f ($i + 1), $label); Color = 'Gray' }
         }
         Write-BoxRows '选择模型' $rows
         $shown = $true
@@ -1032,6 +1079,7 @@ foreach ($m in $ModelList) {
     $spec.Add('modelsdir=' + $Models)
     $spec.Add('outname='  + $n)
     $spec.Add('blocks='   + $cfg.Export.Count)
+    $spec.Add('solve='    + $(if ($doSolve) { '1' } else { '0' }))
     for ($i = 0; $i -lt $cfg.Export.Count; $i++) {
         $b = $cfg.Export[$i]
         $k = $i + 1
@@ -1049,12 +1097,14 @@ foreach ($m in $ModelList) {
     [System.IO.File]::WriteAllLines((Join-Path $jobDir 'job.properties'), $spec,
                                     (New-Object System.Text.UTF8Encoding($false)))
 
-    Write-Host ('  [入队] ' + $m.Name + '  →  ' + $n + '.csv')
+    $tag = ''
+    if (-not $doSolve) { $tag = '（只导出）' }
+    Write-Host ('  [入队]' + $tag + ' ' + $m.Name + '  →  ' + $n + '.csv')
     $jobs += [pscustomobject]@{
         id = $n; model = $m.FullName; recipe = $r.Name
         pid = 0; jobDir = $jobDir; outDir = $outDir
         created = (Get-Date).ToString('o'); started = ''
-        status = 'pending'
+        status = 'pending'; mode = $(if ($doSolve) { 'solve' } else { 'export' })
     }
 }
 

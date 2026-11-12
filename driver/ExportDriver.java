@@ -91,7 +91,9 @@ public class ExportDriver {
 
             ModelUtil.initStandalone(false);
 
-            boolean resume = Files.isRegularFile(solvedModel) && Files.isRegularFile(mkSolved);
+            String solveFlag = j.p.getOrDefault("solve", "1").trim();
+            boolean doSolve = !("0".equals(solveFlag) || "false".equalsIgnoreCase(solveFlag));
+            boolean resume = doSolve && Files.isRegularFile(solvedModel) && Files.isRegularFile(mkSolved);
             Model model;
             try {
                 if (resume) {
@@ -112,7 +114,10 @@ public class ExportDriver {
             System.out.flush();
 
             j.study = resolveStudy(model, j.p.getOrDefault("study", ""));
-            if (!resume) {
+            if (!doSolve) {
+                System.out.println("[driver] 只导出：模型里已有解，跳过求解");
+                Files.write(mkExporting, "ok".getBytes(StandardCharsets.UTF_8));
+            } else if (!resume) {
                 System.out.println("[driver] 求解研究: " + j.study);
                 System.out.flush();
                 long t0 = System.currentTimeMillis();

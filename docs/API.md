@@ -32,6 +32,7 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 | `-Setup` | switch | 配置菜单：COMSOL 路径 / 并发数 / 模型目录 / 重新扫描 |
 | `-DryRun` | switch | 只打印作业与导出块；不写队列、不启动计算、不弹确认 |
 | `-Resume` | switch | 跳过选择，直接调度队列里未完成的作业 |
+| `-Mode` | string | `solve` 求解并导出（默认）/ `export` 只导出已有解的模型；空 = 交互询问 |
 | `-KillJob <n>` | int | 终止队列里第 n 个作业（不受单实例守卫限制） |
 | `-Help` | switch | 帮助 |
 
@@ -81,6 +82,7 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 | `outdir` | 输出目录 |
 | `outname` | 输出文件名（不含扩展名） |
 | `modelsdir` | 模型目录，用于存 `solved/` 下已求解模型 |
+| `solve` | `1` 求解后导出（默认）/ `0` 只导出：跳过研究求解，直接用模型里已有的解 |
 | `blocks` | 导出块数量 |
 | `block.N.<key>` | 第 N 个块的字段，key 为配方字段小写 |
 
@@ -235,6 +237,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.0 | 2026-11-12 | 首个可用版本：comsolbatch + Java 驱动、队列、锁、续跑、单实例守卫 |
 | v1.0.1 | 2026-11-12 | 修首次运行 `state\` 目录不存在导致写配置失败 |
 | v1.1 | 2026-11-12 | 驱动改 handler 分派；新增 `spectrum` / `image` / `eigenslice`；`-DryRun` 不再真正执行 |
+| v1.2 | 2026-11-12 | 新增 `-Mode export`（只导出已求解模型，job.properties 的 `solve=0`）；模型列表支持 `.lnk` 快捷方式（显示快捷方式名、按其命名） |
 
 ## 9. 待验证 / 已知缺口
 
