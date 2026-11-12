@@ -182,8 +182,8 @@ function Show-Help {
     Write-Host '    -DryRun          只打印计划，不写队列、不启动计算'
     Write-Host '    -Help            显示本帮助'
     Write-Host ''
-    Write-Host '  配方字段: Task / Study / Sweep / Lambda / NameTemplate / Export'
-    Write-Host '  Export 块 Type: global  table  field  image'
+    Write-Host '  配方字段: Task / Study / NameTemplate / Export'
+    Write-Host '  Export 块 Type: global | spectrum | image | eigenslice'
     Write-Host ''
 }
 
@@ -1035,10 +1035,16 @@ foreach ($m in $ModelList) {
     for ($i = 0; $i -lt $cfg.Export.Count; $i++) {
         $b = $cfg.Export[$i]
         $k = $i + 1
-        $spec.Add('block.' + $k + '.type=' + $b.Type)
-        $spec.Add('block.' + $k + '.name=' + $b.Name)
-        $spec.Add('block.' + $k + '.expr=' + ($b.Expr -join '|'))
-        $spec.Add('block.' + $k + '.cols=' + ($b.Cols -join '|'))
+        # 通用：任何额外字段都原样写入 job.properties（小写键），
+        # 这样新增导出类型不需要再改这里
+        foreach ($key in $b.Keys) {
+            $val = $b[$key]
+            if ($null -eq $val) { continue }
+            if ($val -is [array]) { $val = ($val -join '|') }
+            $name = ([string]$key).ToLowerInvariant()
+            if ($name -eq 'type' -or $name -eq 'name') { $val = [string]$val }
+            $spec.Add('block.' + $k + '.' + $name + '=' + [string]$val)
+        }
     }
     [System.IO.File]::WriteAllLines((Join-Path $jobDir 'job.properties'), $spec,
                                     (New-Object System.Text.UTF8Encoding($false)))
@@ -1053,6 +1059,15 @@ foreach ($m in $ModelList) {
 }
 
 Write-Host ''
+if ($DryRun) {
+    # 预览模式：只报计划，绝不写队列、绝不启动计算
+    foreach ($cfgBlock in $cfg.Export) { Write-Host ('  导出块: ' + $cfgBlock.Type + ' / ' + $cfgBlock.Name) }
+    Write-Host ('  预览：共 ' + $jobs.Count + ' 个作业，未写入队列、未启动计算。')
+    foreach ($j in $jobs) { Remove-Item -LiteralPath $j.jobDir -Recurse -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $instFile -Force -ErrorAction SilentlyContinue
+    exit 0
+}
+
 $ans = Read-Host ('  开始导出? 共 ' + $jobs.Count + ' 个作业 (Y/N)')
 if ($ans -notmatch '^(y|Y)') {
     foreach ($j in $jobs) { Remove-Item -LiteralPath $j.jobDir -Recurse -Force -ErrorAction SilentlyContinue }

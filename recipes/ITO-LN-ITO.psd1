@@ -1,18 +1,16 @@
-﻿# ITO-LN-ITO 任务的导出配方
-# 只描述“算哪个研究、导哪些量、文件叫什么”，不含逻辑，也不碰模型里的参数。
-# 参数、波长窗口、扫描点全部在 .mph 里设好；本文件改了也不会改模型。
-@{
-    Task         = 'ITO-LN-ITO'
-    Study        = 'std1'
-    NameTemplate = '{task}_{model}_{stamp}'
+﻿@{
+    # 配方：ITO - LN - ITO
+    # 说明：驱动打开模型 -> 跑 study -> 按下面 Export 块导出。
+    #      这里的世界只有模型；参数、波长窗口都在 .mph 里设好。
+    Task        = 'ITO-LN-ITO'
+    Study       = 'std1'
+    NameTemplate = 'ITO-LN-ITO_{model}_{stamp}'
 
-    # 导出块：Type 是分派键，加一块就多导一份数据
-    Export       = @(
+    Export = @(
         @{
-            Type = 'global'
-            Name = 'TR'
-            Expr = @('c_const/ewfd.freq', 'abs(ewfd.S21)^2', 'abs(ewfd.S11)^2')
-            Cols = @('lambda_nm', 'T', 'R')
+            Type = 'spectrum'          # 透射/反射谱：CSV(lambda_nm,T,R) + 可选曲线图
+            Name = 'spectrum'
+            Plot = 'false'             # 'true' 时额外导出一张 T/R 曲线 PNG
         }
     )
 }

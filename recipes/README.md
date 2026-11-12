@@ -1,94 +1,62 @@
-# 导出配方（recipes）
+# 导出配方
 
-一个 `.psd1` = 一种导出方案。只描述"跑哪个研究、导哪些量、文件叫什么"，不含逻辑，也不改模型里的参数。
+配方是一个 PowerShell 数据文件（`.psd1`），**必须存成 UTF-8 带 BOM**，否则 PowerShell 5.1 读不了。
 
-## 字段
-
-| 字段 | 必填 | 说明 |
-|---|---|---|
-| `Task` | 是 | 任务名，用于文件名 |
-| `Study` | 是 | 研究标签，如 `std1` |
-| `NameTemplate` | 是 | 文件名模板，见下表 |
-| `Export` | 是 | 导出块数组，每块产出一个 CSV |
-
-### NameTemplate 占位符
-
-| 占位符 | 值 |
-|---|---|
-| `{task}` | `Task` 字段 |
-| `{model}` | 模型文件名（不含 `.mph`） |
-| `{stamp}` | 启动时间 `yyyyMMddHHmm` |
-
-出现未知占位符会直接报错，不会静默生成怪名字。
-
-### Export 块
-
-| 字段 | 说明 |
-|---|---|
-| `Type` | 导出类型，目前支持 `global`（全局标量/表达式） |
-| `Name` | 块名；多于一块时拼进文件名 `_<Name>` |
-| `Expr` | 表达式数组 |
-| `Cols` | 列名数组，数量必须与 `Expr` 一致 |
-
-`global` 的取数口径：对研究里的每一个解逐个求值，按解的顺序写行。参数列会自动加在最前面（来自研究里的 Parametric 步）。
-
-## 案例：现有配方
-
-`ITO-LN-ITO.psd1`：
+## 结构
 
 ```powershell
 @{
-    Task         = 'ITO-LN-ITO'
-    Study        = 'std1'
+    Task         = '任务名'          # 只用于命名
+    Study        = 'std1'            # 要跑的研究标签（GUI 里研究节点右键可看到）
     NameTemplate = '{task}_{model}_{stamp}'
-    Export       = @(
-        @{
-            Type = 'global'
-            Name = 'TR'
-            Expr = @('c_const/ewfd.freq', 'abs(ewfd.S21)^2', 'abs(ewfd.S11)^2')
-            Cols = @('lambda_nm', 'T', 'R')
-        }
-    )
+    Export = @( <块1>, <块2>, ... )
 }
 ```
 
-产出 `ITO-LN-ITO_测试模型_202611121709.csv`：
+`NameTemplate` 里的占位符：`{task}` 配方 Task、`{model}` 模型文件名、`{stamp}` 时间戳 yyyyMMddHHmm。
+一个作业有多个导出块时，文件名是 `<outname>_<块 Name>`。
 
-```
-sim_xy   r     lambda_nm  T        R
-513.000  210   866.000    0.882199 0.0691044
-```
+## 导出块
 
-第一列波长用 `c_const/ewfd.freq` 直接得 nm；透射/反射用 S 参数平方，模型里没有现成的 `ewfd.T` / `ewfd.R`。
-
-## 案例：只导吸收
+### global — 任意表达式的表
 
 ```powershell
-@{
-    Task         = 'LN-abs'
-    Study        = 'std1'
-    NameTemplate = '{task}_{model}_{stamp}'
-    Export       = @(
-        @{ Type = 'global'; Name = 'abs'
-           Expr = @('c_const/ewfd.freq', '1-abs(ewfd.S21)^2-abs(ewfd.S11)^2')
-           Cols = @('lambda_nm', 'A') }
-    )
-}
+@{ Type='global'; Name='TR'
+   Expr = @('c_const/ewfd.freq','abs(ewfd.S21)^2','abs(ewfd.S11)^2')
+   Cols = @('lambda_nm','T','R') }
 ```
 
-## 案例：两个文件
+扫描变量（模型的 `pname`）会自动放在最左两列，行 = 每个解。
+
+### spectrum — 透射/反射谱
 
 ```powershell
-    Export = @(
-        @{ Type = 'global'; Name = 'TR'; Expr = @('c_const/ewfd.freq','abs(ewfd.S21)^2','abs(ewfd.S11)^2'); Cols = @('lambda_nm','T','R') },
-        @{ Type = 'global'; Name = 'E';  Expr = @('ewfd.normE'); Cols = @('normE') }
-    )
+@{ Type='spectrum'; Name='spectrum'; Plot='true' }
 ```
 
-产出 `..._TR.csv` 和 `..._E.csv`。
+列固定为 `lambda_nm,T,R`（`T=|S21|²`、`R=|S11|²`）；`Plot='true'` 再导一张 T/R 曲线 PNG。
 
-## 加新配方
+### image — 单张多切面图
 
-复制一个 `.psd1` 改名，改 `Task`/`NameTemplate`/`Export` 即可，CLI 启动时自动列出 `recipes/` 下所有 `.psd1`。
+```powershell
+@{ Type='image'; Name='slice'; Expr='ewfd.normE'
+   Plane='zx'; At='0'; Width='1200'; Height='900' }
+```
 
-注意：`.psd1` 必须存成 **UTF-8 带 BOM**，否则 PowerShell 5.1 会报"无法分析为 PowerShell 数据文件"。用记事本"另存为 → 编码选 UTF-8 带 BOM"。
+`Plane` 取 `xy` `zx` `yz`；`At` 是切面沿法向的位置（m），一般放在器件中心；`SolNum` 选第几个解，默认 1。
+
+### eigenslice — 每个特征频率三张切面图
+
+```powershell
+@{ Type='eigenslice'; Name='eigen'; Expr='ewfd.normE'
+   Planes=@('xy','zx','yz'); At='0'; MaxModes='20'
+   Width='1000'; Height='800' }
+```
+
+对每个解/模态输出 `<outname>_m<k>_xy.png`、`_zx.png`、`_yz.png`；模型里有多个解节点时文件名带 `_s<j>` 以免互相覆盖。
+要求模型里的特征频率研究已经求解过（驱动跑的是配方的 `Study`，特征频率那一步必须在同一个研究里）。
+
+## 例子
+
+- `ITO-LN-ITO.psd1`：只导透射/反射谱。
+- `示例-全导出.psd1`：四种类型各一个块，抄字段用。
