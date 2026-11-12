@@ -162,6 +162,11 @@ $JobsDir = Join-Path $ScriptDir 'logs'
 $RecipeDir = Join-Path $ScriptDir 'recipes'
 $QueueFile = Join-Path $StateDir 'queue.json'
 $ConfigFile = Join-Path $StateDir 'config.psd1'
+# 首次运行时状态目录可能不存在，先建出来，否则写配置/队列会报
+# Could not find a part of the path ...\state\config.psd1
+try {
+    if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
+} catch { }
 $Stamp     = Get-Date -Format 'yyyyMMddHHmm'
 
 function Show-Help {
@@ -336,7 +341,8 @@ function Read-Config {
 
 function Save-Config {
     param([hashtable]$Cfg)
-    if (-not (Test-Path -LiteralPath $StoreDir)) { New-Item -ItemType Directory -Path $StoreDir -Force | Out-Null }
+    $cfgDir = Split-Path -Parent $ConfigFile
+    if (-not (Test-Path -LiteralPath $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
     $lines = @(
         '@{',
         ('    ComsolBatch  = ' + "'" + $Cfg.ComsolBatch + "'"),
@@ -344,7 +350,11 @@ function Save-Config {
         ('    Models      = ' + "'" + $Cfg.Models + "'"),
         '}'
     )
-    Set-Content -LiteralPath $ConfigFile -Value $lines -Encoding UTF8
+    try {
+        Set-Content -LiteralPath $ConfigFile -Value $lines -Encoding UTF8
+    } catch {
+        throw ('写配置失败: ' + $ConfigFile + ' —— ' + $_.Exception.Message)
+    }
 }
 
 function Start-Setup {
@@ -614,6 +624,8 @@ $ModelList = $modelList
 
 function Save-Queue($q) {
     $jsonText = ConvertTo-Json -InputObject @($q) -Depth 6
+    $qDir = Split-Path -Parent $QueueFile
+    if (-not (Test-Path -LiteralPath $qDir)) { New-Item -ItemType Directory -Path $qDir -Force | Out-Null }
     [System.IO.File]::WriteAllText($QueueFile, $jsonText, (New-Object System.Text.UTF8Encoding($false)))
 }
 
