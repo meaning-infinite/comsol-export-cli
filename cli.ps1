@@ -618,11 +618,19 @@ function Get-Queue {
 
 function Test-JobAlive($procId, $jobDir) {
     if (-not $procId) { return $false }
-    $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $procId) -ErrorAction SilentlyContinue
-    if (-not $p) { return $false }
-    if ($p.Name -ne 'java.exe') { return $false }
+    # 先按 pid 判活（最可靠）；再尽量核对命令行身份
+    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+    if (-not $proc) { return $false }
+    $leaf = Split-Path -Leaf $jobDir
+    $p = $null
+    try { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $procId) -ErrorAction SilentlyContinue } catch { }
+    if (-not $p) { return $true }   # 拿不到命令行时只认 pid，宁可当它在跑
+    if ($p.Name -notlike 'java*') { return $false }
     if ($p.CommandLine -notlike '*ExportDriver*') { return $false }
-    return ($p.CommandLine -like ('*' + $jobDir + '*'))
+    # 网络盘/映射盘的命令行可能与作业目录写法不同，用目录名兜底
+    if ($p.CommandLine -like ('*' + $jobDir + '*')) { return $true }
+    if ($leaf -and $p.CommandLine -like ('*' + $leaf + '*')) { return $true }
+    return $false
 }
 
 function Get-JobStates {

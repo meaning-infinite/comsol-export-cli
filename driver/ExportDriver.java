@@ -87,10 +87,9 @@ public class ExportDriver {
 
     public static void main(String[] args) {
         // 控制台被重定向时 Java 默认不自动 flush，进程被杀就看得到 0 字节日志；这里强制 UTF-8 + 自动 flush
-        try {
-            System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.out), true, "UTF-8"));
-            System.setErr(new PrintStream(new FileOutputStream(FileDescriptor.err), true, "UTF-8"));
-        } catch (Exception ignore) { }
+        // 注意：不要用 new FileOutputStream(FileDescriptor.out) 重建 System.out ——
+        // 某些机器上该句柄不可用，会静默把输出丢光（远程曾出现 driver.log 恒为 0B）。
+        // 编码由 -Dfile.encoding=UTF-8 保证；日志另写 driver.self.log。
         if (args.length < 1) { System.err.println("usage: ExportDriver <job.properties>"); System.exit(2); }
 
         Job j = new Job();
