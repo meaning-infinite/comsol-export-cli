@@ -31,6 +31,7 @@ param(
     [string]$Mode = '',
     [int]$KillJob = 0,
     [switch]$Setup,
+    [switch]$Modules,
     [switch]$Help
 )
 
@@ -217,6 +218,69 @@ function Get-ModelFiles {
         }
     }
     return @($items)
+}
+
+$ModuleDir = Join-Path $ScriptDir 'modules'
+
+function Get-ModuleDefs {
+    # 读 modules\*.psd1，返回 @{ 模块名(小写) = 定义 }
+    $map = @{}
+    if (-not (Test-Path -LiteralPath $ModuleDir)) { return $map }
+    foreach ($f in (Get-ChildItem -LiteralPath $ModuleDir | Where-Object { -not $_.PSIsContainer -and $_.Extension -eq '.psd1' })) {
+        try {
+            $d = Import-PowerShellDataFile -LiteralPath $f.FullName
+        } catch {
+            throw ('模块文件解析失败（需 UTF-8 带 BOM）: ' + $f.Name + ' — ' + $_.Exception.Message)
+        }
+        if (-not $d.Id -or -not $d.Kind) { throw ('模块缺少 Id 或 Kind: ' + $f.Name) }
+        $map[[string]$d.Id] = $d
+    }
+    return $map
+}
+
+function Expand-Blocks {
+    # 把配方的 Use(模块调用) 与 Export(直接写块) 统一展开成导出块数组
+    param($Cfg, [hashtable]$ModuleMap)
+    $blocks = @()
+    if ($Cfg.ContainsKey('Export') -and $Cfg.Export) { $blocks += @($Cfg.Export) }
+    if ($Cfg.ContainsKey('Use') -and $Cfg.Use) {
+        foreach ($u in @($Cfg.Use)) {
+            $id = [string]$u['Module']
+            if ([string]::IsNullOrWhiteSpace($id)) { throw '配方 Use 里有一项缺少 Module' }
+            $key = $id.ToLowerInvariant()
+            if (-not $ModuleMap.ContainsKey($key)) {
+                throw ('没有这个模块: ' + $id + '（可用: ' + (($ModuleMap.Keys | Sort-Object) -join ', ') + '）')
+            }
+            $m = $ModuleMap[$key]
+            $blk = @{}
+            if ($m.Defaults) { foreach ($k in $m.Defaults.Keys) { $blk[$k] = $m.Defaults[$k] } }
+            foreach ($k in $u.Keys) {
+                if ($k -eq 'Module') { continue }
+                if ($k -eq 'Name') { $blk['Name'] = $u['Name']; continue }
+                if ($m.Keys -and ($m.Keys -notcontains $k)) {
+                    throw ('模块 ' + $id + ' 不支持参数 ' + $k + '（可用: ' + ($m.Keys -join ', ') + '）')
+                }
+                $blk[$k] = $u[$k]
+            }
+            $blk['Type'] = [string]$m.Kind
+            if (-not $blk.ContainsKey('Name')) { $blk['Name'] = $id }
+            $blocks += $blk
+        }
+    }
+    return $blocks
+}
+
+function Show-Modules {
+    $map = Get-ModuleDefs
+    if ($map.Count -eq 0) { Write-Host ('  模块目录为空: ' + $ModuleDir); return }
+    $rows = @()
+    foreach ($k in ($map.Keys | Sort-Object)) {
+        $m = $map[$k]
+        $keys = ''
+        if ($m.Keys) { $keys = ($m.Keys | Where-Object { $_ -ne 'Name' }) -join ', ' }
+        $rows += [pscustomobject]@{ Text = ('[{0}] {1}（{2}）  可覆盖: {3}' -f $m.Id, $m.Title, $m.Kind, $keys); Color = 'Gray' }
+    }
+    Write-BoxRows '预制模块' $rows
 }
 
 function Get-Recipes {
@@ -605,6 +669,8 @@ function Start-JobDriver($dir) {
 
 
 if ($Help) { Show-Help; exit 0 }
+
+if ($Modules) { Show-Modules; exit 0 }
 if ($Setup) { Start-Setup; exit 0 }
 
 if ([string]::IsNullOrWhiteSpace($Models)) {
@@ -1153,6 +1219,8 @@ if (-not [string]::IsNullOrWhiteSpace($Recipe)) {
 
 $cfg = $r.Data
 if (-not $cfg.NameTemplate) { throw ('配方缺少 NameTemplate: ' + $r.Name) }
+$blocks = @(Expand-Blocks $cfg (Get-ModuleDefs))
+if ($blocks.Count -eq 0) { throw ('配方没有任何导出内容（Use 或 Export 为空）: ' + $r.Name) }
 
 $jobs = @()
 foreach ($m in $ModelList) {
@@ -1169,10 +1237,10 @@ foreach ($m in $ModelList) {
     $spec.Add('outdir='   + $outDir)
     $spec.Add('modelsdir=' + $Models)
     $spec.Add('outname='  + $n)
-    $spec.Add('blocks='   + $cfg.Export.Count)
+    $spec.Add('blocks='   + $blocks.Count)
     $spec.Add('solve='    + $(if ($doSolve) { '1' } else { '0' }))
-    for ($i = 0; $i -lt $cfg.Export.Count; $i++) {
-        $b = $cfg.Export[$i]
+    for ($i = 0; $i -lt $blocks.Count; $i++) {
+        $b = $blocks[$i]
         $k = $i + 1
         # 通用：任何额外字段都原样写入 job.properties（小写键），
         # 这样新增导出类型不需要再改这里
@@ -1202,7 +1270,7 @@ foreach ($m in $ModelList) {
 Write-Host ''
 if ($DryRun) {
     # 预览模式：只报计划，绝不写队列、绝不启动计算
-    foreach ($cfgBlock in $cfg.Export) { Write-Host ('  导出块: ' + $cfgBlock.Type + ' / ' + $cfgBlock.Name) }
+    foreach ($cfgBlock in $blocks) { Write-Host ('  导出块: ' + $cfgBlock.Type + ' / ' + $cfgBlock.Name) }
     Write-Host ('  预览：共 ' + $jobs.Count + ' 个作业，未写入队列、未启动计算。')
     foreach ($j in $jobs) { Remove-Item -LiteralPath $j.jobDir -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $instFile -Force -ErrorAction SilentlyContinue

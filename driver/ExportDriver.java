@@ -47,6 +47,9 @@ public class ExportDriver {
         HANDLERS.put("spectrum", ExportDriver::exportSpectrum); // 透射/反射谱 CSV + 可选曲线图
         HANDLERS.put("image", ExportDriver::exportImage);     // 单张多切面图
         HANDLERS.put("eigenslice", ExportDriver::exportEigenSlice); // 每个特征频率 3 张切面图
+        HANDLERS.put("slice2d", ExportDriver::exportSlice2D);   // 多切面二维正投影图
+        HANDLERS.put("integral", ExportDriver::exportIntegral); // 线/面积分 -> CSV
+        HANDLERS.put("modes", ExportDriver::exportModes);       // 特征频率数值 -> CSV
     }
 
     static Path CURRENT_JOB_DIR = null;
@@ -344,6 +347,192 @@ public class ExportDriver {
             }
         }
         if (written == 0) throw new IllegalStateException("没有导出任何特征频率切片（检查是否有特征频率解）");
+    }
+
+    // ---------- slice2d：多切面二维正投影 ----------
+    static void exportSlice2D(Job j, int i) throws Exception {
+        String name = j.block(i, "name", "slice2d");
+        String[] planes = j.blockArr(i, "planes");
+        if (planes.length == 0) planes = new String[] { "xy", "zx", "yz" };
+        String expr = j.block(i, "expr", "ewfd.normE").trim();
+        String at = j.block(i, "at", "auto").trim();
+        double[] bb = j.model.component("comp1").geom("geom1").getBoundingBox();
+        String gunit = "m";
+        try { gunit = j.model.component("comp1").geom("geom1").lengthUnit(); } catch (Exception ignore) { }
+        double gf = unitFactor(gunit);
+        for (String raw : planes) {
+            String plane = raw.trim().toLowerCase(Locale.ROOT);
+            if (!plane.equals("xy") && !plane.equals("yz") && !plane.equals("zx")) {
+                throw new IllegalStateException("平面只能是 xy / zx / yz：" + plane);
+            }
+            String dtag = "dsp2d_" + i + "_" + plane;
+            if (!Arrays.asList(j.model.result().dataset().tags()).contains(dtag)) {
+                j.model.result().dataset().create(dtag, "CutPlane");
+            }
+            j.model.result().dataset(dtag).set("data", j.dataset);
+            j.model.result().dataset(dtag).set("quickplane", plane);
+            String pos = at;
+            if (pos.isEmpty() || pos.equalsIgnoreCase("auto")) {
+                if (plane.equals("xy")) pos = Double.toString((bb[2] + bb[5]) / 2 * gf);
+                else if (plane.equals("zx")) pos = Double.toString((bb[1] + bb[4]) / 2 * gf);
+                else pos = Double.toString((bb[0] + bb[3]) / 2 * gf);
+            }
+            j.model.result().dataset(dtag).set(offsetKey(plane), pos);
+
+            String pg = "pg2d_" + i + "_" + plane;
+            if (!Arrays.asList(j.model.result().tags()).contains(pg)) {
+                j.model.result().create(pg, "PlotGroup2D");
+            }
+            j.model.result(pg).set("data", dtag);
+            if (!Arrays.asList(j.model.result(pg).feature().tags()).contains("surf1")) {
+                j.model.result(pg).create("surf1", "Surface");
+            }
+            j.model.result(pg).feature("surf1").set("expr", expr);
+            String title = j.block(i, "title", "").trim();
+            if (!title.isEmpty()) { try { j.model.result(pg).set("title", title + " " + plane); } catch (Exception ignore) { } }
+            j.model.result(pg).run();
+            Path png = j.outdir.resolve(j.outname + "_" + name + "_" + plane + ".png");
+            exportPng(j, i, pg, png);
+            System.out.println("[driver] 写出 " + png);
+        }
+    }
+
+    // ---------- integral：线积分 / 面积分 ----------
+    static void exportIntegral(Job j, int i) throws Exception {
+        String name = j.block(i, "name", "integral");
+        String dim = j.block(i, "dim", "surface").trim().toLowerCase(Locale.ROOT);
+        String ents = j.block(i, "ents", "all").trim();
+        String[] expr = j.blockArr(i, "expr");
+        String[] cols = j.blockArr(i, "cols");
+        if (expr.length == 0) { expr = new String[] { "ewfd.normE" }; }
+        if (cols.length != expr.length) throw new IllegalStateException("expr/cols 数量不匹配");
+        String node = "int_" + i;
+        String type = dim.equals("line") ? "IntLine" : "IntSurface";
+        if (!Arrays.asList(j.model.result().numerical().tags()).contains(node)) {
+            j.model.result().numerical().create(node, type);
+        }
+        j.model.result().numerical(node).set("data", j.dataset);
+        j.model.result().numerical(node).set("expr", expr);
+        j.model.result().numerical(node).set("descr", cols);
+        if (ents.isEmpty() || ents.equalsIgnoreCase("all")) {
+            j.model.result().numerical(node).selection().all();
+        } else {
+            java.util.List<Integer> tmp = new ArrayList<>();
+            for (String s : ents.split(",")) {
+                String x = s.trim();
+                if (!x.isEmpty()) tmp.add(Integer.valueOf(x));
+            }
+            int[] ids = new int[tmp.size()];
+            for (int q = 0; q < ids.length; q++) ids[q] = tmp.get(q);
+            try {
+                j.model.result().numerical(node).selection().set(ids);
+            } catch (Exception e) {
+                throw new IllegalStateException("实体编号不存在（" + dim + "）: " + ents + " — " + e.getMessage());
+            }
+        }
+        List<double[]> found = evalAll(j, node, expr.length, 200);
+        if (found.isEmpty()) throw new IllegalStateException("积分没有取到任何值（检查实体编号与表达式）");
+        double[][] data = new double[expr.length][found.size()];
+        for (int c = 0; c < found.size(); c++)
+            for (int q = 0; q < expr.length; q++) data[q][c] = found.get(c)[q];
+        Path target = csvTarget(j, i, name);
+        writeCsv(target, data, expr, cols);
+        System.out.println("[driver] 写出 " + target);
+    }
+
+    // ---------- modes：每个模态一行数值 ----------
+    static void exportModes(Job j, int i) throws Exception {
+        String name = j.block(i, "name", "modes");
+        String[] expr = j.blockArr(i, "expr");
+        String[] cols = j.blockArr(i, "cols");
+        if (expr.length == 0) { expr = new String[] { "ewfd.freq" }; cols = new String[] { "freq" }; }
+        if (cols.length != expr.length) throw new IllegalStateException("expr/cols 数量不匹配");
+        int maxModes = Integer.parseInt(j.block(i, "maxmodes", "50").trim());
+        String node = "gmod_" + i;
+        if (!Arrays.asList(j.model.result().numerical().tags()).contains(node)) {
+            j.model.result().numerical().create(node, "EvalGlobal");
+        }
+        j.model.result().numerical(node).set("data", j.dataset);
+        j.model.result().numerical(node).set("expr", expr);
+        j.model.result().numerical(node).set("descr", cols);
+        List<double[]> rows = new ArrayList<>();
+        for (String solTag : j.model.sol().tags()) {
+            j.model.result().dataset(j.dataset).set("solution", solTag);
+            for (int k = 1; k <= maxModes; k++) {
+                try {
+                    j.model.result().numerical(node).set("solnum", Integer.toString(k));
+                    double[][] a = j.model.result().numerical(node).getReal();
+                    if (a.length == 0 || a[0].length == 0) break;
+                    double[] row = new double[expr.length + 1];
+                    boolean ok = true;
+                    for (int q = 0; q < expr.length; q++) {
+                        double v = a[q][0];
+                        if (Double.isNaN(v) || Double.isInfinite(v)) { ok = false; break; }
+                        row[q + 1] = v;
+                    }
+                    if (!ok) break;
+                    boolean dup = false;
+                    for (double[] prev : rows) {
+                        boolean same = true;
+                        for (int q = 1; q < row.length; q++) if (prev[q] != row[q]) { same = false; break; }
+                        if (same) { dup = true; break; }
+                    }
+                    if (dup) continue;
+                    row[0] = rows.size() + 1;
+                    rows.add(row);
+                } catch (Exception inner) { break; }
+            }
+        }
+        if (rows.isEmpty()) throw new IllegalStateException("没有取到任何模态（检查解节点与表达式）");
+        String[] allExpr = new String[expr.length + 1];
+        String[] allCols = new String[expr.length + 1];
+        allExpr[0] = "mode"; allCols[0] = "mode";
+        System.arraycopy(expr, 0, allExpr, 1, expr.length);
+        System.arraycopy(cols, 0, allCols, 1, cols.length);
+        double[][] data = new double[allExpr.length][rows.size()];
+        for (int c = 0; c < rows.size(); c++)
+            for (int q = 0; q < allExpr.length; q++) data[q][c] = rows.get(c)[q];
+        Path target = csvTarget(j, i, name);
+        writeCsv(target, data, allExpr, allCols);
+        System.out.println("[driver] 写出 " + target);
+    }
+
+    // 遍历所有解节点与解编号取数，按行去重（积分/模态共用）
+    static List<double[]> evalAll(Job j, String node, int nExpr, int maxSol) throws Exception {
+        List<double[]> found = new ArrayList<>();
+        for (String solTag : j.model.sol().tags()) {
+            j.model.result().dataset(j.dataset).set("solution", solTag);
+            for (int k = 1; k <= maxSol; k++) {
+                try {
+                    j.model.result().numerical(node).set("solnum", Integer.toString(k));
+                    double[][] a = j.model.result().numerical(node).getReal();
+                    if (a.length == 0 || a[0].length == 0) break;
+                    double[] row = new double[nExpr];
+                    boolean ok = true;
+                    for (int q = 0; q < nExpr; q++) {
+                        double v = a[q][0];
+                        if (Double.isNaN(v) || Double.isInfinite(v)) { ok = false; break; }
+                        row[q] = v;
+                    }
+                    if (!ok) continue;
+                    boolean dup = false;
+                    for (double[] prev : found) if (Arrays.equals(prev, row)) { dup = true; break; }
+                    if (!dup) found.add(row);
+                } catch (Exception inner) { break; }
+            }
+        }
+        return found;
+    }
+
+    static double unitFactor(String u) {
+        String s = u == null ? "m" : u.trim().toLowerCase(Locale.ROOT);
+        if (s.equals("nm")) return 1e-9;
+        if (s.equals("um") || s.equals("\u00b5m")) return 1e-6;
+        if (s.equals("mm")) return 1e-3;
+        if (s.equals("cm")) return 1e-2;
+        if (s.equals("km")) return 1e3;
+        if (s.equals("in")) return 0.0254;
+        return 1.0;
     }
 
     static String offsetKey(String plane) {
