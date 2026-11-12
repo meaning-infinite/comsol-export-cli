@@ -22,6 +22,7 @@
 param(
     [switch]$DryRun,
     [switch]$Resume,
+    [switch]$Diag,
     [string]$Models,
     [string]$Recipe,
     [string]$ModelIndex = '',
@@ -959,6 +960,8 @@ function Invoke-Scheduler {
                     $mp = Join-Path $job.jobDir $m
                     if (Test-Path -LiteralPath $mp) { $ev += ($m + '=有') } else { $ev += ($m + '=无') }
                 }
+                $hs = @(Get-ChildItem -LiteralPath $job.jobDir -Filter 'hs_err_pid*.log' -ErrorAction SilentlyContinue)
+                if ($hs.Count -gt 0) { $ev += ('hs_err=' + $hs[0].Name) }
                 foreach ($m in @('driver.log','driver.err')) {
                     $mp = Join-Path $job.jobDir $m
                     if (Test-Path -LiteralPath $mp) { $ev += ($m + '=' + (Get-Item -LiteralPath $mp).Length + 'B') } else { $ev += ($m + '=无') }
@@ -1035,6 +1038,26 @@ if (-not (Test-Path -LiteralPath $javaExe)) { throw ('找不到 Java: ' + $javaE
 $driverDir  = Join-Path $ScriptDir 'driver'
 if (-not (Test-Path -LiteralPath (Join-Path $driverDir 'ExportDriver.class'))) {
     throw ('驱动未编译，先运行: comsolcompile ' + (Join-Path $driverDir 'ExportDriver.java'))
+}
+
+if ($Diag) {
+    $cands = @(Get-ChildItem -LiteralPath $JobsDir -ErrorAction SilentlyContinue |
+               Where-Object { $_.PSIsContainer -and (Test-Path -LiteralPath (Join-Path $_.FullName 'job.properties')) } |
+               Sort-Object LastWriteTime -Descending)
+    if ($cands.Count -eq 0) { Write-Host ('  没有可调试的作业: ' + $JobsDir) -ForegroundColor Yellow; exit 1 }
+    $jd = $cands[0].FullName
+    Write-Host ('  调试运行: ' + (Split-Path $jd -Leaf)) -ForegroundColor Cyan
+    Write-Host ('  java   : ' + $javaExe)
+    Write-Host ('  直接输出到本窗口，崩溃信息会留在屏幕上') -ForegroundColor DarkGray
+    $cpD = (Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir
+    Push-Location $jd
+    & $javaExe '-Xmx4g' '-Dfile.encoding=UTF-8' '-Dsun.stdout.encoding=UTF-8' '-Dsun.stderr.encoding=UTF-8' '-cp' $cpD 'ExportDriver' (Join-Path $jd 'job.properties')
+    $rc = $LASTEXITCODE
+    Pop-Location
+    Write-Host ('  退出码: ' + $rc) -ForegroundColor Yellow
+    $hs = @(Get-ChildItem -LiteralPath $jd -Filter 'hs_err_pid*.log' -ErrorAction SilentlyContinue)
+    if ($hs.Count -gt 0) { Write-Host ('  Java 崩溃日志: ' + $hs[0].FullName) -ForegroundColor Red }
+    exit 0
 }
 
 if ($KillJob -gt 0) {
