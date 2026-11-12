@@ -1028,7 +1028,7 @@ function Invoke-Scheduler {
                 }
                 $hs = @(Get-ChildItem -LiteralPath $job.jobDir -Filter 'hs_err_pid*.log' -ErrorAction SilentlyContinue)
                 if ($hs.Count -gt 0) { $ev += ('hs_err=' + $hs[0].Name) }
-                foreach ($m in @('driver.log','driver.err')) {
+                foreach ($m in @('driver.log','driver.err','driver.self.log')) {
                     $mp = Join-Path $job.jobDir $m
                     if (Test-Path -LiteralPath $mp) { $ev += ($m + '=' + (Get-Item -LiteralPath $mp).Length + 'B') } else { $ev += ($m + '=无') }
                 }

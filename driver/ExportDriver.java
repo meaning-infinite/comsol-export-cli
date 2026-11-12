@@ -53,6 +53,19 @@ public class ExportDriver {
     }
 
     static Path CURRENT_JOB_DIR = null;
+    static Path LOG_FILE = null;
+
+    // 自带日志：不依赖 stdout 重定向（stdout 句柄异常时会全部丢失），每行立即落盘
+    static void log(String s) {
+        System.out.println(s);
+        System.out.flush();
+        if (LOG_FILE != null) {
+            try {
+                Files.write(LOG_FILE, (s + System.lineSeparator()).getBytes(StandardCharsets.UTF_8),
+                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            } catch (Exception ignore) { }
+        }
+    }
 
     // 统一收尾：写 exit 标记（CLI 靠它判断退出码），刷 stdout/stderr，再退出
     static void finish(Path jobDir, int code) {
@@ -86,9 +99,12 @@ public class ExportDriver {
         j.blocks = Integer.parseInt(j.p.getOrDefault("blocks", "0").trim());
         j.jobDir = Paths.get(args[0]).toAbsolutePath().getParent();
         CURRENT_JOB_DIR = j.jobDir;
+        LOG_FILE = j.jobDir.resolve("driver.self.log");
+        log("[driver] 启动 pid=" + ProcessHandle.current().pid() + " java=" + System.getProperty("java.version"));
         try {
             Files.write(j.jobDir.resolve("started"),
                     ("pid=" + ProcessHandle.current().pid()).getBytes(StandardCharsets.UTF_8));
+            log("[driver] 已写 started 标记");
         } catch (IOException ignore) { }
 
         if (modelPath == null || !Files.isRegularFile(Paths.get(modelPath))) {
@@ -115,8 +131,11 @@ public class ExportDriver {
             tmp = Files.createTempDirectory("comsol-export-");
             Path copy = tmp.resolve("model.mph");
             Files.copy(Paths.get(modelPath), copy, StandardCopyOption.REPLACE_EXISTING);
+            log("[driver] 已拷模型到临时目录");
 
+            log("[driver] 初始化 COMSOL (initStandalone)…");
             ModelUtil.initStandalone(false);
+            log("[driver] COMSOL 初始化完成");
 
             String solveFlag = j.p.getOrDefault("solve", "1").trim();
             boolean doSolve = !("0".equals(solveFlag) || "false".equalsIgnoreCase(solveFlag));
@@ -149,7 +168,9 @@ public class ExportDriver {
                 System.out.flush();
                 long t0 = System.currentTimeMillis();
                 try {
-                    model.study(j.study).run();
+                    log("[driver] 开始求解 (study=" + j.study + ")…");
+            model.study(j.study).run();
+            log("[driver] 求解结束");
                 } catch (Exception e) {
                     System.err.println("求解失败: " + e.getMessage()); finish(j.jobDir, 3);
                 }
