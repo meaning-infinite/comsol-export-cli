@@ -131,16 +131,29 @@ function Show-StatusLine([string]$text, [string]$fg, [string]$bg) {
         if ($sig -ne $script:LiveSig) { $script:LiveSig = $sig; Write-Host ('  ' + $text) }
         return
     }
-    $bw = 98
-    try { $bw = [math]::Max(40, [Console]::WindowWidth - 2) } catch { }
+    $hw = 80
+    try { $hw = [Console]::WindowWidth } catch { }
+    if ($hw -lt 30) { $hw = 80 }
+    # 每次先按窗宽算，发现换行（光标下移）就永久收窄，避免"刷一行变两行"
+    if (-not $script:StatusW -or $script:StatusW -gt ($hw - 1)) { $script:StatusW = $hw - 2 }
+    $bw = $script:StatusW
     $line = '▌ ' + $text + ' '
-    for ($n = 0; $n -lt 200 -and (Get-TextWidth $line) -gt ($bw - 2) -and $line.Length -gt 2; $n++) {
+    for ($n = 0; $n -lt 300 -and (Get-TextWidth $line) -gt ($bw - 2) -and $line.Length -gt 2; $n++) {
         $line = $line.Substring(0, $line.Length - 1)
     }
     $padN = $bw - 1 - (Get-TextWidth $line)
     if ($padN -lt 0) { $padN = 0 }
     $out = $line + (' ' * $padN) + '▐'
-    try { Write-Host ("`r" + $out) -NoNewline -ForegroundColor $fg -BackgroundColor $bg } catch { }
+    try {
+        $topBefore = [Console]::CursorTop
+        [Console]::Write("`r" + $out)
+        if ([Console]::CursorTop -gt $topBefore) {
+            $script:StatusW = [math]::Max(30, $script:StatusW - 4)
+            try { [Console]::SetCursorPosition(0, $topBefore) } catch { }
+        }
+    } catch {
+        try { Write-Host ("`r" + $out) -NoNewline } catch { }
+    }
 }
 
 function Clear-LiveBox {
@@ -625,11 +638,13 @@ function Test-JobAlive($procId, $jobDir) {
     $p = $null
     try { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $procId) -ErrorAction SilentlyContinue } catch { }
     if (-not $p) { return $true }   # 拿不到命令行时只认 pid，宁可当它在跑
+    $cl = [string]$p.CommandLine
+    if (-not $cl) { return $true }
     if ($p.Name -notlike 'java*') { return $false }
-    if ($p.CommandLine -notlike '*ExportDriver*') { return $false }
+    if ($cl -notlike '*ExportDriver*') { return $false }
     # 网络盘/映射盘的命令行可能与作业目录写法不同，用目录名兜底
-    if ($p.CommandLine -like ('*' + $jobDir + '*')) { return $true }
-    if ($leaf -and $p.CommandLine -like ('*' + $leaf + '*')) { return $true }
+    if ($cl -like ('*' + $jobDir + '*')) { return $true }
+    if ($leaf -and $cl -like ('*' + $leaf + '*')) { return $true }
     return $false
 }
 
@@ -761,7 +776,7 @@ function Start-OneJob($job) {
     $logFile = Join-Path $job.jobDir 'driver.log'
     $errFile = Join-Path $job.jobDir 'driver.err'
     $cp = (Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir
-    $argStr = '-Xmx4g -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
+    $argStr = '-Xmx4g -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
     # 启动前把实际用的路径写进 launch.txt，出问题能查
     $launchInfo = @(
         'time=' + (Get-Date).ToString('o'),
@@ -795,22 +810,45 @@ function Start-OneJob($job) {
 }
 
 function Stop-OneJob($job) {
-    # 只终止本 CLI 启动、且命令行能对上作业目录的那一个进程（含子进程）
-    if (-not (Test-JobAlive $job.pid $job.jobDir)) { return '进程已不在（可能已自行结束）' }
-    $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $job.pid) -ErrorAction SilentlyContinue
-    if (-not $p) { return '进程已不在（可能已自行结束）' }
-    $cmd = [string]$p.CommandLine
-    if ($p.Name -ne 'java.exe' -or $cmd -notlike '*ExportDriver*' -or $cmd -notlike ('*' + $job.jobDir + '*')) {
-        return '进程身份与本作业不符，已拒绝终止'
+    # 目标 = 记录的 pid + 命令行里带本作业目录/目录名的 java 进程（不再先判活，避免误判后不杀）
+    $leaf = Split-Path -Leaf $job.jobDir
+    $targets = @()
+    if ($job.pid -and [int]$job.pid -gt 0) { $targets += [int]$job.pid }
+    try {
+        foreach ($pp in @(Get-CimInstance Win32_Process -Filter "Name like '%java%'" -ErrorAction SilentlyContinue)) {
+            $cl = [string]$pp.CommandLine
+            if (-not $cl) { continue }
+            if ($cl -like ('*' + $job.jobDir + '*') -or ($leaf -and $cl -like ('*' + $leaf + '*'))) {
+                $targets += [int]$pp.ProcessId
+            }
+        }
+    } catch { }
+    $targets = @($targets | Sort-Object -Unique)
+    if ($targets.Count -eq 0) { return '进程已不在（可能已自行结束）' }
+
+    $killed = @()
+    foreach ($tpid in $targets) {
+        $pp = Get-Process -Id $tpid -ErrorAction SilentlyContinue
+        if (-not $pp) { continue }
+        if ($pp.ProcessName -notlike 'java*') { continue }
+        $tkOut = (& taskkill.exe /PID $tpid /T /F 2>&1 | Out-String).Trim()
+        $script:LastKillMsg = $tkOut
+        $killed += $tpid
     }
-    & taskkill.exe /PID $job.pid /T /F | Out-Null
-    Start-Sleep -Milliseconds 400
-    if (Test-JobAlive $job.pid $job.jobDir) { return '终止失败，进程仍在（可看任务管理器确认）' }
+    if ($killed.Count -eq 0) { return '进程已不在（可能已自行结束）' }
+    # taskkill 返回成功不代表进程已消失，最多等 5 s
+    for ($w = 0; $w -lt 20; $w++) {
+        $still = @($killed | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if ($still.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    $still = @($killed | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($still.Count -gt 0) { return ('终止失败，进程仍在: ' + ($still -join ',') + ' | ' + $script:LastKillMsg) }
     $job.status = 'killed'
     $marker = Join-Path $job.jobDir 'killed'
     [System.IO.File]::WriteAllText($marker, (Get-Date).ToString('o'), (New-Object System.Text.UTF8Encoding($false)))
     $note = Clear-JobLock $job
-    return ('已终止；模型锁: ' + $note)
+    return ('已终止 PID ' + ($killed -join ',') + '；模型锁: ' + $note)
 }
 
 function Invoke-KillMenu {
@@ -1057,7 +1095,7 @@ function Invoke-Scheduler {
                 foreach ($f in @('driver.err', 'driver.log')) {
                     $fp = Join-Path $job.jobDir $f
                     if (-not (Test-Path -LiteralPath $fp)) { continue }
-                    $tail = @(Get-Content -LiteralPath $fp -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch '^\s+at ' } | Select-Object -Last 3)
+                    $tail = @(Get-Content -LiteralPath $fp -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch '^\s+at ' } | Select-Object -Last 3)
                     foreach ($ln in $tail) { Write-Host ('      ' + $f + ': ' + $ln.Trim()) -ForegroundColor DarkGray }
                 }
             } elseif ($job.status -eq 'killed') {
@@ -1125,7 +1163,7 @@ if ($Diag) {
     Write-Host ('  直接输出到本窗口，崩溃信息会留在屏幕上') -ForegroundColor DarkGray
     $cpD = (Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir
     Push-Location $jd
-    & $javaExe '-Xmx4g' '-Dfile.encoding=UTF-8' '-Dsun.stdout.encoding=UTF-8' '-Dsun.stderr.encoding=UTF-8' '-cp' $cpD 'ExportDriver' (Join-Path $jd 'job.properties')
+    & $javaExe '-Xmx4g' '-Dfile.encoding=UTF-8' '-Dsun.stdout.encoding=UTF-8' '-Dsun.stderr.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' '-cp' $cpD 'ExportDriver' (Join-Path $jd 'job.properties')
     $rc = $LASTEXITCODE
     Pop-Location
     Write-Host ('  退出码: ' + $rc) -ForegroundColor Yellow
