@@ -52,6 +52,12 @@ public class ExportDriver {
         HANDLERS.put("modes", ExportDriver::exportModes);       // 特征频率数值 -> CSV
     }
 
+    static String stackOf(Throwable t) {
+        java.io.StringWriter sw = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(sw));
+        return sw.toString();
+    }
+
     static Path CURRENT_JOB_DIR = null;
     static Path LOG_FILE = null;
 
@@ -167,12 +173,15 @@ public class ExportDriver {
                 System.out.println("[driver] 求解研究: " + j.study);
                 System.out.flush();
                 long t0 = System.currentTimeMillis();
+                log("[driver] heap max=" + (Runtime.getRuntime().maxMemory() / 1048576) + "MB");
                 try {
                     log("[driver] 开始求解 (study=" + j.study + ")…");
-            model.study(j.study).run();
-            log("[driver] 求解结束");
-                } catch (Exception e) {
-                    System.err.println("求解失败: " + e.getMessage()); finish(j.jobDir, 3);
+                    model.study(j.study).run();
+                    log("[driver] 求解结束");
+                } catch (Throwable e) {
+                    log("[driver] 求解异常: " + e);
+                    log(stackOf(e));
+                    finish(j.jobDir, 3);
                 }
                 System.out.println("[driver] 求解完成，耗时 " + (System.currentTimeMillis() - t0) / 1000 + " s");
                 System.out.flush();
@@ -215,7 +224,9 @@ public class ExportDriver {
             Files.write(mkExported, "ok".getBytes(StandardCharsets.UTF_8));
             System.out.println("[driver] 全部完成");
             finish(j.jobDir, 0);
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            log("[driver] 驱动异常: " + e);
+            log(stackOf(e));
             System.err.println("驱动异常: " + e);
             e.printStackTrace();
             finish(j.jobDir, 4);
