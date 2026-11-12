@@ -87,5 +87,6 @@ set COMSOL=D:\COMSOL\COMSOL64\Multiphysics
 
 ## 文档
 
-- 接口与扩展指南：[docs/API.md](docs/API.md)
+- 项目接口与扩展指南：[docs/API.md](docs/API.md)
+- COMSOL Java API 笔记：[docs/COMSOL-API.md](docs/COMSOL-API.md)
 - 配方字段：[recipes/README.md](recipes/README.md)

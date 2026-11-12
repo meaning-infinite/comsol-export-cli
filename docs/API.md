@@ -1,6 +1,6 @@
 # COMSOL 导出 CLI · API 文档
 
-> 最后更新：2026-11-12 · 对应 v1.1
+> 最后更新：2026-11-12 · 对应 v1.1 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
 > 接口与内部约定的参考手册，随版本持续更新。使用说明见 [README.md](../README.md)，配方写法见 [recipes/README.md](../recipes/README.md)。
 
 ## 1. 分层与调用链
@@ -179,28 +179,9 @@ static void exportFoo(Job j, int i) throws Exception {
 | `writeCsv(...)` | 写 CSV（先写 `.part` 再改名） |
 | `offsetKey(plane)` | 平面 → 偏移属性名映射 |
 
-## 6. COMSOL API 要点与坑
+## 6. 运行时状态
 
-| 项 | 结论 |
-|---|---|
-| 场表达式 | 模型里没有 `ewfd.T`/`ewfd.R`；用 `abs(ewfd.S21)^2`（T）、`abs(ewfd.S11)^2`（R） |
-| 波长 | `c_const/ewfd.freq`，有的版本直接给 nm，有的给 m，需按量级判断 |
-| `EvalGlobal.getReal()` | 形状 `[表达式][解]`；解分散在多个 sol 节点，需逐 sol × 逐 solnum 取并按行去重 |
-| `solnum` | `set("solnum","-1"/"all")` 不合法；只能 1..N 逐个试，越界抛异常即停 |
-| 数据集 | `model.result().dataset().create(tag,"Solution")`，再 `set("solution", solTag)` |
-| 切片平面 | `quickplane` 只接受 `xy` `yz` `zx`（没有 `xz`） |
-| 切片位置 | `quickx` `quicky` `quickz`，单位 m |
-| 图片尺寸 | `size` 只接受 `current/manualweb/manualprint/presentation`；像素尺寸用 `size=manualweb` + `unit=px` + `width/height` |
-| 绘图组 | `model.result().create(tag,"PlotGroup3D")`，子节点用 `feature("sli1")` 访问 |
-| 1D 曲线 | `PlotGroup1D` + `Global`（`expr`/`descr` 为数组） |
-| 求解进度 | standalone 拿不到（`showProgress(true)` 报 `No toolkit factory 'swing' found`），CLI 不显示百分比 |
-| 编译 | 带内部类必须用 COMSOL 自带 `javac`；`comsolcompile` 只生成主类，运行时报 `NoClassDefFoundError: ExportDriver$Handler` |
-| 路径 | `-cp` 含空格时整条命令要加引号，否则 `ClassNotFoundException: programs\script\driver` |
-| 版本 | 模型由更高版本保存时驱动抛中文提示，需 `-Setup` 选对 COMSOL |
-
-## 7. 运行时状态
-
-### 7.1 队列 queue.json
+### 6.1 队列 queue.json
 
 `%LOCALAPPDATA%\comsol-export\state\queue.json`，数组，每项：
 
@@ -216,7 +197,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | `status` | `pending` `running` `done` `failed` `killed` `disconnected` |
 | `duration` | 用时（秒），用于估算 |
 
-### 7.2 标记文件
+### 6.2 标记文件
 
 | 文件 | 写入方 | 含义 |
 |---|---|---|
@@ -226,11 +207,11 @@ static void exportFoo(Job j, int i) throws Exception {
 | `killed` | CLI | 被人工终止 |
 | `counted` | CLI | 已计入历史累计，防重复 |
 
-### 7.3 历史统计
+### 6.3 历史统计
 
 `%LOCALAPPDATA%\comsol-export\state\stats.json`：`{ "exported": 12 }`。
 
-## 8. 变更记录
+## 7. 变更记录
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
@@ -239,8 +220,12 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.1 | 2026-11-12 | 驱动改 handler 分派；新增 `spectrum` / `image` / `eigenslice`；`-DryRun` 不再真正执行 |
 | v1.2 | 2026-11-12 | 新增 `-Mode export`（只导出已求解模型，job.properties 的 `solve=0`）；模型列表支持 `.lnk` 快捷方式（显示快捷方式名、按其命名） |
 
-## 9. 待验证 / 已知缺口
+## 8. 待验证 / 已知缺口
 
 - `eigenslice` 的“单解节点内多模态”枚举尚未在真实特征频率模型上跑过（测试模型只有波长解，用 4 个解节点代替验证）。
 - `spectrum` 曲线图横轴取默认（未强制设为波长），多条解曲线会画在同一张图上。
 - `MaxParallel > 1` 只做过串行实测，并发时的锁竞争未实测。
+
+## 附：COMSOL 官方 API
+
+驱动里用到的 COMSOL Java API、踩过的坑与验证记录单独成文：[COMSOL-API.md](COMSOL-API.md)。
