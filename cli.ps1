@@ -133,7 +133,7 @@ function Show-StatusLine([string]$text, [string]$fg, [string]$bg) {
     }
     $hw = 80
     try { $hw = [Console]::WindowWidth } catch { }
-    if ($hw -lt 30) { $hw = 80 }
+    if ($hw -lt 62) { $hw = 80 }
     # 每次先按窗宽算，发现换行（光标下移）就永久收窄，避免"刷一行变两行"
     if (-not $script:StatusW -or $script:StatusW -gt ($hw - 1)) { $script:StatusW = $hw - 2 }
     $bw = $script:StatusW
@@ -148,7 +148,7 @@ function Show-StatusLine([string]$text, [string]$fg, [string]$bg) {
         $topBefore = [Console]::CursorTop
         [Console]::Write("`r" + $out)
         if ([Console]::CursorTop -gt $topBefore) {
-            $script:StatusW = [math]::Max(30, $script:StatusW - 4)
+            $script:StatusW = [math]::Max(60, $script:StatusW - 4)
             try { [Console]::SetCursorPosition(0, $topBefore) } catch { }
         }
     } catch {
@@ -711,27 +711,6 @@ if ($Models -and ((Split-Path -Leaf $Models) -eq 'model')) {
 }
 
 
-$jobs = @(Get-JobStates)
-if ($jobs.Count -gt 0) {
-    Write-Host ''
-    $rows = @()
-    for ($i = 0; $i -lt $jobs.Count; $i++) {
-        $rows += [pscustomobject]@{ Text = ('[{0}] {1,-4}  {2}' -f ($i + 1), $jobs[$i].State, $jobs[$i].Name); Color = $jobs[$i].Color }
-    }
-    Write-BoxRows '已有作业（可重跑导出）' $rows
-    $broken = @($jobs | Where-Object { -not $_.Exported })
-    if ($broken.Count -gt 0) {
-        $pick = Read-Host '  重跑某个作业的导出? 输入序号, 回车跳过'
-        if ($pick -match '^\d+$') {
-            $idx = [int]$pick
-            if ($idx -ge 1 -and $idx -le $jobs.Count) {
-                $pidNew = Start-JobDriver $jobs[$idx - 1].Dir
-                Write-Host ('  已启动导出 (PID ' + $pidNew + ')：' + $jobs[$idx - 1].Name) -ForegroundColor Green
-            }
-        }
-    }
-    Write-Host ''
-}
 $head = @(
     ('模型目录 : ' + $Models),
     ('配方目录 : ' + $RecipeDir)
@@ -1026,10 +1005,10 @@ function Invoke-Scheduler {
                 if ($d.Stage -eq '导出中') { $fg = 'Black'; $bg = 'DarkCyan' }
                 elseif ($d.Stage -eq '求解中') { $fg = 'Black'; $bg = 'DarkYellow' }
                 else { $fg = 'White'; $bg = 'DarkGray' }
-                $body = ('【' + $d.Stage + '】作业 ' + $ord + '/' + [math]::Max(1, $total) + ' · ' + $nm + ' · 已用 ' + (Format-Elapsed $d.Elapsed) + ' · Q 退出监视  K 终止作业')
+                $body = ('【' + $d.Stage + '】已用 ' + (Format-Elapsed $d.Elapsed) + ' · 作业 ' + $ord + '/' + [math]::Max(1, $total) + ' · ' + $nm + ' · Q 退出监视  K 终止作业')
                 Show-StatusLine $body $fg $bg
             } else {
-                $body = ('【调度中】已完成 ' + $fin.Count + '/' + [math]::Max(1, $total) + ' · 已用 ' + (Format-Elapsed $el.TotalSeconds) + ' · Q 退出监视  K 终止作业')
+                $body = ('【调度中】已用 ' + (Format-Elapsed $el.TotalSeconds) + ' · 完成 ' + $fin.Count + '/' + [math]::Max(1, $total) + ' · Q 退出监视  K 终止作业')
                 Show-StatusLine $body 'White' 'DarkGray'
             }
 
