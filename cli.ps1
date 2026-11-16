@@ -146,13 +146,13 @@ function Show-StatusLine([string]$text, [string]$fg, [string]$bg) {
     $out = $line + (' ' * $padN) + '▐'
     try {
         $topBefore = [Console]::CursorTop
-        [Console]::Write("`r" + $out)
+        Write-Host ("`r" + $out) -NoNewline -ForegroundColor $fg -BackgroundColor $bg
         if ([Console]::CursorTop -gt $topBefore) {
             $script:StatusW = [math]::Max(60, $script:StatusW - 4)
             try { [Console]::SetCursorPosition(0, $topBefore) } catch { }
         }
     } catch {
-        try { Write-Host ("`r" + $out) -NoNewline } catch { }
+        try { Write-Host ("`r" + $out) -NoNewline -ForegroundColor $fg -BackgroundColor $bg } catch { }
     }
 }
 

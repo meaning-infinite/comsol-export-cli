@@ -1,0 +1,48 @@
+{
+ "ahPort": [
+  "1",
+  "0",
+  "0"
+ ],
+ "lport": {
+  "PortType": "UserDefined",
+  "PortName": "1",
+  "PortExcitation": "on",
+  "TerminalType": "Cable",
+  "Zref": "50[ohm]",
+  "hPort": "10[um]",
+  "wPort": "7[um]",
+  "SourceType": "Voltage",
+  "V0": "1[V]",
+  "AdjustZref": "1",
+  "ElectricFieldDirection": "DefaultModeFieldDirection"
+ },
+ "probes": [
+  "emw_lport1_probe"
+ ],
+ "probe_created": "ERR Exception:\r\n\tcom.comsol.util.exceptions.FlException: 在这个情景中不能创建本操作。\r\nMessages:\r\n\t在这个情景中不能创建本操作。\r\n\t- 运算: LumpedPort\r\n",
+ "rfadapt": {
+  "plist": "5[GHz]",
+  "maxAdaptationNumber": "30",
+  "dampingFactor": "0.05",
+  "errestandadap": "adaption",
+  "errestimerrest": "goalerrest",
+  "meshadaptmethod": "rebuild",
+  "meshRefinement": "physicscontrolled",
+  "goalorientedtermination": "manual",
+  "goalorientedterminationtolerance": "0.02",
+  "goalorientedtolerancetype": "absolute",
+  "savesolsref": "on"
+ },
+ "outputmap": "emw, physics, frame:spatial1, physics, frame:material1, physics, comp1, physics",
+ "awe": {
+  "punit": "GHz",
+  "plist": "range(0.001,1,8)",
+  "rtol": "0.01",
+  "sweeptype": "sparse",
+  "preusesol": "auto"
+ },
+ "problems": [],
+ "saved_size": 664028,
+ "java_size": 55021
+}

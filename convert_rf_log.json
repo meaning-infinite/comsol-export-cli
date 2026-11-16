@@ -1,0 +1,160 @@
+{
+ "server_up": true,
+ "client": "connected",
+ "phase0_probe": {
+  "PerfectElectricConductor": "OK",
+  "Scattering": "OK",
+  "Port": "OK",
+  "LumpedPort": "OK",
+  "TransitionBoundaryCondition": "OK",
+  "PerfectlyMatchedLayer": "ERR Exception:\r\n\tcom.comsol.util.exceptions.FlException: 未知特征 ID: PerfectlyMatchedLayer。\r\nMessages:\r\n\t未知特征 ID: PerfectlyMatc",
+  "emw_default_feats": [
+   "wee1",
+   "pec1",
+   "init1",
+   "dcont1",
+   "pec_t",
+   "scat_t",
+   "port_t",
+   "lport_t",
+   "tbc_t"
+  ],
+  "geom_PML": "ERR Exception:\r\n\tcom.comsol.util.exceptions.FlException: 所需的几何操作未知或不能在该上下文中创建。\r\nMessages:\r\n\t所需的几何操作未知或不能在该上下文中创建。\r\n\t- 运算: PerfectlyMatchedLayer\r\n",
+  "lport_enums": {
+   "PortType": [
+    "Coaxial",
+    "MultiElementUniform",
+    "ReferenceEdgeControlled",
+    "Uniform",
+    "UserDefined",
+    "Via"
+   ],
+   "TerminalType": [
+    "Cable",
+    "Current",
+    "Circuit"
+   ],
+   "SourceType": [
+    "Voltage",
+    "Power"
+   ],
+   "ElectricFieldDirection": [
+    "DefaultModeFieldDirection",
+    "ReverseModeFieldDirection"
+   ],
+   "PortExcitation": [
+    "on",
+    "off"
+   ]
+  },
+  "lport_defaults": {
+   "PortType": "Uniform",
+   "TerminalType": "Cable",
+   "SourceType": "Voltage",
+   "Zref": "50[ohm]",
+   "hPort": "0",
+   "wPort": "0",
+   "V0": "1[V]",
+   "I0": "1[A]",
+   "P0": "1[W]",
+   "ElectricFieldDirection": "DefaultModeFieldDirection",
+   "AdjustZref": "1",
+   "PortExcitation": "off",
+   "PortName": "2"
+  },
+  "rfstep": {
+   "maxAdaptationNumber": "10",
+   "dampingFactor": "0.1",
+   "plist": "1[GHz]",
+   "errestandadap": "adaption",
+   "goalorientedterminationtolerance": "0.02",
+   "goalorientedtolerancetype": "absolute",
+   "goalorientedtermination": "manual",
+   "meshRefinement": "physicscontrolled",
+   "meshRefinementType": "domain",
+   "stol": "0.001",
+   "usestol": "off",
+   "adaptionInGeometry": "geom1",
+   "enforceLinearElement": "on",
+   "errorEstType": "n/a"
+  },
+  "maxadapt_allowed": "ERR 'NoneType' object is not iterable",
+  "termination_allowed": [
+   "off",
+   "auto",
+   "manual"
+  ],
+  "awe": {
+   "punit": "GHz",
+   "plist": "range(1[GHz],5[MHz],5[GHz])",
+   "rtol": "0.01",
+   "sweeptype": "sparse",
+   "preusesol": "no",
+   "usertol": "on"
+  },
+  "outputmap": "emw, physics, frame:spatial1, physics, frame:material1, physics, comp1, physics",
+  "outputselectionmap": "emw, , frame:spatial1, , frame:material1, , comp1, ",
+  "outputmap_entries": "ERR 'com.comsol.clientapi.impl.StudyFeatureClient' object has no attribute 'getEntry'",
+  "S11_expr_probe": "电磁波，频域"
+ },
+ "loaded": "Au_pad_LN_SiO2_v1",
+ "phys_before": [
+  "ewfd"
+ ],
+ "emw_domains": [
+  1,
+  2,
+  3,
+  4,
+  7,
+  8,
+  9,
+  10
+ ],
+ "create_emw": "OK",
+ "add_boundaries": {
+  "pec_faces": 24,
+  "scat_faces": 11,
+  "scat_incident_default": "NoIncidentField",
+  "lport_faces": 3
+ },
+ "port_settings": {
+  "PortName": "1",
+  "PortExcitation": "on",
+  "Zref": "50[ohm]",
+  "PortType": "UserDefined",
+  "hPort": "10[um]",
+  "wPort": "7[um]",
+  "TerminalType": "Cable",
+  "SourceType": "Voltage",
+  "V0": "1[V]",
+  "I0": "1[A]",
+  "P0": "1[W]",
+  "ElectricFieldDirection": "DefaultModeFieldDirection",
+  "AdjustZref": "1"
+ },
+ "studies": {
+  "goalorientedterminationtolerance": "0.02",
+  "goalorientedtolerancetype": "relative",
+  "step_props": {
+   "plist": "5[GHz]",
+   "maxAdaptationNumber": "20",
+   "dampingFactor": "0.05"
+  },
+  "outputmap": "set",
+  "awe": {
+   "punit": "GHz",
+   "plist": "range(0.001,1,8)",
+   "rtol": "0.01",
+   "sweeptype": "sparse",
+   "preusesol": "auto"
+  }
+ },
+ "checks": "ERR 'com.comsol.clientapi.impl.ModelClient' object has no attribute 'problems'",
+ "save_v2": {
+  "size": 657102
+ },
+ "export_java": {
+  "java_size": 53028
+ }
+}
