@@ -94,8 +94,20 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 @{ Type='bigtable'; Name='bigtable'; Params='all'; AbsDomains='auto'; AbsExpr='ewfd.Qh' }
 ```
 
-一次给全：`<全局参数>_val`（模型参数表全量，自动）+ `lambda_nm, freq_THz, T00, R00, T_total, R_total, phase_S21_rad, A_1-T-R, Pin_W` + 每个吸收域的 `Qrh_d<n>_W / A_d<n>_pct` + 合计两列。
-`AbsDomains='auto'` 取材料名含 ITO 的所有域；没有吸收域时写 `none`。
+一次给全（表头全英文，无中文）：
+- `<参数名>_val`：模型全局参数表全量，自动成列（参数改了不用改配方）
+- `lambda_nm freq_THz T00 R00 T_total R_total phase_S21_rad A_1-T-R Pin_W`
+- `Qrh_ITO_<layer>_W` / `A_ITO_<layer>_pct`：每个吸收域一组；`<layer>` 由 `AbsDomains` 决定
+- `Qrh_ITO_total_W` / `A_ITO_total_pct`
+
+`AbsDomains` 三种写法：
+| 写法 | 效果 |
+|---|---|
+| `auto`（默认） | 取材料名含 ITO 的域，按 z 中心自动命名：2 个→`lower/upper`，3 个→`lower/hole/upper` |
+| `3:lower,6:upper,9:hole` | 显式指定域号与名字（域号在 GUI 里看） |
+| `none` | 不做吸收分解 |
+
+`Params` 三种写法：`all`（默认，全部参数）/ `none` / `sim_xy,r`（指定名）。
 
 ### image — 单张多切面图（旧）
 

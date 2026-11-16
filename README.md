@@ -59,7 +59,7 @@
 | `slice2d` | 每个平面一张**二维正投影** PNG（xy→俯视、zx→侧视、yz→正视） | `Expr` `Planes` `At` `Width` `Height` `Title` |
 | `modes` | 每个模态一行数值 CSV（特征频率等） | `Expr` `Cols` `MaxModes` |
 | `integral` | 线/面积分数值 CSV | `Dim`(surface/line) `Ents`(all 或 `3,4,17`) `Expr` `Cols` |
-| `bigtable` | 通用原始大表：全局参数 + 谱线 + 各域吸收，一文件全给 | `Params`(all/none/名单) `AbsDomains`(auto/编号) `AbsExpr` |
+| `bigtable` | 通用原始大表：全局参数 + 谱线 + 各域吸收，一文件全给（表头全英文） | `Params`(all/none/名单) `AbsDomains`(auto/编号:名字) `AbsExpr` |
 
 - 参数没写在模块 `Keys` 里会直接报错，避免拼错字段悄悄失效。
 - 老的 `Export = @(@{Type=...})` 写法仍然可用，两种可以混写。

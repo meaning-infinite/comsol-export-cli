@@ -156,6 +156,14 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 字段：`Expr`（默认 `ewfd.freq`）、`Cols`、`MaxModes`（默认 50）。
 实现：`EvalGlobal` + 逐 sol 逐 solnum，遇异常即停；输出列 `mode` + 指定列。对波长解模型也能用（每个解一行，值相同则去重）。
 
+### 4.10 bigtable — 通用原始大表（2026-11）
+
+一次导出：全局参数（`<name>_val`，自动）+ 谱线 9 列 + 各吸收域 `Qrh/A` 两列 + 合计两列。
+- 参数列来自 `model.param().varnames()`，模型参数变了列自动变（`Params=all|none|名单`）。
+- 吸收域：`AbsDomains=auto` 时按材料名含 ITO 收集域，再按 `IntVolume ∫z dV / ∫1 dV` 的 z 中心排序命名（2 个 lower/upper，3 个 lower/hole/upper）；也可显式 `3:lower,6:upper,9:hole`。
+- 吸收百分比 = `100 × ∫AbsExpr dV / ewfd.Pin`；`T00/R00=|S21|²/|S11|²`（0 阶），`T_total/R_total=ewfd.Ttotal/Rtotal`（含衍射级）。
+- 表头全 ASCII，避免远程控制台/Excel 乱码。
+
 ### 4.9 预制模块系统（2026-11）
 
 `script/modules/<id>.psd1` 每个文件一个模块：

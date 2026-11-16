@@ -482,10 +482,9 @@ public class ExportDriver {
 
         // 1) 全局参数表达式
         List<String> pExps = new ArrayList<>();
-        java.util.List<String> pNames = new ArrayList<>();
+        List<String> pNames = new ArrayList<>();
         if (!paramSpec.equals("none")) {
-            String[] vn = j.model.param().varnames();
-            for (String v : vn) {
+            for (String v : j.model.param().varnames()) {
                 if (paramSpec.equals("all") || Arrays.asList(split(paramSpec)).contains(v.toLowerCase(Locale.ROOT))) {
                     pExps.add(v); pNames.add(v + "_val");
                 }
@@ -497,19 +496,47 @@ public class ExportDriver {
         String[] specCols = { "lambda_nm", "freq_THz", "T00", "R00", "T_total", "R_total",
                 "phase_S21_rad", "A_1-T-R", "Pin_W" };
 
-        // 2) 吸收域（默认取材料名含 ITO 的所有域）
-        List<Integer> doms = new ArrayList<>();
+        // 2) 吸收域：编号 + 英文名（auto = 材料名含 ITO 的域，按 z 中心自动排序）
+        int[] domIds;
+        String[] domNames;
         if (domSpec.equalsIgnoreCase("auto")) {
+            List<Integer> cand = new ArrayList<>();
             for (String mt : j.model.component("comp1").material().tags()) {
                 String label = j.model.component("comp1").material(mt).label();
                 if (label == null || !label.toLowerCase(Locale.ROOT).contains("ito")) continue;
                 for (int e : j.model.component("comp1").material(mt).selection().entities(3))
-                    if (!doms.contains(e)) doms.add(e);
+                    if (!cand.contains(e)) cand.add(e);
             }
-        } else if (!domSpec.isEmpty() && !domSpec.equalsIgnoreCase("none")) {
-            for (String s : domSpec.split(",")) { String x = s.trim(); if (!x.isEmpty()) doms.add(Integer.valueOf(x)); }
+            if (cand.isEmpty()) throw new IllegalStateException("没有找到材料名含 ITO 的域（可在 AbsDomains 里显式写编号）");
+            double[] zc = new double[cand.size()];
+            for (int z = 0; z < cand.size(); z++) zc[z] = domainZCenter(j, cand.get(z));
+            Integer[] order = new Integer[cand.size()];
+            for (int z = 0; z < order.length; z++) order[z] = z;
+            final double[] zref = zc;
+            java.util.Arrays.sort(order, (a, b) -> Double.compare(zref[a], zref[b]));
+            domIds = new int[cand.size()];
+            domNames = new String[cand.size()];
+            for (int z = 0; z < order.length; z++) {
+                domIds[z] = cand.get(order[z]);
+                domNames[z] = layerName(z, order.length);
+            }
+        } else if (domSpec.isEmpty() || domSpec.equalsIgnoreCase("none")) {
+            domIds = new int[0]; domNames = new String[0];
+        } else {
+            List<Integer> ids = new ArrayList<>();
+            List<String> nms = new ArrayList<>();
+            for (String s : domSpec.split(",")) {
+                String x = s.trim();
+                if (x.isEmpty()) continue;
+                int id; String nm;
+                int c = x.indexOf(':');
+                if (c > 0) { id = Integer.parseInt(x.substring(0, c).trim()); nm = x.substring(c + 1).trim(); }
+                else { id = Integer.parseInt(x); nm = "d" + id; }
+                ids.add(id); nms.add(nm);
+            }
+            domIds = new int[ids.size()]; domNames = new String[ids.size()];
+            for (int z = 0; z < ids.size(); z++) { domIds[z] = ids.get(z); domNames[z] = nms.get(z); }
         }
-        java.util.Collections.sort(doms);
 
         // 3) 建节点
         String gNode = "bt_g_" + i;
@@ -521,7 +548,7 @@ public class ExportDriver {
         j.model.result().numerical(gNode).set("expr", allExps.toArray(new String[0]));
 
         List<String> intNodes = new ArrayList<>();
-        for (int d : doms) {
+        for (int d : domIds) {
             String n = "bt_iv_" + i + "_" + d;
             if (!Arrays.asList(j.model.result().numerical().tags()).contains(n))
                 j.model.result().numerical().create(n, "IntVolume");
@@ -532,8 +559,9 @@ public class ExportDriver {
             intNodes.add(n);
         }
 
-        // 4) 逐解取数（参数/谱线/各域吸收同列对齐）
+        // 4) 逐解取数
         int nP = pExps.size();
+        int nDom = domIds.length;
         List<double[]> rows = new ArrayList<>();
         for (String solTag : j.model.sol().tags()) {
             j.model.result().dataset(j.dataset).set("solution", solTag);
@@ -545,48 +573,46 @@ public class ExportDriver {
                 } catch (Exception inner) { break; }
                 if (a == null || a.length == 0 || a[0].length == 0) break;
                 for (int c = 0; c < a[0].length; c++) {
-                    double[] row = new double[nP + specExpr.length + doms.size() * 2 + 2];
+                    double[] row = new double[nP + specExpr.length + nDom * 2 + 2];
                     boolean ok = true;
-                    for (int q = 0; q < a.length && q < nP + specExpr.length; q++) {
+                    for (int q = 0; q < a.length; q++) {
                         double v = a[q][c];
                         if (Double.isNaN(v) || Double.isInfinite(v)) { ok = false; break; }
-                        row[rowIdx(q, nP, a.length, specExpr.length)] = v;
+                        row[q] = v;
                     }
                     if (!ok) continue;
                     double pin = row[nP + 8];
                     if (pin == 0) pin = 1.0;
+                    row[nP + 8] = pin;
                     double sumQ = 0;
                     int base = nP + specExpr.length;
-                    boolean domOk = true;
-                    for (int z = 0; z < doms.size(); z++) {
+                    for (int z = 0; z < nDom; z++) {
                         try {
                             j.model.result().numerical(intNodes.get(z)).set("solnum", Integer.toString(k));
                             double[][] qv = j.model.result().numerical(intNodes.get(z)).getReal();
-                            if (qv == null || qv[0].length <= c) { domOk = false; break; }
+                            if (qv == null || qv[0].length <= c) { ok = false; break; }
                             double q = qv[0][c];
                             row[base + z * 2] = q;
                             row[base + z * 2 + 1] = 100.0 * q / pin;
                             sumQ += q;
-                        } catch (Exception inner) { domOk = false; break; }
+                        } catch (Exception inner) { ok = false; break; }
                     }
-                    if (!domOk) continue;
-                    row[base + doms.size() * 2] = sumQ;
-                    row[base + doms.size() * 2 + 1] = 100.0 * sumQ / pin;
+                    if (!ok) continue;
+                    row[base + nDom * 2] = sumQ;
+                    row[base + nDom * 2 + 1] = 100.0 * sumQ / pin;
                     boolean dup = false;
-                    for (double[] prev : rows) {
-                        if (java.util.Arrays.equals(prev, row)) { dup = true; break; }
-                    }
+                    for (double[] prev : rows) if (java.util.Arrays.equals(prev, row)) { dup = true; break; }
                     if (!dup) rows.add(row);
                 }
             }
         }
         if (rows.isEmpty()) throw new IllegalStateException("大表没有取到任何数据（检查解节点与研究设置）");
 
-        // 5) 列名
+        // 5) 列名（全 ASCII）
         List<String> cols = new ArrayList<>(pNames);
         java.util.Collections.addAll(cols, specCols);
-        for (int d : doms) { cols.add("Qrh_d" + d + "_W"); cols.add("A_d" + d + "_pct"); }
-        cols.add("Qrh_ITO合计_W"); cols.add("A_ITO合计_pct");
+        for (String nm : domNames) { cols.add("Qrh_ITO_" + nm + "_W"); cols.add("A_ITO_" + nm + "_pct"); }
+        cols.add("Qrh_ITO_total_W"); cols.add("A_ITO_total_pct");
 
         double[][] data = new double[cols.size()][rows.size()];
         for (int c = 0; c < rows.size(); c++)
@@ -596,8 +622,27 @@ public class ExportDriver {
         System.out.println("[driver] 写出 " + target + "（" + rows.size() + " 行 × " + cols.size() + " 列）");
     }
 
-    static int rowIdx(int q, int nP, int nAll, int nSpec) {
-        return q;
+    // 按 z 位置给吸收域起英文名：1 个 ito；2 个 lower/upper；3 个 lower/hole/upper
+    static String layerName(int idx, int n) {
+        if (n <= 1) return "ito";
+        if (n == 2) return idx == 0 ? "lower" : "upper";
+        if (idx == 0) return "lower";
+        if (idx == n - 1) return "upper";
+        return "hole";
+    }
+
+    // 域的 z 中心（米）；取当前数据集第 1 个解
+    static double domainZCenter(Job j, int dom) throws Exception {
+        String tag = "bt_zc_" + dom;
+        if (!Arrays.asList(j.model.result().numerical().tags()).contains(tag))
+            j.model.result().numerical().create(tag, "IntVolume");
+        j.model.result().numerical(tag).set("data", j.dataset);
+        j.model.result().numerical(tag).set("expr", new String[] { "1", "z" });
+        j.model.result().numerical(tag).selection().set(new int[] { dom });
+        double[][] r = j.model.result().numerical(tag).getReal();
+        double v = r[0][0];
+        if (v == 0) throw new IllegalStateException("吸收域 " + dom + " 体积为 0");
+        return r[1][0] / v;
     }
 
     // ---------- modes：每个模态一行数值 ----------
