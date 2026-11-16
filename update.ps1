@@ -1,4 +1,5 @@
 ﻿# COMSOL 导出 CLI 更新脚本：从 GitHub 拉最新版，保留 logs / output / models 与机器配置
+# 仓库是公开的，不需要 token；若哪天改回私有，脚本会在 401/403 时提示粘贴 token。
 param(
     [string]$Repo = 'meaning-infinite/comsol-export-cli',
     [string]$Branch = 'master'
@@ -14,23 +15,18 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 $StateDir = Join-Path $env:LOCALAPPDATA 'comsol-export\state'
 if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
-
-# token：私有仓库必需；优先环境变量，其次本机保存的文件
-$tok = $env:GITHUB_TOKEN
 $tokFile = Join-Path $StateDir 'gh_token.txt'
-if (-not $tok -and (Test-Path -LiteralPath $tokFile)) { $tok = (Get-Content -LiteralPath $tokFile -Raw).Trim() }
 
+# ---------- 路线 A：已是 git 仓库 ----------
 $git = Get-Command git -ErrorAction SilentlyContinue
 $isGit = Test-Path -LiteralPath (Join-Path $ScriptDir '.git')
-
-# 路线 A：已是 git 仓库 → 直接 fetch（不需要 token，凭 Windows 凭据）
-if ($isGit -and $git -and -not $tok) {
+if ($isGit -and $git) {
     Write-Host '[1/2] 连接 GitHub 并拉取 ...' -ForegroundColor Cyan
     $ErrorActionPreference = 'Continue'
     & git -C $ScriptDir -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 fetch --depth 1 origin $Branch 2>&1 |
         ForEach-Object { Write-Host ('  ' + $_) }
     if ($LASTEXITCODE -ne 0) {
-        Fail 'git fetch 失败：连不上 GitHub，或仓库需要认证。检查网络/代理，或改用 token 方式（把 token 存到 %LOCALAPPDATA%\comsol-export\state\gh_token.txt）。' 4
+        Fail 'git fetch 失败：连不上 GitHub，或网络/代理有问题。' 4
     }
     & git -C $ScriptDir reset --hard ('origin/' + $Branch) 2>&1 | ForEach-Object { Write-Host ('  ' + $_) }
     if ($LASTEXITCODE -ne 0) { Fail 'git reset 失败：本地文件与远端冲突，请人工检查。' 5 }
@@ -40,51 +36,61 @@ if ($isGit -and $git -and -not $tok) {
     exit 0
 }
 
-# 路线 B：下载 zip 覆盖（远程机器常见：只是拷贝过去的文件夹）
-if (-not $tok) {
-    Write-Host '  这是私有仓库，需要一个有 read 权限的 GitHub token（只存本机，不进 script 目录）。' -ForegroundColor Yellow
-    $sec = Read-Host '  粘贴 token' -AsSecureString
-    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
-    $tok = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-    if (-not $tok) { Fail '没有 token，也没有可用的 git 仓库，无法更新。' 2 }
-    if ((Read-Host '  把 token 存到本机（Y/N）') -match '^[Yy]') {
-        [System.IO.File]::WriteAllText($tokFile, $tok, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Host ('  已保存：' + $tokFile) -ForegroundColor DarkGray
+# ---------- 路线 B：下载 zip 覆盖 ----------
+$tok = $env:GITHUB_TOKEN
+if (-not $tok -and (Test-Path -LiteralPath $tokFile)) { $tok = (Get-Content -LiteralPath $tokFile -Raw).Trim() }
+
+function Get-Package([string]$token) {
+    $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+    $zip = Join-Path $env:TEMP ('comsol-export-' + $stamp + '.zip')
+    $urls = @(
+        ('https://codeload.github.com/' + $Repo + '/zip/refs/heads/' + $Branch),
+        ('https://api.github.com/repos/' + $Repo + '/zipball/' + $Branch),
+        ('https://github.com/' + $Repo + '/archive/refs/heads/' + $Branch + '.zip')
+    )
+    $hdr = @{ 'User-Agent' = 'comsol-export-update' }
+    if ($token) { $hdr['Authorization'] = 'token ' + $token }
+    $lastErr = ''
+    foreach ($url in $urls) {
+        try {
+            Invoke-WebRequest -Uri $url -Headers $hdr -OutFile $zip -UseBasicParsing -TimeoutSec 30
+            if ((Test-Path -LiteralPath $zip) -and (Get-Item -LiteralPath $zip).Length -gt 1000) { return $zip }
+        } catch {
+            $code = 0
+            try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+            if ($code -eq 401 -or $code -eq 403) { return 'AUTH' }
+            if ($code -eq 404) { $lastErr = '404 仓库不存在或无权访问'; continue }
+            $lastErr = $_.Exception.Message
+        }
     }
+    return ('ERR:' + $lastErr)
 }
 
 Write-Host '[1/3] 下载最新版 ...' -ForegroundColor Cyan
-$stamp = Get-Date -Format 'yyyyMMddHHmmss'
-$zip = Join-Path $env:TEMP ('comsol-export-' + $stamp + '.zip')
-$urls = @(
-    ('https://codeload.github.com/' + $Repo + '/zip/refs/heads/' + $Branch),
-    ('https://api.github.com/repos/' + $Repo + '/zipball/' + $Branch),
-    ('https://github.com/' + $Repo + '/archive/refs/heads/' + $Branch + '.zip')
-)
-$hdr = @{ 'User-Agent' = 'comsol-export-update'; 'Authorization' = 'token ' + $tok }
-$lastErr = ''
-$ok = $false
-foreach ($url in $urls) {
-    try {
-        Invoke-WebRequest -Uri $url -Headers $hdr -OutFile $zip -UseBasicParsing -TimeoutSec 30
-        if ((Test-Path -LiteralPath $zip) -and (Get-Item -LiteralPath $zip).Length -gt 1000) { $ok = $true; break }
-    } catch {
-        $code = 0
-        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
-        if ($code -eq 401 -or $code -eq 403) { Fail 'token 无效或没有该仓库的权限（401/403）。' 6 }
-        if ($code -eq 404) { $lastErr = '404 仓库不存在或 token 无权访问'; continue }
-        $lastErr = $_.Exception.Message
+$res = Get-Package $tok
+if ($res -eq 'AUTH') {
+    Write-Host '  仓库需要认证（401/403）。粘贴一个有 read 权限的 token：' -ForegroundColor Yellow
+    $sec = Read-Host '  token' -AsSecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+    $tok = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    if (-not $tok) { Fail '没有 token，无法下载私有仓库。' 6 }
+    if ((Read-Host '  把 token 存到本机（Y/N）') -match '^[Yy]') {
+        [System.IO.File]::WriteAllText($tokFile, $tok, (New-Object System.Text.UTF8Encoding($false)))
     }
+    $res = Get-Package $tok
+    if ($res -eq 'AUTH') { Fail 'token 无效或没有该仓库的权限（401/403）。' 6 }
 }
-if (-not $ok) { Fail ('下载失败（多半是连不上 GitHub）：' + $lastErr) 8 }
-if (-not (Test-Path -LiteralPath $zip) -or (Get-Item -LiteralPath $zip).Length -lt 1000) { Fail '下载内容异常（文件为空或过小），检查网络后重试。' 9 }
+if ($res -like 'ERR:*') { Fail ('下载失败（多半是连不上 GitHub）：' + $res.Substring(4)) 8 }
+$zip = $res
 
 Write-Host '[2/3] 解压并备份旧文件 ...' -ForegroundColor Cyan
+$stamp = Get-Date -Format 'yyyyMMddHHmmss'
 $tmp = Join-Path $env:TEMP ('comsol-export-unz-' + $stamp)
 Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
 $pkg = Get-ChildItem -LiteralPath $tmp -Directory | Select-Object -First 1
 if (-not $pkg) { Fail '压缩包结构不对（没有顶层目录）。' 10 }
+$verName = $pkg.Name
 
 $bak = Join-Path $ScriptDir ('_backup\' + $stamp)
 New-Item -ItemType Directory -Path $bak -Force | Out-Null
@@ -109,6 +115,7 @@ Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
-Write-Host ('[完成] 已更新（旧文件备份在 ' + $bak + '）') -ForegroundColor Green
+Write-Host ('[完成] 已更新（' + $verName + '）') -ForegroundColor Green
+Write-Host ('        旧文件备份在 ' + $bak) -ForegroundColor DarkGray
 Write-Host '        机器配置、logs、output、models 都没有动。' -ForegroundColor DarkGray
 exit 0
