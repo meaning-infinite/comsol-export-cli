@@ -2,7 +2,9 @@
 # 仓库是公开的，不需要 token；若哪天改回私有，脚本会在 401/403 时提示粘贴 token。
 param(
     [string]$Repo = 'meaning-infinite/comsol-export-cli',
-    [string]$Branch = 'master'
+    [string]$Branch = 'master',
+    [string]$Offline = '',        # 离线包：本地 zip 路径（U 盘/微信传过来的）
+    [string]$Source = ''          # 指定一个 zip 直链（内网镜像）
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -41,11 +43,17 @@ if (-not $tok -and (Test-Path -LiteralPath $tokFile)) { $tok = (Get-Content -Lit
 function Get-Package([string]$token) {
     $stamp = Get-Date -Format 'yyyyMMddHHmmss'
     $zip = Join-Path $env:TEMP ('comsol-export-' + $stamp + '.zip')
-    $urls = @(
+    $direct = @(
         ('https://codeload.github.com/' + $Repo + '/zip/refs/heads/' + $Branch),
         ('https://api.github.com/repos/' + $Repo + '/zipball/' + $Branch),
         ('https://github.com/' + $Repo + '/archive/refs/heads/' + $Branch + '.zip')
     )
+    # 公共电脑常连不上 github：依次尝试国内可用镜像
+    $mirrors = @('https://ghfast.top/', 'https://ghproxy.net/', 'https://gh-proxy.com/', 'https://mirror.ghproxy.com/')
+    $urls = @()
+    if ($Source) { $urls += $Source }
+    foreach ($m in $mirrors) { $urls += ($m + 'https://github.com/' + $Repo + '/archive/refs/heads/' + $Branch + '.zip') }
+    $urls += $direct
     $hdr = @{ 'User-Agent' = 'comsol-export-update' }
     if ($token) { $hdr['Authorization'] = 'token ' + $token }
     $lastErr = ''
@@ -64,8 +72,14 @@ function Get-Package([string]$token) {
     return ('ERR:' + $lastErr)
 }
 
-Write-Host '[1/3] 下载最新版 ...' -ForegroundColor Cyan
-$res = Get-Package $tok
+if ($Offline) {
+    if (-not (Test-Path -LiteralPath $Offline)) { Fail ('离线包不存在：' + $Offline) 11 }
+    Write-Host ('[1/3] 使用离线包：' + $Offline) -ForegroundColor Cyan
+    $res = (Resolve-Path -LiteralPath $Offline).Path
+} else {
+    Write-Host '[1/3] 下载最新版（先试镜像，再直连）...' -ForegroundColor Cyan
+    $res = Get-Package $tok
+}
 if ($res -eq 'AUTH') {
     Write-Host '  仓库需要认证（401/403）。粘贴一个有 read 权限的 token：' -ForegroundColor Yellow
     $sec = Read-Host '  token' -AsSecureString
