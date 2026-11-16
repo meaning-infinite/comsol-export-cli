@@ -11,7 +11,7 @@ function Fail([string]$msg, [int]$code) {
     Write-Host ('[错误] ' + $msg) -ForegroundColor Red
     exit $code
 }
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 Set-Location $ScriptDir
 $StateDir = Join-Path $env:LOCALAPPDATA 'comsol-export\state'
 if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
@@ -25,9 +25,7 @@ if ($isGit -and $git) {
     $ErrorActionPreference = 'Continue'
     & git -C $ScriptDir -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 fetch --depth 1 origin $Branch 2>&1 |
         ForEach-Object { Write-Host ('  ' + $_) }
-    if ($LASTEXITCODE -ne 0) {
-        Fail 'git fetch 失败：连不上 GitHub，或网络/代理有问题。' 4
-    }
+    if ($LASTEXITCODE -ne 0) { Fail 'git fetch 失败：连不上 GitHub，或网络/代理有问题。' 4 }
     & git -C $ScriptDir reset --hard ('origin/' + $Branch) 2>&1 | ForEach-Object { Write-Host ('  ' + $_) }
     if ($LASTEXITCODE -ne 0) { Fail 'git reset 失败：本地文件与远端冲突，请人工检查。' 5 }
     $ver = (& git -C $ScriptDir log -1 --format='%h %ad' --date=short).Trim()
@@ -100,9 +98,20 @@ foreach ($f in $files) { $p = Join-Path $ScriptDir $f; if (Test-Path -LiteralPat
 foreach ($d in $dirs)  { $p = Join-Path $ScriptDir $d; if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $bak -Recurse -Force } }
 
 Write-Host '[3/3] 覆盖程序文件（logs / output / models 不动）...' -ForegroundColor Cyan
+# 注意：不能覆盖正在运行的 update.bat（cmd 会按字节偏移续读，导致执行乱码），改名为 .new
+$newLauncher = $false
 foreach ($f in $files) {
     $src = Join-Path $pkg.FullName $f
-    if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $ScriptDir $f) -Force }
+    if (-not (Test-Path -LiteralPath $src)) { continue }
+    if ($f -eq 'update.bat') {
+        $dst = Join-Path $ScriptDir 'update.bat'
+        if (-not (Test-Path -LiteralPath $dst) -or ((Get-FileHash -LiteralPath $src).Hash -ne (Get-FileHash -LiteralPath $dst).Hash)) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $ScriptDir 'update.bat.new') -Force
+            $newLauncher = $true
+        }
+        continue
+    }
+    Copy-Item -LiteralPath $src -Destination (Join-Path $ScriptDir $f) -Force
 }
 foreach ($d in $dirs) {
     $src = Join-Path $pkg.FullName $d
@@ -117,5 +126,6 @@ Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 Write-Host ('[完成] 已更新（' + $verName + '）') -ForegroundColor Green
 Write-Host ('        旧文件备份在 ' + $bak) -ForegroundColor DarkGray
+if ($newLauncher) { Write-Host '        启动器有新版：update.bat.new（把老的 update.bat 删掉、把 .new 改名去掉后缀即可）' -ForegroundColor Yellow }
 Write-Host '        机器配置、logs、output、models 都没有动。' -ForegroundColor DarkGray
 exit 0
