@@ -88,6 +88,15 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 
 对每个解节点、每个模态取一遍数值，输出去重后的 CSV（列：`mode` + 指定列）。
 
+### bigtable — 通用原始大表（推荐给谱线类需求）
+
+```powershell
+@{ Type='bigtable'; Name='bigtable'; Params='all'; AbsDomains='auto'; AbsExpr='ewfd.Qh' }
+```
+
+一次给全：`<全局参数>_val`（模型参数表全量，自动）+ `lambda_nm, freq_THz, T00, R00, T_total, R_total, phase_S21_rad, A_1-T-R, Pin_W` + 每个吸收域的 `Qrh_d<n>_W / A_d<n>_pct` + 合计两列。
+`AbsDomains='auto'` 取材料名含 ITO 的所有域；没有吸收域时写 `none`。
+
 ### image — 单张多切面图（旧）
 
 ```powershell

@@ -50,6 +50,7 @@ public class ExportDriver {
         HANDLERS.put("slice2d", ExportDriver::exportSlice2D);   // 多切面二维正投影图
         HANDLERS.put("integral", ExportDriver::exportIntegral); // 线/面积分 -> CSV
         HANDLERS.put("modes", ExportDriver::exportModes);       // 特征频率数值 -> CSV
+        HANDLERS.put("bigtable", ExportDriver::exportBigTable); // 通用原始大表（参数+谱线+域吸收）
     }
 
     static String stackOf(Throwable t) {
@@ -469,6 +470,134 @@ public class ExportDriver {
         Path target = csvTarget(j, i, name);
         writeCsv(target, data, expr, cols);
         System.out.println("[driver] 写出 " + target);
+    }
+
+
+    // ---------- bigtable：通用原始大表（全局参数 + 谱线 + 各域吸收） ----------
+    static void exportBigTable(Job j, int i) throws Exception {
+        String name = j.block(i, "name", "bigtable");
+        String domSpec = j.block(i, "absdomains", "auto").trim();
+        String absExpr = j.block(i, "absexpr", "ewfd.Qh").trim();
+        String paramSpec = j.block(i, "params", "all").trim().toLowerCase(Locale.ROOT);
+
+        // 1) 全局参数表达式
+        List<String> pExps = new ArrayList<>();
+        java.util.List<String> pNames = new ArrayList<>();
+        if (!paramSpec.equals("none")) {
+            String[] vn = j.model.param().varnames();
+            for (String v : vn) {
+                if (paramSpec.equals("all") || Arrays.asList(split(paramSpec)).contains(v.toLowerCase(Locale.ROOT))) {
+                    pExps.add(v); pNames.add(v + "_val");
+                }
+            }
+        }
+
+        String[] specExpr = { "c_const/ewfd.freq", "ewfd.freq/1e12", "abs(ewfd.S21)^2", "abs(ewfd.S11)^2",
+                "ewfd.Ttotal", "ewfd.Rtotal", "arg(ewfd.S21)", "1-ewfd.Ttotal-ewfd.Rtotal", "ewfd.Pin" };
+        String[] specCols = { "lambda_nm", "freq_THz", "T00", "R00", "T_total", "R_total",
+                "phase_S21_rad", "A_1-T-R", "Pin_W" };
+
+        // 2) 吸收域（默认取材料名含 ITO 的所有域）
+        List<Integer> doms = new ArrayList<>();
+        if (domSpec.equalsIgnoreCase("auto")) {
+            for (String mt : j.model.component("comp1").material().tags()) {
+                String label = j.model.component("comp1").material(mt).label();
+                if (label == null || !label.toLowerCase(Locale.ROOT).contains("ito")) continue;
+                for (int e : j.model.component("comp1").material(mt).selection().entities(3))
+                    if (!doms.contains(e)) doms.add(e);
+            }
+        } else if (!domSpec.isEmpty() && !domSpec.equalsIgnoreCase("none")) {
+            for (String s : domSpec.split(",")) { String x = s.trim(); if (!x.isEmpty()) doms.add(Integer.valueOf(x)); }
+        }
+        java.util.Collections.sort(doms);
+
+        // 3) 建节点
+        String gNode = "bt_g_" + i;
+        if (!Arrays.asList(j.model.result().numerical().tags()).contains(gNode))
+            j.model.result().numerical().create(gNode, "EvalGlobal");
+        j.model.result().numerical(gNode).set("data", j.dataset);
+        List<String> allExps = new ArrayList<>(pExps);
+        java.util.Collections.addAll(allExps, specExpr);
+        j.model.result().numerical(gNode).set("expr", allExps.toArray(new String[0]));
+
+        List<String> intNodes = new ArrayList<>();
+        for (int d : doms) {
+            String n = "bt_iv_" + i + "_" + d;
+            if (!Arrays.asList(j.model.result().numerical().tags()).contains(n))
+                j.model.result().numerical().create(n, "IntVolume");
+            j.model.result().numerical(n).set("data", j.dataset);
+            j.model.result().numerical(n).set("expr", new String[] { absExpr });
+            try { j.model.result().numerical(n).selection().set(new int[] { d }); }
+            catch (Exception e) { throw new IllegalStateException("吸收域编号不存在: " + d + " — " + e.getMessage()); }
+            intNodes.add(n);
+        }
+
+        // 4) 逐解取数（参数/谱线/各域吸收同列对齐）
+        int nP = pExps.size();
+        List<double[]> rows = new ArrayList<>();
+        for (String solTag : j.model.sol().tags()) {
+            j.model.result().dataset(j.dataset).set("solution", solTag);
+            for (int k = 1; k <= 200; k++) {
+                double[][] a;
+                try {
+                    j.model.result().numerical(gNode).set("solnum", Integer.toString(k));
+                    a = j.model.result().numerical(gNode).getReal();
+                } catch (Exception inner) { break; }
+                if (a == null || a.length == 0 || a[0].length == 0) break;
+                for (int c = 0; c < a[0].length; c++) {
+                    double[] row = new double[nP + specExpr.length + doms.size() * 2 + 2];
+                    boolean ok = true;
+                    for (int q = 0; q < a.length && q < nP + specExpr.length; q++) {
+                        double v = a[q][c];
+                        if (Double.isNaN(v) || Double.isInfinite(v)) { ok = false; break; }
+                        row[rowIdx(q, nP, a.length, specExpr.length)] = v;
+                    }
+                    if (!ok) continue;
+                    double pin = row[nP + 8];
+                    if (pin == 0) pin = 1.0;
+                    double sumQ = 0;
+                    int base = nP + specExpr.length;
+                    boolean domOk = true;
+                    for (int z = 0; z < doms.size(); z++) {
+                        try {
+                            j.model.result().numerical(intNodes.get(z)).set("solnum", Integer.toString(k));
+                            double[][] qv = j.model.result().numerical(intNodes.get(z)).getReal();
+                            if (qv == null || qv[0].length <= c) { domOk = false; break; }
+                            double q = qv[0][c];
+                            row[base + z * 2] = q;
+                            row[base + z * 2 + 1] = 100.0 * q / pin;
+                            sumQ += q;
+                        } catch (Exception inner) { domOk = false; break; }
+                    }
+                    if (!domOk) continue;
+                    row[base + doms.size() * 2] = sumQ;
+                    row[base + doms.size() * 2 + 1] = 100.0 * sumQ / pin;
+                    boolean dup = false;
+                    for (double[] prev : rows) {
+                        if (java.util.Arrays.equals(prev, row)) { dup = true; break; }
+                    }
+                    if (!dup) rows.add(row);
+                }
+            }
+        }
+        if (rows.isEmpty()) throw new IllegalStateException("大表没有取到任何数据（检查解节点与研究设置）");
+
+        // 5) 列名
+        List<String> cols = new ArrayList<>(pNames);
+        java.util.Collections.addAll(cols, specCols);
+        for (int d : doms) { cols.add("Qrh_d" + d + "_W"); cols.add("A_d" + d + "_pct"); }
+        cols.add("Qrh_ITO合计_W"); cols.add("A_ITO合计_pct");
+
+        double[][] data = new double[cols.size()][rows.size()];
+        for (int c = 0; c < rows.size(); c++)
+            for (int q = 0; q < cols.size(); q++) data[q][c] = rows.get(c)[q];
+        Path target = csvTarget(j, i, name);
+        writeCsv(target, data, cols.toArray(new String[0]), cols.toArray(new String[0]));
+        System.out.println("[driver] 写出 " + target + "（" + rows.size() + " 行 × " + cols.size() + " 列）");
+    }
+
+    static int rowIdx(int q, int nP, int nAll, int nSpec) {
+        return q;
     }
 
     // ---------- modes：每个模态一行数值 ----------
