@@ -3,3 +3,6 @@ test/
 *.mph
 *.lock
 *.log
+output/
+TEMP_*
+*.tmp
