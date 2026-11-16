@@ -6,3 +6,4 @@ test/
 output/
 TEMP_*
 *.tmp
+_dist/
