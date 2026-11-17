@@ -237,6 +237,21 @@ public class ExportDriver {
     }
 
     // ---------- global / spectrum ----------
+    // 多步骤模型：每个解节点配一个独立的 Solution 数据集，
+    // 直接改 dset1 的 solution 属性在多研究/多步骤模型里不生效，会只剩第一步的解。
+    static String datasetFor(Job j, String solTag) {
+        String tag = "dset_sol_" + solTag;
+        try {
+            if (!Arrays.asList(j.model.result().dataset().tags()).contains(tag)) {
+                j.model.result().dataset().create(tag, "Solution");
+            }
+            j.model.result().dataset(tag).set("solution", solTag);
+            return tag;
+        } catch (Exception e) {
+            return j.dataset;
+        }
+    }
+
     // expr / cols：| 分隔；扫描变量自动前置两列
     static void exportGlobal(Job j, int i) throws Exception {
         String name = j.block(i, "name", "export" + i);
@@ -259,24 +274,27 @@ public class ExportDriver {
         j.model.result().numerical(node).set("expr", expr);
         j.model.result().numerical(node).set("descr", cols);
         for (String solTag : j.model.sol().tags()) {
-            j.model.result().dataset(j.dataset).set("solution", solTag);
-            for (int k = 1; k <= 200; k++) {
-                try {
-                    j.model.result().numerical(node).set("solnum", Integer.toString(k));
-                    double[][] a = j.model.result().numerical(node).getReal();
-                    if (a.length == 0 || a[0].length == 0) break;
-                    double[] row = new double[expr.length];
-                    boolean ok = true;
-                    for (int q = 0; q < expr.length; q++) {
-                        double v = a[q][0];
-                        if (Double.isNaN(v)) ok = false;
-                        row[q] = v;
-                    }
-                    if (!ok) continue;
-                    boolean dup = false;
-                    for (double[] prev : found) if (Arrays.equals(prev, row)) { dup = true; break; }
-                    if (!dup) found.add(row);
-                } catch (Exception inner) { break; }
+            j.model.result().numerical(node).set("data", datasetFor(j, solTag));
+            double[][] a;
+            try {
+                a = j.model.result().numerical(node).getReal();
+            } catch (Exception inner) {
+                System.out.println("[driver] 解节点 " + solTag + " 取数失败: " + inner.getMessage());
+                continue;
+            }
+            if (a.length == 0 || a[0].length == 0) { System.out.println("[driver] 解节点 " + solTag + " 无解"); continue; }
+            for (int c = 0; c < a[0].length; c++) {
+                double[] row = new double[expr.length];
+                boolean ok = true;
+                for (int q = 0; q < expr.length; q++) {
+                    double v = a[q][c];
+                    if (Double.isNaN(v)) ok = false;
+                    row[q] = v;
+                }
+                if (!ok) continue;
+                boolean dup = false;
+                for (double[] prev : found) if (Arrays.equals(prev, row)) { dup = true; break; }
+                if (!dup) found.add(row);
             }
         }
         if (found.isEmpty()) throw new IllegalStateException("没有取到任何解（检查解节点与表达式）");
@@ -564,14 +582,28 @@ public class ExportDriver {
         int nDom = domIds.length;
         List<double[]> rows = new ArrayList<>();
         for (String solTag : j.model.sol().tags()) {
-            j.model.result().dataset(j.dataset).set("solution", solTag);
-            for (int k = 1; k <= 200; k++) {
-                double[][] a;
+            String dset = datasetFor(j, solTag);
+            j.model.result().numerical(gNode).set("data", dset);
+            for (String nd : intNodes) j.model.result().numerical(nd).set("data", dset);
+            double[][] a;
+            try {
+                a = j.model.result().numerical(gNode).getReal();
+            } catch (Exception inner) {
+                System.out.println("[driver] 解节点 " + solTag + " 取数失败: " + inner.getMessage());
+                continue;
+            }
+            if (a == null || a.length == 0 || a[0].length == 0) { System.out.println("[driver] 解节点 " + solTag + " 无解"); continue; }
+            double[][] qvAll = new double[nDom][];
+            boolean qvOk = true;
+            for (int z = 0; z < nDom; z++) {
                 try {
-                    j.model.result().numerical(gNode).set("solnum", Integer.toString(k));
-                    a = j.model.result().numerical(gNode).getReal();
-                } catch (Exception inner) { break; }
-                if (a == null || a.length == 0 || a[0].length == 0) break;
+                    double[][] qv = j.model.result().numerical(intNodes.get(z)).getReal();
+                    qvAll[z] = (qv != null && qv.length > 0) ? qv[0] : null;
+                    if (qvAll[z] == null || qvAll[z].length < a[0].length) qvOk = false;
+                } catch (Exception inner) { qvOk = false; }
+            }
+            if (!qvOk) { System.out.println("[driver] 解节点 " + solTag + " 吸收积分取数失败"); continue; }
+            {
                 for (int c = 0; c < a[0].length; c++) {
                     double[] row = new double[nP + specExpr.length + nDom * 2 + 2];
                     boolean ok = true;
@@ -587,17 +619,11 @@ public class ExportDriver {
                     double sumQ = 0;
                     int base = nP + specExpr.length;
                     for (int z = 0; z < nDom; z++) {
-                        try {
-                            j.model.result().numerical(intNodes.get(z)).set("solnum", Integer.toString(k));
-                            double[][] qv = j.model.result().numerical(intNodes.get(z)).getReal();
-                            if (qv == null || qv[0].length <= c) { ok = false; break; }
-                            double q = qv[0][c];
-                            row[base + z * 2] = q;
-                            row[base + z * 2 + 1] = 100.0 * q / pin;
-                            sumQ += q;
-                        } catch (Exception inner) { ok = false; break; }
+                        double q = qvAll[z][c];
+                        row[base + z * 2] = q;
+                        row[base + z * 2 + 1] = 100.0 * q / pin;
+                        sumQ += q;
                     }
-                    if (!ok) continue;
                     row[base + nDom * 2] = sumQ;
                     row[base + nDom * 2 + 1] = 100.0 * sumQ / pin;
                     boolean dup = false;
@@ -662,30 +688,33 @@ public class ExportDriver {
         j.model.result().numerical(node).set("descr", cols);
         List<double[]> rows = new ArrayList<>();
         for (String solTag : j.model.sol().tags()) {
-            j.model.result().dataset(j.dataset).set("solution", solTag);
-            for (int k = 1; k <= maxModes; k++) {
-                try {
-                    j.model.result().numerical(node).set("solnum", Integer.toString(k));
-                    double[][] a = j.model.result().numerical(node).getReal();
-                    if (a.length == 0 || a[0].length == 0) break;
-                    double[] row = new double[expr.length + 1];
-                    boolean ok = true;
-                    for (int q = 0; q < expr.length; q++) {
-                        double v = a[q][0];
-                        if (Double.isNaN(v) || Double.isInfinite(v)) { ok = false; break; }
-                        row[q + 1] = v;
-                    }
-                    if (!ok) break;
-                    boolean dup = false;
-                    for (double[] prev : rows) {
-                        boolean same = true;
-                        for (int q = 1; q < row.length; q++) if (prev[q] != row[q]) { same = false; break; }
-                        if (same) { dup = true; break; }
-                    }
-                    if (dup) continue;
-                    row[0] = rows.size() + 1;
-                    rows.add(row);
-                } catch (Exception inner) { break; }
+            j.model.result().numerical(node).set("data", datasetFor(j, solTag));
+            double[][] a;
+            try {
+                a = j.model.result().numerical(node).getReal();
+            } catch (Exception inner) {
+                System.out.println("[driver] 解节点 " + solTag + " 取数失败: " + inner.getMessage());
+                continue;
+            }
+            if (a.length == 0 || a[0].length == 0) { System.out.println("[driver] 解节点 " + solTag + " 无解"); continue; }
+            for (int c = 0; c < a[0].length; c++) {
+                double[] row = new double[expr.length + 1];
+                boolean ok = true;
+                for (int q = 0; q < expr.length; q++) {
+                    double v = a[q][c];
+                    if (Double.isNaN(v) || Double.isInfinite(v)) { ok = false; break; }
+                    row[q + 1] = v;
+                }
+                if (!ok) continue;
+                boolean dup = false;
+                for (double[] prev : rows) {
+                    boolean same = true;
+                    for (int q = 1; q < row.length; q++) if (prev[q] != row[q]) { same = false; break; }
+                    if (same) { dup = true; break; }
+                }
+                if (dup) continue;
+                row[0] = rows.size() + 1;
+                rows.add(row);
             }
         }
         if (rows.isEmpty()) throw new IllegalStateException("没有取到任何模态（检查解节点与表达式）");
@@ -706,24 +735,27 @@ public class ExportDriver {
     static List<double[]> evalAll(Job j, String node, int nExpr, int maxSol) throws Exception {
         List<double[]> found = new ArrayList<>();
         for (String solTag : j.model.sol().tags()) {
-            j.model.result().dataset(j.dataset).set("solution", solTag);
-            for (int k = 1; k <= maxSol; k++) {
-                try {
-                    j.model.result().numerical(node).set("solnum", Integer.toString(k));
-                    double[][] a = j.model.result().numerical(node).getReal();
-                    if (a.length == 0 || a[0].length == 0) break;
-                    double[] row = new double[nExpr];
-                    boolean ok = true;
-                    for (int q = 0; q < nExpr; q++) {
-                        double v = a[q][0];
-                        if (Double.isNaN(v) || Double.isInfinite(v)) { ok = false; break; }
-                        row[q] = v;
-                    }
-                    if (!ok) continue;
-                    boolean dup = false;
-                    for (double[] prev : found) if (Arrays.equals(prev, row)) { dup = true; break; }
-                    if (!dup) found.add(row);
-                } catch (Exception inner) { break; }
+            j.model.result().numerical(node).set("data", datasetFor(j, solTag));
+            double[][] a;
+            try {
+                a = j.model.result().numerical(node).getReal();
+            } catch (Exception inner) {
+                System.out.println("[driver] 解节点 " + solTag + " 取数失败: " + inner.getMessage());
+                continue;
+            }
+            if (a.length == 0 || a[0].length == 0) { System.out.println("[driver] 解节点 " + solTag + " 无解"); continue; }
+            for (int c = 0; c < a[0].length; c++) {
+                double[] row = new double[nExpr];
+                boolean ok = true;
+                for (int q = 0; q < nExpr; q++) {
+                    double v = a[q][c];
+                    if (Double.isNaN(v) || Double.isInfinite(v)) { ok = false; break; }
+                    row[q] = v;
+                }
+                if (!ok) continue;
+                boolean dup = false;
+                for (double[] prev : found) if (Arrays.equals(prev, row)) { dup = true; break; }
+                if (!dup) found.add(row);
             }
         }
         return found;

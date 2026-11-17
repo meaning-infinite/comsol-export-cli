@@ -260,12 +260,21 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.1 | 2026-11-12 | 驱动改 handler 分派；新增 `spectrum` / `image` / `eigenslice`；`-DryRun` 不再真正执行 |
 | v1.2 | 2026-11-12 | 新增 `-Mode export`（只导出已求解模型，job.properties 的 `solve=0`）；模型列表支持 `.lnk` 快捷方式（显示快捷方式名、按其命名） |
 | v1.3 | 2026-11-12 | 预制模块系统（`modules/*.psd1` + 配方 `Use`）；新增 `slice2d`（二维正投影切面）、`integral`（线/面积分）、`modes`（模态数值）三个 handler；`-Modules` 列出模块 |
+| v1.4 | 2026-11-16 | 新增 `bigtable`（参数化大表：全局参数 + 谱线 + 相位 + 各 ITO 域吸收）；表头全 ASCII |
+| v1.5 | 2026-11-17 | 修多步骤/多研究模型只导出第一步解：改为每个解节点建独立 `Solution` 数据集，取 `getReal()` 的全部解列；不再逐次 `set("solnum")` |
 
 ## 8. 待验证 / 已知缺口
 
 - `eigenslice` 的“单解节点内多模态”枚举尚未在真实特征频率模型上跑过（测试模型只有波长解，用 4 个解节点代替验证）。
 - `spectrum` 曲线图横轴取默认（未强制设为波长），多条解曲线会画在同一张图上。
 - `MaxParallel > 1` 只做过串行实测，并发时的锁竞争未实测。
+
+### 多解导出口径（v1.5 起）
+
+- `model.sol()` 里每个解节点（`sol1`、`sol2`…，可能来自不同研究/不同步骤）各建一个 `Solution` 数据集 `dset_sol_<解节点>`，把它绑到 `data`，再 `getReal()` 取**该节点全部解**的列。
+- 不再对 `dset1` 改 `solution` 属性，也不再逐次 `set("solnum")`：前者在多研究模型里会静默失效（只剩第一步的解），后者在部分数据集上抛 `Invalid_property_value`。
+- 行按整行去重（同参数同波长的重复解只留一行）。
+
 
 ## 附：COMSOL 官方 API
 
