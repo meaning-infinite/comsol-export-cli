@@ -37,6 +37,7 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 | `-ProgressStyle <1\|2\|3>` | string | 进度显示样式，默认 `2`；环境变量 `COMSOL_EXPORT_STYLE` 覆盖；配置 `ProgressStyle` 次之 |
 | `-Cores <n>` | int | 求解核数（传给 `comsolbatch -np`），默认 `0` = 让 COMSOL 自己决定 |
 | `-Heap <6g>` | string | Java 堆，覆盖按物理内存自动估算的值；环境变量 `COMSOL_EXPORT_XMX` 亦可 |
+| `-WinWidth <n>` | int | 控制台宽度（列），默认 `88`；高度自动按屏幕工作区占满。环境变量 `COMSOL_EXPORT_COLS` 覆盖；`COMSOL_EXPORT_NORESIZE=1` 关掉自动设尺寸 |
 | `-Help` | switch | 帮助 |
 
 ### 2.2 退出码
@@ -287,6 +288,10 @@ static void exportFoo(Job j, int i) throws Exception {
 
 窗口标题同步显示 `【求解 42%】<模型名> - COMSOL 导出`，任务栏可见。
 
+进度条是**同一种字形 `█`**（`▓`/`▒`/`░` 在 Consolas 里墨迹位置不同，混用会让"已完成"比"未完成"高），已完成用黄色、未完成用深灰，逐段 `Write-Host -NoNewline -ForegroundColor` 上色。
+
+开窗时自动把窗口设成 88 列宽、高度占满屏幕工作区（`SM_CYFULLSCREEN ÷ 字体单元高度`，字体高度取自 `GetCurrentConsoleFontEx`），并挪到左上角；Windows Terminal 之类不认字符尺寸的宿主会退化成直接最大化。输出被重定向时不改窗口尺寸。
+
 ## 7. 变更记录
 
 | 版本 | 日期 | 内容 |
@@ -300,6 +305,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.5 | 2026-11-17 | 修多步骤/多研究模型只导出第一步解：改为每个解节点建独立 `Solution` 数据集，取 `getReal()` 的全部解列；不再逐次 `set("solnum")` |
 | v1.6 | 2026-11-18 | 修 651 解只导出 400 行：改按 `getSize()[1]` 逐块（`Chunk`，默认 200）显式取解编号，每块校验列数，取不满即报错；NaN 不再静默丢行（`Allownan=1` 才放行）；CSV 改流式写 `.part`；去重 O(n²)→哈希；`-Xmx4g` 改按物理内存自动（`-Heap`/`COMSOL_EXPORT_XMX` 可覆盖） |
 | v1.7 | 2026-11-18 | 求解改走 `comsolbatch -batchlog` 的两阶段流程（headless、不留锁、求解完成自动交接导出），CLI 实时显示 求解百分比/导出 `已取 x/N`、已用（秒）、剩余（分钟）、预计完成时刻；新增 `-ProgressStyle 1/2/3` 三套样式、`-Cores`、`-Heap`；不再用历史耗时猜进度 |
+| v1.7.1 | 2026-11-18 | 进度条改为同字形 `█` + 分段着色（黄=已完成、深灰=未完成），修「已完成比未完成高」；开窗自动设 88 列宽、高度按屏幕工作区占满并挪到左上角（`-WinWidth`/`COMSOL_EXPORT_COLS`/`COMSOL_EXPORT_NORESIZE`） |
 
 ## 8. 待验证 / 已知缺口
 

@@ -34,6 +34,7 @@ param(
     [ValidateSet('','1','2','3')]
     [string]$ProgressStyle = '',
     [int]$Cores = 0,
+    [int]$WinWidth = 0,
     [switch]$Setup,
     [switch]$Modules,
     [switch]$Help
@@ -98,37 +99,143 @@ $script:LiveCount = 0
 $script:LiveSig = ''
 $script:IsRedirected = $false
 try { $script:IsRedirected = [Console]::IsOutputRedirected } catch { }
-function Show-LiveBox([string]$title, [string[]]$lines, [string]$color) {
-    $all = @(Get-BoxLines $title $lines)
+
+# 行 = 若干 {Text,Color} 段；整行同色时就是一段
+function Join-RowText($row) {
+    $sb = ''
+    foreach ($s in $row) { $sb = $sb + [string]$s.Text }
+    return $sb
+}
+function Pad-Row($row, [int]$w) {
+    $out = @()
+    foreach ($s in $row) { $out += @{ Text = [string]$s.Text; Color = $s.Color } }
+    if ($out.Count -eq 0) { $out += @{ Text = ''; Color = 'Gray' } }
+    $n = $w - (Get-TextWidth (Join-RowText $out))
+    if ($n -lt 0) { $n = 0 }
+    $last = $out.Count - 1
+    $out[$last].Text = [string]$out[$last].Text + (' ' * $n)
+    return , $out
+}
+function Get-RowsWidth($rows) {
+    $w = 0
+    foreach ($r in $rows) { $w = [math]::Max($w, (Get-TextWidth (Join-RowText $r)) + 2) }
+    return $w
+}
+# 画一次框；$eraseWidth > 0 时把每行右侧补空格到该宽度（原地刷新时擦掉旧字）
+function Draw-BoxRows([string]$title, $rows, [string]$border, [int]$eraseWidth) {
+    $w = Get-RowsWidth $rows
+    $tw = Get-TextWidth (' ' + $title + ' ')
+    $w = [math]::Max($w, $tw + 2)
+    Write-Host ('  ┌─ ' + $title + ' ' + ('─' * ($w - 1 - $tw)) + '┐') -ForegroundColor $border
+    foreach ($r in $rows) {
+        $padded = Pad-Row $r ($w - 1)
+        Write-Host '  │ ' -NoNewline -ForegroundColor $border
+        foreach ($s in $padded) {
+            if ([string]$s.Text) { Write-Host ([string]$s.Text) -NoNewline -ForegroundColor $s.Color }
+        }
+        Write-Host '│' -NoNewline -ForegroundColor $border
+        if ($eraseWidth -gt 0) {
+            $used = 4 + ($w - 1) + 1
+            if ($used -lt $eraseWidth) { Write-Host (' ' * ($eraseWidth - $used)) -NoNewline }
+        }
+        Write-Host ''
+    }
+    Write-Host ('  └' + ('─' * $w) + '┘') -ForegroundColor $border
+}
+function Show-LiveBox([string]$title, $rows, [string]$color) {
+    $norm = @()
+    foreach ($r in $rows) {
+        if ($r -is [string]) { $norm += , @(@{ Text = $r; Color = $color }) }
+        else { $norm += , @($r) }
+    }
+    $flat = @($norm | ForEach-Object { Join-RowText $_ })
     if ($script:IsRedirected) {
         # 输出被重定向（无人值守/日志）：只在阶段或内容变化时打一行，不刷屏
         if ($title -ne $script:LiveSig) {
             $script:LiveSig = $title
-            Write-Host ('  [' + $title + '] ' + ($lines -join '   '))
+            Write-Host ('  [' + $title + '] ' + ($flat -join '   '))
         }
         return
     }
+    $count = $norm.Count + 2
     try {
         if ($script:LiveTop -lt 0) {
             Write-Host ''
-            foreach ($l in $all) { Write-Host ('  ' + $l) -ForegroundColor $color }
-            $script:LiveCount = $all.Count
-            $script:LiveTop = [Console]::CursorTop - $all.Count
+            Draw-BoxRows $title $norm $color 0
+            $script:LiveCount = $count
+            $script:LiveTop = [Console]::CursorTop - $count
         } else {
             $bw = [math]::Max(20, [Console]::BufferWidth - 1)
-            $safeTop = [math]::Min($script:LiveTop, [math]::Max(0, [Console]::BufferHeight - $all.Count - 1))
+            $safeTop = [math]::Min($script:LiveTop, [math]::Max(0, [Console]::BufferHeight - $count - 1))
             [Console]::SetCursorPosition(0, $safeTop)
-            foreach ($l in $all) { Write-Host (('  ' + $l).PadRight($bw)) -ForegroundColor $color }
-            [Console]::SetCursorPosition(0, $safeTop + $all.Count)
+            Draw-BoxRows $title $norm $color $bw
+            [Console]::SetCursorPosition(0, $safeTop + $count)
             $script:LiveTop = $safeTop
         }
     } catch {
         if ($title -ne $script:LiveSig) {
             $script:LiveSig = $title
-            Write-Host ('  [' + $title + '] ' + ($lines -join '   '))
+            Write-Host ('  [' + $title + '] ' + ($flat -join '   '))
         }
     }
 }
+
+# 开窗即设好尺寸：宽度够放 74 字方框 + 边距，高度占满屏幕
+# 覆盖方式：-WinWidth <n> / 环境变量 COMSOL_EXPORT_COLS / 配置 WindowCols；COMSOL_EXPORT_NORESIZE=1 关掉
+function Initialize-ConsoleWindow {
+    if ($script:IsRedirected) { return }
+    if ($env:COMSOL_EXPORT_NORESIZE) { return }
+    $cols = 0
+    if ($script:WinCols -gt 0) { $cols = [int]$script:WinCols }
+    elseif ($env:COMSOL_EXPORT_COLS) { try { $cols = [int]$env:COMSOL_EXPORT_COLS } catch { $cols = 0 } }
+    if ($cols -le 0) { $cols = 88 }
+    if ($cols -lt 72) { $cols = 72 }
+    try {
+        Add-Type -Namespace ComsolCli -Name Win -ErrorAction Stop -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
+[StructLayout(LayoutKind.Sequential)] public struct COORD { public short X; public short Y; }
+[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct FONTINFO { public uint cbSize; public uint nFont; public COORD dwFontSize; public uint FontFamily; public uint FontWeight; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string FaceName; }
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetCurrentConsoleFontEx(IntPtr h, bool max, ref FONTINFO f);
+[DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+'@
+    } catch { }
+    # 字体单元高度（像素）
+    $cellH = 16
+    try {
+        $fi = New-Object 'ComsolCli.Win+FONTINFO'
+        $fi.cbSize = [uint32][System.Runtime.InteropServices.Marshal]::SizeOf($fi)
+        if ([ComsolCli.Win]::GetCurrentConsoleFontEx([ComsolCli.Win]::GetStdHandle(-11), $false, [ref]$fi)) {
+            if ([int]$fi.dwFontSize.Y -gt 6) { $cellH = [int]$fi.dwFontSize.Y }
+        }
+    } catch { }
+    # 可用屏幕高度（像素）：SM_CYFULLSCREEN，失败退整屏
+    $workH = 0
+    try {
+        $workH = [int][ComsolCli.Win]::GetSystemMetrics(17)
+        if ($workH -le 0) { $workH = [int][ComsolCli.Win]::GetSystemMetrics(1) }
+    } catch { }
+    $rows = 0
+    if ($workH -gt 0 -and $cellH -gt 0) { $rows = [int][Math]::Floor($workH / $cellH) - 1 }
+    if ($rows -lt 20 -or $rows -gt 200) {
+        try { $rows = [int][Console]::LargestWindowHeight } catch { $rows = 0 }
+        if ($rows -lt 20 -or $rows -gt 200) { $rows = 40 }
+    }
+    $sized = $false
+    try { [Console]::SetBufferSize([Math]::Max($cols, [Console]::WindowWidth), [Math]::Max($rows + 2, 4000)) } catch { }
+    try { [Console]::SetWindowSize($cols, $rows); $sized = $true } catch { }
+    if ($sized) { try { [Console]::SetBufferSize($cols, [Math]::Max($rows + 2, 4000)) } catch { } }
+    try {
+        $hw = [ComsolCli.Win]::GetConsoleWindow()
+        if ($hw -ne [IntPtr]::Zero) {
+            if ($sized) { [void][ComsolCli.Win]::SetWindowPos($hw, [IntPtr]::Zero, 0, 0, 0, 0, 5) }
+            else { [void][ComsolCli.Win]::ShowWindow($hw, 3) }
+        }
+    } catch { }
+}
+
 function Show-StatusLine([string]$text, [string]$fg, [string]$bg) {
     if ($script:IsRedirected) {
         $sig = ($text -replace '[0-9]{2}:[0-9]{2}:[0-9]{2}', '')
@@ -205,6 +312,7 @@ function Show-Help {
     Write-Host '    -ProgressStyle 1|2|3  进度样式：1 单行 / 2 方框仪表 / 3 阶段链'
     Write-Host '    -Cores <n>       求解用几个核（默认交给 COMSOL 自己定）'
     Write-Host '    -Heap <6g>       Java 堆（默认按物理内存 70%）'
+    Write-Host '    -WinWidth <n>    控制台宽度（列），默认 88；高度自动占满'
     Write-Host '    -Resume          接着监视队列里未完成的作业'
     Write-Host '    -Help            显示本帮助'
     Write-Host ''
@@ -949,12 +1057,24 @@ function Format-TimeLine($info, [string]$sep = ' · ') {
     return $s
 }
 
-function Get-Bar([int]$pct, [int]$width) {
+function Get-BarSeg([int]$pct, [int]$width) {
+    # 两段同字形（█），靠颜色区分已完成/未完成——░ 的墨迹贴顶、█ 满格，同一行看着会错位
     if ($width -lt 4) { $width = 4 }
     if ($pct -lt 0) { $pct = 0 }
     if ($pct -gt 100) { $pct = 100 }
     $fill = [int][math]::Round($width * $pct / 100.0)
-    return (('█' * $fill) + ('░' * ($width - $fill)))
+    return @(
+        @{ Text = ('█' * $fill); Color = 'Yellow' },
+        @{ Text = ('█' * ($width - $fill)); Color = 'DarkGray' }
+    )
+}
+function Get-Bar([int]$pct, [int]$width) {
+    # 单色场景（样式 1 的行内条）：未完成留空格，避免半格阴影带来的高低不齐
+    if ($width -lt 4) { $width = 4 }
+    if ($pct -lt 0) { $pct = 0 }
+    if ($pct -gt 100) { $pct = 100 }
+    $fill = [int][math]::Round($width * $pct / 100.0)
+    return (('█' * $fill) + (' ' * ($width - $fill)))
 }
 
 function Format-Eta($sec) {
@@ -995,23 +1115,25 @@ function Render-Progress1($info, [string]$jobName, $ord, $total) {
 
 # 样式 2：方框仪表（与 CLI 其它框一致）
 function Render-Progress2($info, [string]$jobName, $ord, $total) {
-    $bar = (Get-Bar $info.Pct 30)
-    $lines = @(
-        ('作业   ' + $ord + '/' + [math]::Max(1, $total) + '   ' + $jobName),
-        ('进度   ' + $bar + '   ' + (Get-PctText $info)),
-        ('阶段   ' + (Get-PhaseTag $info) + ' · ' + $info.Detail),
-        ('时间   已用 ' + (Format-Elapsed $info.Elapsed) + '（合计 ' + (Format-Elapsed $info.TotalElapsed) + '） · ' + (Format-TimeLine $info)),
-        ('按键   Q 退出监视（计算不受影响）   K 终止作业')
+    $seg = (Get-BarSeg $info.Pct 30)
+    # 固定宽度 74：避免每秒刷新时框线抖动；进度条两段同字形，靠颜色区分
+    $rows = @(
+        (Pad-Row @(@{ Text = ('作业   ' + $ord + '/' + [math]::Max(1, $total) + '   ' + $jobName); Color = $info.Bg }) 74),
+        (Pad-Row @(
+                @{ Text = '进度   '; Color = $info.Bg },
+                $seg[0], $seg[1],
+                @{ Text = ('   ' + (Get-PctText $info)); Color = $info.Bg }
+            ) 74),
+        (Pad-Row @(@{ Text = ('阶段   ' + (Get-PhaseTag $info) + ' · ' + $info.Detail); Color = $info.Bg }) 74),
+        (Pad-Row @(@{ Text = ('时间   已用 ' + (Format-Elapsed $info.Elapsed) + '（合计 ' + (Format-Elapsed $info.TotalElapsed) + '） · ' + (Format-TimeLine $info)); Color = $info.Bg }) 74),
+        (Pad-Row @(@{ Text = '按键   Q 退出监视（计算不受影响）   K 终止作业'; Color = $info.Bg }) 74)
     )
-    # 固定宽度：避免每秒刷新时框线抖动
-    $fixed = @()
-    foreach ($l in $lines) { $fixed += (Pad-Text $l 74) }
-    Show-LiveBox ('COMSOL 计算进度') $fixed $info.Bg
+    Show-LiveBox 'COMSOL 计算进度' $rows $info.Bg
 }
 
 # 样式 3：阶段链（看得出走到哪一步了）
 function Render-Progress3($info, [string]$jobName, $ord, $total) {
-    $bar = (Get-Bar $info.Pct 34)
+    $seg = (Get-BarSeg $info.Pct 34)
     $chain = ''
     if ($info.Phase -eq 'solve') {
         $names = @('准备', '网格', '编译', '求解器', '组装', '分解', '解方程', '收尾')
@@ -1024,15 +1146,17 @@ function Render-Progress3($info, [string]$jobName, $ord, $total) {
     } else {
         $chain = ('第 ' + $ord + '/' + [math]::Max(1, $total) + ' 个作业   ' + $jobName)
     }
-    $lines = @(
-        ((Get-PhaseTag $info) + '  ' + $bar + '  ' + (Get-PctText $info)),
-        $chain,
-        $info.Detail,
-        ('已用 ' + (Format-Elapsed $info.Elapsed) + ' · ' + (Format-TimeLine $info) + ' · Q 退出监视  K 终止')
+    $rows = @(
+        (Pad-Row @(
+                @{ Text = ((Get-PhaseTag $info) + '  '); Color = $info.Bg },
+                $seg[0], $seg[1],
+                @{ Text = ('  ' + (Get-PctText $info)); Color = $info.Bg }
+            ) 74),
+        (Pad-Row @(@{ Text = $chain; Color = $info.Bg }) 74),
+        (Pad-Row @(@{ Text = $info.Detail; Color = $info.Bg }) 74),
+        (Pad-Row @(@{ Text = ('已用 ' + (Format-Elapsed $info.Elapsed) + ' · ' + (Format-TimeLine $info) + ' · Q 退出监视  K 终止'); Color = $info.Bg }) 74)
     )
-    $fixed = @()
-    foreach ($l in $lines) { $fixed += (Pad-Text $l 74) }
-    Show-LiveBox $jobName $fixed $info.Bg
+    Show-LiveBox $jobName $rows $info.Bg
 }
 
 function Show-ProgressJob($job, $ord, $total) {
@@ -1573,6 +1697,9 @@ if ([string]::IsNullOrWhiteSpace($script:PStyle)) {
     if ([string]::IsNullOrWhiteSpace($script:PStyle)) { $script:PStyle = '2' }
 }
 if ($env:COMSOL_EXPORT_STYLE) { $script:PStyle = [string]$env:COMSOL_EXPORT_STYLE }
+$script:WinCols = 0
+if ($WinWidth -gt 0) { $script:WinCols = [int]$WinWidth }
+Initialize-ConsoleWindow
 $comsolBatch = Resolve-Comsol $ComsolPath
 Write-Host ('  COMSOL   : ' + $comsolBatch)
 Write-Host ''
