@@ -94,8 +94,10 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 }
 
 # 原地刷新的活动框：LiveTop=-1 表示还没画过
+# 刷新策略：逐行比对，只重写"内容变了"的那一行（差量），绝不整框重画
 $script:LiveTop = -1
 $script:LiveCount = 0
+$script:LiveText = @()
 $script:LiveSig = ''
 $script:IsRedirected = $false
 try { $script:IsRedirected = [Console]::IsOutputRedirected } catch { }
@@ -121,27 +123,49 @@ function Get-RowsWidth($rows) {
     foreach ($r in $rows) { $w = [math]::Max($w, (Get-TextWidth (Join-RowText $r)) + 2) }
     return $w
 }
-# 画一次框；$eraseWidth > 0 时把每行右侧补空格到该宽度（原地刷新时擦掉旧字）
-function Draw-BoxRows([string]$title, $rows, [string]$border, [int]$eraseWidth) {
+
+# 把标题+行组装成"显示行"：每项 @{ Text = 纯文本（用于比对）; Segs = 段数组（用于着色写屏） }
+function New-BoxDisplay([string]$title, $rows, [string]$border) {
     $w = Get-RowsWidth $rows
     $tw = Get-TextWidth (' ' + $title + ' ')
     $w = [math]::Max($w, $tw + 2)
-    Write-Host ('  ┌─ ' + $title + ' ' + ('─' * ($w - 1 - $tw)) + '┐') -ForegroundColor $border
+    if ($w -lt 10) { $w = 10 }
+    $disp = New-Object System.Collections.ArrayList
+    $topLine = '  ┌─ ' + $title + ' ' + ('─' * ($w - 1 - $tw)) + '┐'
+    [void]$disp.Add(@{ Text = $topLine; Segs = @(@{ Text = $topLine; Color = $border }) })
     foreach ($r in $rows) {
         $padded = Pad-Row $r ($w - 1)
-        Write-Host '  │ ' -NoNewline -ForegroundColor $border
-        foreach ($s in $padded) {
-            if ([string]$s.Text) { Write-Host ([string]$s.Text) -NoNewline -ForegroundColor $s.Color }
-        }
-        Write-Host '│' -NoNewline -ForegroundColor $border
-        if ($eraseWidth -gt 0) {
-            $used = 4 + ($w - 1) + 1
-            if ($used -lt $eraseWidth) { Write-Host (' ' * ($eraseWidth - $used)) -NoNewline }
-        }
-        Write-Host ''
+        $segs = New-Object System.Collections.ArrayList
+        [void]$segs.Add(@{ Text = '  │ '; Color = $border })
+        foreach ($s in $padded) { [void]$segs.Add(@{ Text = [string]$s.Text; Color = $s.Color }) }
+        [void]$segs.Add(@{ Text = '│'; Color = $border })
+        $arr = @($segs.ToArray())
+        [void]$disp.Add(@{ Text = (Join-RowText $arr); Segs = $arr })
     }
-    Write-Host ('  └' + ('─' * $w) + '┘') -ForegroundColor $border
+    $botLine = '  └' + ('─' * $w) + '┘'
+    [void]$disp.Add(@{ Text = $botLine; Segs = @(@{ Text = $botLine; Color = $border }) })
+    return , @($disp.ToArray())
 }
+
+# 写一行（段着色），右侧补空格到 $padTo 列，用于擦掉上一帧的残留
+function Write-LineSegs($segs, [int]$padTo) {
+    $used = 0
+    foreach ($s in $segs) {
+        $tx = [string]$s.Text
+        if ($tx) {
+            Write-Host $tx -NoNewline -ForegroundColor $s.Color
+            $used = $used + (Get-TextWidth $tx)
+        }
+    }
+    if ($padTo -gt $used) { Write-Host (' ' * ($padTo - $used)) -NoNewline }
+}
+
+function Get-LiveWidth {
+    $bw = 80
+    try { $bw = [math]::Max(40, [Console]::BufferWidth - 1) } catch { }
+    return $bw
+}
+
 function Show-LiveBox([string]$title, $rows, [string]$color) {
     $norm = @()
     foreach ($r in $rows) {
@@ -157,21 +181,41 @@ function Show-LiveBox([string]$title, $rows, [string]$color) {
         }
         return
     }
-    $count = $norm.Count + 2
     try {
+        $disp = New-BoxDisplay $title $norm $color
+        $count = @($disp).Count
+        $bw = Get-LiveWidth
         if ($script:LiveTop -lt 0) {
+            # 首帧：一次画完，光标停在框下方
             Write-Host ''
-            Draw-BoxRows $title $norm $color 0
+            for ($i = 0; $i -lt $count; $i++) {
+                Write-LineSegs $disp[$i].Segs $bw
+                Write-Host ''
+            }
             $script:LiveCount = $count
-            $script:LiveTop = [Console]::CursorTop - $count
-        } else {
-            $bw = [math]::Max(20, [Console]::BufferWidth - 1)
-            $safeTop = [math]::Min($script:LiveTop, [math]::Max(0, [Console]::BufferHeight - $count - 1))
-            [Console]::SetCursorPosition(0, $safeTop)
-            Draw-BoxRows $title $norm $color $bw
-            [Console]::SetCursorPosition(0, $safeTop + $count)
-            $script:LiveTop = $safeTop
+            $script:LiveText = @($disp | ForEach-Object { [string]$_.Text })
+            $script:LiveTop = [math]::Max(0, [Console]::CursorTop - $count)
+            return
         }
+        $top = $script:LiveTop
+        $maxTop = [math]::Max(0, [Console]::BufferHeight - $count - 1)
+        if ($top -gt $maxTop) { $top = $maxTop }
+        $texts = @($script:LiveText)
+        for ($i = 0; $i -lt $count; $i++) {
+            $txt = [string]$disp[$i].Text
+            # 差量：这一行没变就不碰它（不变的光标不动 = 不闪、不滚屏）
+            if ($i -lt $texts.Count -and $texts[$i] -eq $txt) { continue }
+            [Console]::SetCursorPosition(0, $top + $i)
+            Write-LineSegs $disp[$i].Segs $bw
+            if ($i -lt $texts.Count) { $texts[$i] = $txt } else { $texts += $txt }
+        }
+        $script:LiveText = $texts
+        $script:LiveCount = $count
+        $script:LiveTop = $top
+        $afterRow = $top + $count
+        $maxRow = [math]::Max(0, [Console]::BufferHeight - 1)
+        if ($afterRow -gt $maxRow) { $afterRow = $maxRow }
+        [Console]::SetCursorPosition(0, $afterRow)
     } catch {
         if ($title -ne $script:LiveSig) {
             $script:LiveSig = $title
@@ -180,9 +224,57 @@ function Show-LiveBox([string]$title, $rows, [string]$color) {
     }
 }
 
+function Show-StatusLine([string]$text, [string]$fg, [string]$bg) {
+    if ($script:IsRedirected) {
+        $sig = ($text -replace '[0-9]{2}:[0-9]{2}:[0-9]{2}', '')
+        if ($sig -ne $script:LiveSig) { $script:LiveSig = $sig; Write-Host ('  ' + $text) }
+        return
+    }
+    $hw = 80
+    try { $hw = [Console]::WindowWidth } catch { }
+    if ($hw -lt 62) { $hw = 80 }
+    if (-not $script:StatusW -or $script:StatusW -gt ($hw - 1)) { $script:StatusW = $hw - 2 }
+    $bw = $script:StatusW
+    $line = '▌ ' + $text + ' '
+    for ($n = 0; $n -lt 300 -and (Get-TextWidth $line) -gt ($bw - 2) -and $line.Length -gt 2; $n++) {
+        $line = $line.Substring(0, $line.Length - 1)
+    }
+    $padN = $bw - 1 - (Get-TextWidth $line)
+    if ($padN -lt 0) { $padN = 0 }
+    $out = $line + (' ' * $padN) + '▐'
+    try {
+        $topBefore = [Console]::CursorTop
+        Write-Host ("`r" + $out) -NoNewline -ForegroundColor $fg -BackgroundColor $bg
+        if ([Console]::CursorTop -gt $topBefore) {
+            $script:StatusW = [math]::Max(60, $script:StatusW - 4)
+            try { [Console]::SetCursorPosition(0, $topBefore) } catch { }
+        }
+    } catch {
+        try { Write-Host ("`r" + $out) -NoNewline -ForegroundColor $fg -BackgroundColor $bg } catch { }
+    }
+}
+
+function Clear-LiveBox {
+    try {
+        if ($script:LiveTop -ge 0) {
+            $bw = Get-LiveWidth
+            $blank = ' ' * $bw
+            for ($y = 0; $y -lt $script:LiveCount; $y++) {
+                [Console]::SetCursorPosition(0, $script:LiveTop + $y)
+                Write-Host $blank -NoNewline
+            }
+            [Console]::SetCursorPosition(0, $script:LiveTop)
+        }
+    } catch { }
+    $script:LiveTop = -1
+    $script:LiveCount = 0
+    $script:LiveText = @()
+}
+
 # 开窗即设好尺寸：宽度够放 74 字方框 + 边距，高度占满屏幕
 # 覆盖方式：-WinWidth <n> / 环境变量 COMSOL_EXPORT_COLS / 配置 WindowCols；COMSOL_EXPORT_NORESIZE=1 关掉
 function Initialize-ConsoleWindow {
+    $script:WinInfo = @{ tried = $false; cols = 0; rows = 0; got = ''; how = 'none' }
     if ($script:IsRedirected) { return }
     if ($env:COMSOL_EXPORT_NORESIZE) { return }
     $cols = 0
@@ -223,63 +315,44 @@ function Initialize-ConsoleWindow {
         try { $rows = [int][Console]::LargestWindowHeight } catch { $rows = 0 }
         if ($rows -lt 20 -or $rows -gt 200) { $rows = 40 }
     }
-    $sized = $false
-    try { [Console]::SetBufferSize([Math]::Max($cols, [Console]::WindowWidth), [Math]::Max($rows + 2, 4000)) } catch { }
-    try { [Console]::SetWindowSize($cols, $rows); $sized = $true } catch { }
-    if ($sized) { try { [Console]::SetBufferSize($cols, [Math]::Max($rows + 2, 4000)) } catch { } }
+    $script:WinInfo.tried = $true
+    $script:WinInfo.cols = $cols
+    $script:WinInfo.rows = $rows
+    # 第一招：字符尺寸 API；不认（Windows Terminal 等）就退到 mode con；两招都验宽度是否真的到了
+    $widthOk = $false
+    for ($try = 0; $try -lt 2; $try++) {
+        if ($try -eq 0) {
+            try { [Console]::SetBufferSize([math]::Max($cols + 1, [Console]::BufferWidth), [math]::Max($rows + 4, 3000)) } catch { }
+            try { [Console]::SetWindowSize($cols, $rows) } catch { }
+            $script:WinInfo.how = 'api'
+        } else {
+            try { $null = & cmd.exe /c ("mode con cols={0} lines={1}" -f $cols, $rows) } catch { }
+            $script:WinInfo.how = 'mode'
+        }
+        $gotW = 0; $gotH = 0
+        try { $gotW = [int][Console]::WindowWidth; $gotH = [int][Console]::WindowHeight } catch { }
+        $script:WinInfo.got = ('{0}x{1}' -f $gotW, $gotH)
+        if ($gotW -eq $cols) { $widthOk = $true; break }
+    }
+    # 恢复可回滚的缓冲区高度（mode con 会把缓冲区压成一行高）
+    try { [Console]::SetBufferSize($cols, [math]::Max([Console]::WindowHeight + 2, 3000)) } catch { }
     try {
         $hw = [ComsolCli.Win]::GetConsoleWindow()
         if ($hw -ne [IntPtr]::Zero) {
-            if ($sized) { [void][ComsolCli.Win]::SetWindowPos($hw, [IntPtr]::Zero, 0, 0, 0, 0, 5) }
-            else { [void][ComsolCli.Win]::ShowWindow($hw, 3) }
-        }
-    } catch { }
-}
-
-function Show-StatusLine([string]$text, [string]$fg, [string]$bg) {
-    if ($script:IsRedirected) {
-        $sig = ($text -replace '[0-9]{2}:[0-9]{2}:[0-9]{2}', '')
-        if ($sig -ne $script:LiveSig) { $script:LiveSig = $sig; Write-Host ('  ' + $text) }
-        return
-    }
-    $hw = 80
-    try { $hw = [Console]::WindowWidth } catch { }
-    if ($hw -lt 62) { $hw = 80 }
-    # 每次先按窗宽算，发现换行（光标下移）就永久收窄，避免"刷一行变两行"
-    if (-not $script:StatusW -or $script:StatusW -gt ($hw - 1)) { $script:StatusW = $hw - 2 }
-    $bw = $script:StatusW
-    $line = '▌ ' + $text + ' '
-    for ($n = 0; $n -lt 300 -and (Get-TextWidth $line) -gt ($bw - 2) -and $line.Length -gt 2; $n++) {
-        $line = $line.Substring(0, $line.Length - 1)
-    }
-    $padN = $bw - 1 - (Get-TextWidth $line)
-    if ($padN -lt 0) { $padN = 0 }
-    $out = $line + (' ' * $padN) + '▐'
-    try {
-        $topBefore = [Console]::CursorTop
-        Write-Host ("`r" + $out) -NoNewline -ForegroundColor $fg -BackgroundColor $bg
-        if ([Console]::CursorTop -gt $topBefore) {
-            $script:StatusW = [math]::Max(60, $script:StatusW - 4)
-            try { [Console]::SetCursorPosition(0, $topBefore) } catch { }
-        }
-    } catch {
-        try { Write-Host ("`r" + $out) -NoNewline -ForegroundColor $fg -BackgroundColor $bg } catch { }
-    }
-}
-
-function Clear-LiveBox {
-    try {
-        if ($script:LiveTop -ge 0) {
-            $bw = [math]::Max(20, [Console]::BufferWidth - 1)
-            for ($y = 0; $y -lt $script:LiveCount; $y++) {
-                [Console]::SetCursorPosition(0, $script:LiveTop + $y)
-                Write-Host (''.PadRight($bw))
+            if ($widthOk) {
+                [void][ComsolCli.Win]::SetWindowPos($hw, [IntPtr]::Zero, 0, 0, 0, 0, 5)
+            } else {
+                # 字符尺寸 API 和 mode 都被无视：直接最大化，至少铺满屏幕
+                [void][ComsolCli.Win]::ShowWindow($hw, 3)
+                $script:WinInfo.how = 'maximize'
             }
-            [Console]::SetCursorPosition(0, $script:LiveTop)
         }
     } catch { }
-    $script:LiveTop = -1
+    if ($env:COMSOL_EXPORT_WINDEBUG) {
+        Write-Host ('  [窗口] 目标 {0}x{1}，实得 {2}（{3}）' -f $cols, $rows, $script:WinInfo.got, $script:WinInfo.how) -ForegroundColor DarkGray
+    }
 }
+
 
 
 $ScriptDir = $PSScriptRoot
@@ -1384,50 +1457,77 @@ function Start-ExportPhase($job) {
     $job.status = 'running'
 }
 
-function Stop-OneJob($job) {
-    # 目标 = 记录的 pid + 命令行里带本作业目录/目录名的 java 进程（不再先判活，避免误判后不杀）
-    $leaf = Split-Path -Leaf $job.jobDir
-    $targets = @()
-    if ($job.pid -and [int]$job.pid -gt 0) { $targets += [int]$job.pid }
+# 找出属于某作业的进程：java/comsol，且命令行里带作业目录 / 目录名 / 模型路径。
+# 为什么按这些标记而不是只按 pid：comsolbatch 会派生子进程，且求解/导出两个阶段
+# 的 pid 不同（求解记的是 comsolbatch，导出记的是 java），挨个阶段都要能抓到。
+function Get-JobProcIds($job) {
+    $ids = @()
+    $jobDir = [string](Get-JobProp $job 'jobDir')
+    $leaf = ''
+    if ($jobDir) { $leaf = Split-Path -Leaf $jobDir }
+    $model = [string](Get-JobProp $job 'model')
+    $marks = @()
+    if ($jobDir) { $marks += $jobDir }
+    if ($leaf) { $marks += $leaf }
+    if ($model) { $marks += $model }
     try {
         foreach ($pp in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                           Where-Object { $_.Name -like 'java*' -or $_.Name -like 'comsol*' })) {
             $cl = [string]$pp.CommandLine
             if (-not $cl) { continue }
-            if ($cl -like ('*' + $job.jobDir + '*') -or ($leaf -and $cl -like ('*' + $leaf + '*'))) {
-                $targets += [int]$pp.ProcessId
+            foreach ($m in $marks) {
+                if ($m -and $cl -like ('*' + $m + '*')) { $ids += [int]$pp.ProcessId; break }
             }
         }
     } catch { }
-    $targets = @($targets | Sort-Object -Unique)
-    if ($targets.Count -eq 0) { return '进程已不在（可能已自行结束）' }
+    return @($ids | Sort-Object -Unique)
+}
+
+function Stop-OneJob($job) {
+    # 先落 killed 标记：哪怕下面杀不干净，调度器也不会把这一步当成"正常结束"再接手
+    $marker = Join-Path $job.jobDir 'killed'
+    try { [System.IO.File]::WriteAllText($marker, (Get-Date).ToString('o'), (New-Object System.Text.UTF8Encoding($false))) } catch { }
 
     $killed = @()
-    foreach ($tpid in $targets) {
-        $pp = Get-Process -Id $tpid -ErrorAction SilentlyContinue
-        if (-not $pp) { continue }
-        if ($pp.ProcessName -notlike 'java*' -and $pp.ProcessName -notlike 'comsol*') { continue }
-        $tkOut = (& taskkill.exe /PID $tpid /T /F 2>&1 | Out-String).Trim()
-        $script:LastKillMsg = $tkOut
-        $killed += $tpid
+    $msg = ''
+    # 反复扫 + 杀：每轮重新枚举（新冒出来的子进程也一起收），最多 12 轮 × 0.5 s
+    for ($round = 0; $round -lt 12; $round++) {
+        $targets = @(Get-JobProcIds $job)
+        $recPid = [int](Get-JobProp $job 'pid')
+        if ($recPid -gt 0) { $targets += $recPid }
+        $targets = @($targets | Sort-Object -Unique)
+        $live = @()
+        foreach ($tpid in $targets) {
+            $pp = Get-Process -Id $tpid -ErrorAction SilentlyContinue
+            if (-not $pp) { continue }
+            # 只杀 java / comsol，别误伤本 CLI 的 powershell
+            if ($pp.ProcessName -notlike 'java*' -and $pp.ProcessName -notlike 'comsol*') { continue }
+            $live += $tpid
+        }
+        if ($live.Count -eq 0) { break }
+        foreach ($tpid in $live) {
+            $msg = (& taskkill.exe /PID $tpid /T /F 2>&1 | Out-String).Trim()
+            if ($killed -notcontains $tpid) { $killed += $tpid }
+        }
+        Start-Sleep -Milliseconds 500
     }
-    if ($killed.Count -eq 0) { return '进程已不在（可能已自行结束）' }
-    # taskkill 返回成功不代表进程已消失，最多等 5 s
-    for ($w = 0; $w -lt 20; $w++) {
-        $still = @($killed | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-        if ($still.Count -eq 0) { break }
-        Start-Sleep -Milliseconds 250
+
+    $left = @(Get-JobProcIds $job)
+    $recPid = [int](Get-JobProp $job 'pid')
+    if ($recPid -gt 0) { $left += $recPid }
+    $left = @($left | Sort-Object -Unique | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($left.Count -gt 0) {
+        return ('终止失败，进程仍在: ' + ($left -join ',') + ' | ' + $msg)
     }
-    $still = @($killed | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-    if ($still.Count -gt 0) { return ('终止失败，进程仍在: ' + ($still -join ',') + ' | ' + $script:LastKillMsg) }
-    $job.status = 'killed'
-    $marker = Join-Path $job.jobDir 'killed'
-    [System.IO.File]::WriteAllText($marker, (Get-Date).ToString('o'), (New-Object System.Text.UTF8Encoding($false)))
+    Set-JobProp $job 'status' 'killed'
+    Set-JobProp $job 'pid' 0
     $note = Clear-JobLock $job
+    if ($killed.Count -eq 0) { return ('已终止（进程已自行结束）；模型锁: ' + $note) }
     return ('已终止 PID ' + ($killed -join ',') + '；模型锁: ' + $note)
 }
 
 function Invoke-KillMenu {
+    Clear-LiveBox
     $q = @(Get-Queue)
     $run = @($q | Where-Object { $_.status -eq 'running' -and (Test-JobAlive $_.pid $_.jobDir) })
     Write-Host ''
@@ -1519,7 +1619,18 @@ function Invoke-Scheduler {
             $q = @(Get-Queue)
             foreach ($job in $q) {
                 if ($job.status -eq 'running') {
-                    if (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported')) {
+                    if (Test-Path -LiteralPath (Join-Path $job.jobDir 'killed')) {
+                        # 已经按过终止键：先收掉残留进程，再把作业判为终止。
+                        # 之前的实现只在"进程真的没了"之后才写 killed，杀不干净时作业会永远挂着。
+                        $leftIds = @(Get-JobProcIds $job)
+                        if ($leftIds.Count -gt 0 -or [int](Get-JobProp $job 'pid') -gt 0) {
+                            $km = Stop-OneJob $job
+                            Clear-LiveBox
+                            Write-Host ('  [终止] ' + (Split-Path -Leaf $job.jobDir) + '  ' + $km) -ForegroundColor Yellow
+                        }
+                        Set-JobProp $job 'status' 'killed'
+                    }
+                    elseif (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported')) {
                         $job.status = 'done'
                         if (-not (Test-Path -LiteralPath (Join-Path $job.jobDir 'counted'))) {
                             [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'counted'), '', (New-Object System.Text.UTF8Encoding($false)))
@@ -1617,7 +1728,7 @@ function Invoke-Scheduler {
                 if ([Console]::KeyAvailable) {
                     $k = [Console]::ReadKey($true)
                     if ($k.Key -eq 'Q') { $quitMonitor = $true; break }
-                    if ($k.Key -eq 'K') { Write-Host ''; Invoke-KillMenu; Write-Host '' }
+                    if ($k.Key -eq 'K') { Clear-LiveBox; Write-Host ''; Invoke-KillMenu; Write-Host '' }
                 }
             } catch { }
             Start-Sleep -Milliseconds 500

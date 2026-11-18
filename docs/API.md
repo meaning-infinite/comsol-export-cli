@@ -292,6 +292,12 @@ static void exportFoo(Job j, int i) throws Exception {
 
 开窗时自动把窗口设成 88 列宽、高度占满屏幕工作区（`SM_CYFULLSCREEN ÷ 字体单元高度`，字体高度取自 `GetCurrentConsoleFontEx`），并挪到左上角；Windows Terminal 之类不认字符尺寸的宿主会退化成直接最大化。输出被重定向时不改窗口尺寸。
 
+### 6.6 状态框重绘与终止（v1.7.2）
+
+- **差量重绘**：`Show-LiveBox` 把每帧算成「纯文本 + 段数组」，与上一帧逐行比较，只对变化的行 `SetCursorPosition` 后重写，其余行一个字符都不动（不闪、不滚屏、不重复输出）。首帧整框画一次，`Clear-LiveBox` 按行数擦除。
+- **开窗尺寸**：`Initialize-ConsoleWindow` 先算目标 `cols×rows`（`-WinWidth` / `COMSOL_EXPORT_COLS` / 配置 `WindowCols`，宽度默认 88；行数 = 屏幕工作区高度 ÷ 字体单元高），先试 `SetWindowSize`，回读 `[Console]::WindowWidth` 确认；不生效再退回 `cmd /c mode con`（Windows Terminal 认这个）；都不行才最大化。`COMSOL_EXPORT_WINDEBUG=1` 打印实得尺寸，`COMSOL_EXPORT_NORESIZE=1` 关掉。
+- **终止**：`K` → `Stop-OneJob`：立刻写 `killed` 标记（避免被当成正常结束）→ `Get-JobProcIds` 按「命令行含 jobDir / 目录名 / 模型路径」找齐 java 与 comsol 进程（求解阶段是 comsolbatch，导出阶段是 java，还可能派生）→ 最多 12 轮 `taskkill /PID <id> /T /F` + 500 ms 间隔 → 复核残留。调度器每拍先看 `killed` 标记，有就直接判终止并再收一遍残留进程。
+
 ## 7. 变更记录
 
 | 版本 | 日期 | 内容 |
@@ -305,6 +311,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.5 | 2026-11-17 | 修多步骤/多研究模型只导出第一步解：改为每个解节点建独立 `Solution` 数据集，取 `getReal()` 的全部解列；不再逐次 `set("solnum")` |
 | v1.6 | 2026-11-18 | 修 651 解只导出 400 行：改按 `getSize()[1]` 逐块（`Chunk`，默认 200）显式取解编号，每块校验列数，取不满即报错；NaN 不再静默丢行（`Allownan=1` 才放行）；CSV 改流式写 `.part`；去重 O(n²)→哈希；`-Xmx4g` 改按物理内存自动（`-Heap`/`COMSOL_EXPORT_XMX` 可覆盖） |
 | v1.7 | 2026-11-18 | 求解改走 `comsolbatch -batchlog` 的两阶段流程（headless、不留锁、求解完成自动交接导出），CLI 实时显示 求解百分比/导出 `已取 x/N`、已用（秒）、剩余（分钟）、预计完成时刻；新增 `-ProgressStyle 1/2/3` 三套样式、`-Cores`、`-Heap`；不再用历史耗时猜进度 |
+| v1.7.2 | 2026-11-18 | 进度框改**差量重绘**（逐行比对，只重写变化的行，不再整框重画）；`Initialize-ConsoleWindow` 加回读校验与 `mode con` 回退；终止作业重写为「先写 killed 标记 → 按命令行标记扫 java/comsol 进程 → 最多 12 轮 taskkill /T /F → 复核」，调度器见到 killed 标记即收尾，杀不干净也不挂死 |
 | v1.7.1 | 2026-11-18 | 进度条改为同字形 `█` + 分段着色（黄=已完成、深灰=未完成），修「已完成比未完成高」；开窗自动设 88 列宽、高度按屏幕工作区占满并挪到左上角（`-WinWidth`/`COMSOL_EXPORT_COLS`/`COMSOL_EXPORT_NORESIZE`） |
 
 ## 8. 待验证 / 已知缺口
