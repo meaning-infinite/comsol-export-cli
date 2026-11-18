@@ -35,6 +35,7 @@ param(
     [string]$ProgressStyle = '',
     [int]$Cores = 0,
     [int]$WinWidth = 0,
+    [switch]$WinDebug,
     [switch]$Setup,
     [switch]$Modules,
     [switch]$Help
@@ -271,87 +272,131 @@ function Clear-LiveBox {
     $script:LiveText = @()
 }
 
-# 开窗即设好尺寸：宽度够放 74 字方框 + 边距，高度占满屏幕
-# 覆盖方式：-WinWidth <n> / 环境变量 COMSOL_EXPORT_COLS / 配置 WindowCols；COMSOL_EXPORT_NORESIZE=1 关掉
+# 开窗即设好尺寸：宽度按列数算（默认 88 列，够放 74 字方框），高度占满屏幕可用高度。
+# 覆盖方式：-WinWidth <n> / 环境变量 COMSOL_EXPORT_COLS / 配置 WindowCols；COMSOL_EXPORT_NORESIZE=1 关掉。
+#
+# 做法（实测出来的，别改回 SetWindowSize）：conhost 下 [Console]::SetWindowSize 只改「逻辑行列」，
+# 窗口像素大小不一定跟着变；可靠的办法是量出每行/每列像素，再用 SetWindowPos 按像素定尺寸。
+# 另外 GetWindowRect 对 GetConsoleWindow() 返回的客户区句柄无效（全 0），必须先 GetParent 拿顶层窗口。
+# 字体按 DPI 缩放后磅值不可信（本机报 16px，实际每行 20.5px），所以 cellW/cellH 一律现场量。
 function Initialize-ConsoleWindow {
-    $script:WinInfo = @{ tried = $false; cols = 0; rows = 0; got = ''; how = 'none' }
+    $script:WinInfo = @{ tried = $false; cols = 0; rows = 0; got = ''; how = ''; cellW = 0; cellH = 0; workH = 0 }
     if ($script:IsRedirected) { return }
-    if ($env:COMSOL_EXPORT_NORESIZE) { return }
-    $cols = 0
+    if ($env:COMSOL_EXPORT_NORESIZE -eq '1') { return }
+    $cols = 88
     if ($script:WinCols -gt 0) { $cols = [int]$script:WinCols }
-    elseif ($env:COMSOL_EXPORT_COLS) { try { $cols = [int]$env:COMSOL_EXPORT_COLS } catch { $cols = 0 } }
-    if ($cols -le 0) { $cols = 88 }
+    elseif ($env:COMSOL_EXPORT_COLS -and $env:COMSOL_EXPORT_COLS -match '^\d+$') { $cols = [int]$env:COMSOL_EXPORT_COLS }
     if ($cols -lt 72) { $cols = 72 }
+    if ($cols -gt 300) { $cols = 300 }
     try {
-        Add-Type -Namespace ComsolCli -Name Win -ErrorAction Stop -MemberDefinition @'
+        if (-not ('ComsolCli.Win2' -as [type])) {
+            Add-Type -Namespace ComsolCli -Name Win2 -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
-[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
-[StructLayout(LayoutKind.Sequential)] public struct COORD { public short X; public short Y; }
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct FONTINFO { public uint cbSize; public uint nFont; public COORD dwFontSize; public uint FontFamily; public uint FontWeight; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string FaceName; }
-[DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetCurrentConsoleFontEx(IntPtr h, bool max, ref FONTINFO f);
-[DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
+[DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
+[StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+[DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint a, uint b, out RECT r, uint c);
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 '@
-    } catch { }
-    # 字体单元高度（像素）
-    $cellH = 16
-    try {
-        $fi = New-Object 'ComsolCli.Win+FONTINFO'
-        $fi.cbSize = [uint32][System.Runtime.InteropServices.Marshal]::SizeOf($fi)
-        if ([ComsolCli.Win]::GetCurrentConsoleFontEx([ComsolCli.Win]::GetStdHandle(-11), $false, [ref]$fi)) {
-            if ([int]$fi.dwFontSize.Y -gt 6) { $cellH = [int]$fi.dwFontSize.Y }
         }
     } catch { }
-    # 可用屏幕高度（像素）：SM_CYFULLSCREEN，失败退整屏
-    $workH = 0
-    try {
-        $workH = [int][ComsolCli.Win]::GetSystemMetrics(17)
-        if ($workH -le 0) { $workH = [int][ComsolCli.Win]::GetSystemMetrics(1) }
-    } catch { }
-    $rows = 0
-    if ($workH -gt 0 -and $cellH -gt 0) { $rows = [int][Math]::Floor($workH / $cellH) - 1 }
-    if ($rows -lt 20 -or $rows -gt 200) {
-        try { $rows = [int][Console]::LargestWindowHeight } catch { $rows = 0 }
-        if ($rows -lt 20 -or $rows -gt 200) { $rows = 40 }
-    }
     $script:WinInfo.tried = $true
     $script:WinInfo.cols = $cols
-    $script:WinInfo.rows = $rows
-    # 第一招：字符尺寸 API；不认（Windows Terminal 等）就退到 mode con；两招都验宽度是否真的到了
-    $widthOk = $false
-    for ($try = 0; $try -lt 2; $try++) {
-        if ($try -eq 0) {
-            try { [Console]::SetBufferSize([math]::Max($cols + 1, [Console]::BufferWidth), [math]::Max($rows + 4, 3000)) } catch { }
-            try { [Console]::SetWindowSize($cols, $rows) } catch { }
-            $script:WinInfo.how = 'api'
-        } else {
-            try { $null = & cmd.exe /c ("mode con cols={0} lines={1}" -f $cols, $rows) } catch { }
-            $script:WinInfo.how = 'mode'
-        }
-        $gotW = 0; $gotH = 0
-        try { $gotW = [int][Console]::WindowWidth; $gotH = [int][Console]::WindowHeight } catch { }
-        $script:WinInfo.got = ('{0}x{1}' -f $gotW, $gotH)
-        if ($gotW -eq $cols) { $widthOk = $true; break }
-    }
-    # 恢复可回滚的缓冲区高度（mode con 会把缓冲区压成一行高）
-    try { [Console]::SetBufferSize($cols, [math]::Max([Console]::WindowHeight + 2, 3000)) } catch { }
+
+    $top = [IntPtr]::Zero
     try {
-        $hw = [ComsolCli.Win]::GetConsoleWindow()
-        if ($hw -ne [IntPtr]::Zero) {
-            if ($widthOk) {
-                [void][ComsolCli.Win]::SetWindowPos($hw, [IntPtr]::Zero, 0, 0, 0, 0, 5)
-            } else {
-                # 字符尺寸 API 和 mode 都被无视：直接最大化，至少铺满屏幕
-                [void][ComsolCli.Win]::ShowWindow($hw, 3)
-                $script:WinInfo.how = 'maximize'
-            }
+        $top = [ComsolCli.Win2]::GetConsoleWindow()
+        $par = [ComsolCli.Win2]::GetParent($top)
+        if ($par -ne [IntPtr]::Zero) { $top = $par }
+    } catch { }
+    if ($top -eq [IntPtr]::Zero) { return }
+
+    $workH = 0; $workTop = 0
+    try {
+        $wa = New-Object 'ComsolCli.Win2+RECT'
+        if ([ComsolCli.Win2]::SystemParametersInfo(48, 0, [ref]$wa, 0)) {
+            $workH = [int]($wa.Bottom - $wa.Top)
+            $workTop = [int]$wa.Top
         }
     } catch { }
-    if ($env:COMSOL_EXPORT_WINDEBUG) {
-        Write-Host ('  [窗口] 目标 {0}x{1}，实得 {2}（{3}）' -f $cols, $rows, $script:WinInfo.got, $script:WinInfo.how) -ForegroundColor DarkGray
+    if ($workH -lt 200) {
+        $workH = 800; $workTop = 0
+        try { $workH = [int][Console]::LargestWindowHeight * 20 } catch { }
+    }
+    $script:WinInfo.workH = $workH
+
+    # 取消最大化，否则 SetWindowPos 改不动尺寸
+    try { [void][ComsolCli.Win2]::ShowWindow($top, 9); Start-Sleep -Milliseconds 250 } catch { }
+
+    # 量像素几何：cellW / cellH
+    $cellW = 0.0; $cellH = 0.0
+    $rect = New-Object 'ComsolCli.Win2+RECT'
+    $haveRect = $false
+    try { $haveRect = [ComsolCli.Win2]::GetWindowRect($top, [ref]$rect) } catch { }
+    $w0 = 0; $h0 = 0
+    try { $w0 = [int][Console]::WindowWidth; $h0 = [int][Console]::WindowHeight } catch { }
+    if ($haveRect -and $w0 -gt 10 -and $h0 -gt 5) {
+        $pixW0 = $rect.Right - $rect.Left
+        $pixH0 = $rect.Bottom - $rect.Top
+        if ($pixW0 -gt 200 -and $pixH0 -gt 100) {
+            $cellW = $pixW0 / [double]$w0
+            $cellH = $pixH0 / [double]$h0
+        }
+    }
+    if ($cellW -lt 4 -or $cellW -gt 40) { $cellW = 10.0 }
+    if ($cellH -lt 8 -or $cellH -gt 80) { $cellH = 20.0 }
+    $script:WinInfo.cellW = [double][math]::Round($cellW, 2)
+    $script:WinInfo.cellH = [double][math]::Round($cellH, 2)
+
+    try { [Console]::SetBufferSize($cols, 4000) } catch { }
+    # 用像素定尺寸，最多校两轮（滚动条会吃掉十几像素，所以按实测列数补差）
+    $gotW = 0; $gotH = 0
+    for ($i = 0; $i -lt 2; $i++) {
+        $curW = 0; $curH = 0
+        try { $curW = [int][Console]::WindowWidth; $curH = [int][Console]::WindowHeight } catch { }
+        $pixW = 0; $pixH = 0
+        try {
+            $r2 = New-Object 'ComsolCli.Win2+RECT'
+            if ([ComsolCli.Win2]::GetWindowRect($top, [ref]$r2)) {
+                $pixW = $r2.Right - $r2.Left; $pixH = $r2.Bottom - $r2.Top
+            }
+        } catch { }
+        if ($pixW -le 100) { $pixW = [int][math]::Round($cols * $cellW) }
+        $dw = 0
+        if ($curW -gt 0) { $dw = [int][math]::Round(($cols - $curW) * $cellW) }
+        $newW = [int][math]::Max(320, $pixW + $dw)
+        [void][ComsolCli.Win2]::SetWindowPos($top, [IntPtr]::Zero, 0, $workTop, $newW, $workH, 0)
+        Start-Sleep -Milliseconds 350
+        try { $gotW = [int][Console]::WindowWidth; $gotH = [int][Console]::WindowHeight } catch { }
+        if ($gotW -eq $cols) { $script:WinInfo.how = 'px'; break }
+        $script:WinInfo.how = 'px'
+    }
+    if ($gotW -ne $cols) {
+        # 兜底：mode con（Windows Terminal 之类对像素 API 不感冒时用）
+        try { $null = & cmd.exe /c ("mode con cols={0} lines={1}" -f $cols, 46) ; $script:WinInfo.how = 'mode' } catch { }
+        Start-Sleep -Milliseconds 250
+        try { $gotW = [int][Console]::WindowWidth; $gotH = [int][Console]::WindowHeight } catch { }
+    }
+    if ($gotW -ne $cols) {
+        try { [void][ComsolCli.Win2]::ShowWindow($top, 3); $script:WinInfo.how = 'maximize' } catch { }
+        Start-Sleep -Milliseconds 250
+    }
+    $script:WinInfo.got = ('{0}x{1}' -f $gotW, $gotH)
+    $script:WinInfo.rows = $gotH
+    # 缓冲区留够（滚屏不丢历史），窗口保持在左上
+    try {
+        $hn = 0
+        try { $hn = [int][Console]::WindowHeight } catch { }
+        [Console]::SetBufferSize([Console]::BufferWidth, [math]::Max($hn + 2000, 3000))
+    } catch { }
+    try { [void][ComsolCli.Win2]::SetWindowPos($top, [IntPtr]::Zero, 0, $workTop, 0, 0, 0x0001) } catch { }
+    if ($script:WinDebug -or $env:COMSOL_EXPORT_WINDEBUG -eq '1') {
+        Write-Host ('  [窗口] 目标 {0} 列，实得 {1}（{2}）· 每列 {3}px，每行 {4}px，可用高 {5}px' -f `
+            $cols, $script:WinInfo.got, $script:WinInfo.how, $script:WinInfo.cellW, $script:WinInfo.cellH, $workH) -ForegroundColor DarkGray
     }
 }
+
 
 
 
@@ -386,6 +431,7 @@ function Show-Help {
     Write-Host '    -Cores <n>       求解用几个核（默认交给 COMSOL 自己定）'
     Write-Host '    -Heap <6g>       Java 堆（默认按物理内存 70%）'
     Write-Host '    -WinWidth <n>    控制台宽度（列），默认 88；高度自动占满'
+    Write-Host '    -WinDebug        打印窗口实际尺寸（排查“窗口没铺满”）'
     Write-Host '    -Resume          接着监视队列里未完成的作业'
     Write-Host '    -Help            显示本帮助'
     Write-Host ''
@@ -1810,6 +1856,7 @@ if ([string]::IsNullOrWhiteSpace($script:PStyle)) {
 if ($env:COMSOL_EXPORT_STYLE) { $script:PStyle = [string]$env:COMSOL_EXPORT_STYLE }
 $script:WinCols = 0
 if ($WinWidth -gt 0) { $script:WinCols = [int]$WinWidth }
+$script:WinDebug = [bool]$WinDebug
 Initialize-ConsoleWindow
 $comsolBatch = Resolve-Comsol $ComsolPath
 Write-Host ('  COMSOL   : ' + $comsolBatch)

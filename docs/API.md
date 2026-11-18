@@ -295,7 +295,10 @@ static void exportFoo(Job j, int i) throws Exception {
 ### 6.6 状态框重绘与终止（v1.7.2）
 
 - **差量重绘**：`Show-LiveBox` 把每帧算成「纯文本 + 段数组」，与上一帧逐行比较，只对变化的行 `SetCursorPosition` 后重写，其余行一个字符都不动（不闪、不滚屏、不重复输出）。首帧整框画一次，`Clear-LiveBox` 按行数擦除。
-- **开窗尺寸**：`Initialize-ConsoleWindow` 先算目标 `cols×rows`（`-WinWidth` / `COMSOL_EXPORT_COLS` / 配置 `WindowCols`，宽度默认 88；行数 = 屏幕工作区高度 ÷ 字体单元高），先试 `SetWindowSize`，回读 `[Console]::WindowWidth` 确认；不生效再退回 `cmd /c mode con`（Windows Terminal 认这个）；都不行才最大化。`COMSOL_EXPORT_WINDEBUG=1` 打印实得尺寸，`COMSOL_EXPORT_NORESIZE=1` 关掉。
+- **开窗尺寸（v1.7.3 改成按像素算）**：`Initialize-ConsoleWindow` 宽度取 `-WinWidth` / `COMSOL_EXPORT_COLS` / 配置 `WindowCols`（默认 88 列），高度取屏幕可用区（`SystemParametersInfo(48)`）的像素高。步骤：`ShowWindow(SW_RESTORE)` 先取消最大化 → 量当前窗口像素 `pixW/pixH` 与 `[Console]::WindowWidth/Height` 算出 `cellW/cellH`（125% 缩放下字体报 16px、实际 20.5px，按磅值算必偏矮）→ `SetBufferSize(cols, 4000)` → `SetWindowPos(top, 0, workTop, newW, workH, 0)` 按像素定尺寸 → 回读 `[Console]::WindowWidth`，差几列就按 `cellW` 补一次（滚动条会吃掉 ~17px）。仍不达标再退 `cmd /c mode con`，最后才最大化。
+  - 两个坑：`GetWindowRect(GetConsoleWindow())` 恒返回 0，必须 `GetParent` 拿顶层窗口再量；conhost 下 `[Console]::SetWindowSize` 只改逻辑行列、不动像素，且不夹取到屏幕内。
+  - `-WinDebug`（或 `COMSOL_EXPORT_WINDEBUG=1`）打印 `[窗口] 目标 88 列，实得 88x46（px）· 每列 9.99px，每行 20.53px，可用高 912px`；`COMSOL_EXPORT_NORESIZE=1` 关掉整段。
+  - 本机实测（1536×960、125%）：`120x30 / 1199×616px` → `88x46 / 899×912px`，窗口高正好等于可用高 912。
 - **终止**：`K` → `Stop-OneJob`：立刻写 `killed` 标记（避免被当成正常结束）→ `Get-JobProcIds` 按「命令行含 jobDir / 目录名 / 模型路径」找齐 java 与 comsol 进程（求解阶段是 comsolbatch，导出阶段是 java，还可能派生）→ 最多 12 轮 `taskkill /PID <id> /T /F` + 500 ms 间隔 → 复核残留。调度器每拍先看 `killed` 标记，有就直接判终止并再收一遍残留进程。
 
 ## 7. 变更记录
@@ -311,8 +314,9 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.5 | 2026-11-17 | 修多步骤/多研究模型只导出第一步解：改为每个解节点建独立 `Solution` 数据集，取 `getReal()` 的全部解列；不再逐次 `set("solnum")` |
 | v1.6 | 2026-11-18 | 修 651 解只导出 400 行：改按 `getSize()[1]` 逐块（`Chunk`，默认 200）显式取解编号，每块校验列数，取不满即报错；NaN 不再静默丢行（`Allownan=1` 才放行）；CSV 改流式写 `.part`；去重 O(n²)→哈希；`-Xmx4g` 改按物理内存自动（`-Heap`/`COMSOL_EXPORT_XMX` 可覆盖） |
 | v1.7 | 2026-11-18 | 求解改走 `comsolbatch -batchlog` 的两阶段流程（headless、不留锁、求解完成自动交接导出），CLI 实时显示 求解百分比/导出 `已取 x/N`、已用（秒）、剩余（分钟）、预计完成时刻；新增 `-ProgressStyle 1/2/3` 三套样式、`-Cores`、`-Heap`；不再用历史耗时猜进度 |
-| v1.7.2 | 2026-11-18 | 进度框改**差量重绘**（逐行比对，只重写变化的行，不再整框重画）；`Initialize-ConsoleWindow` 加回读校验与 `mode con` 回退；终止作业重写为「先写 killed 标记 → 按命令行标记扫 java/comsol 进程 → 最多 12 轮 taskkill /T /F → 复核」，调度器见到 killed 标记即收尾，杀不干净也不挂死 |
 | v1.7.1 | 2026-11-18 | 进度条改为同字形 `█` + 分段着色（黄=已完成、深灰=未完成），修「已完成比未完成高」；开窗自动设 88 列宽、高度按屏幕工作区占满并挪到左上角（`-WinWidth`/`COMSOL_EXPORT_COLS`/`COMSOL_EXPORT_NORESIZE`） |
+| v1.7.2 | 2026-11-18 | 进度框改**差量重绘**（逐行比对，只重写变化的行，不再整框重画）；`Initialize-ConsoleWindow` 加回读校验与 `mode con` 回退；终止作业重写为「先写 killed 标记 → 按命令行标记扫 java/comsol 进程 → 最多 12 轮 taskkill /T /F → 复核」，调度器见到 killed 标记即收尾，杀不干净也不挂死 |
+| v1.7.3 | 2026-11-18 | 窗口尺寸按像素定（量 `cellW/cellH` 后 `SetWindowPos`，先取消最大化），修「窗口没占满高度」；新增 `-WinDebug` 开关（不必再设环境变量） |
 
 ## 8. 待验证 / 已知缺口
 
