@@ -63,6 +63,8 @@ public class ExportDriver {
 
     static Path CURRENT_JOB_DIR = null;
     static Path LOG_FILE = null;
+    static Path PROGRESS_FILE = null;
+    static String PROGRESS_LABEL = "导出";
 
     // 自带日志：不依赖 stdout 重定向（stdout 句柄异常时会全部丢失），每行立即落盘
     static void log(String s) {
@@ -74,6 +76,18 @@ public class ExportDriver {
                         StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             } catch (Exception ignore) { }
         }
+    }
+
+    // 进度落盘：CLI 靠它显示「已取 x/N」。先写 progress.tmp 再改名，避免 CLI 读到半行。
+    static void progress(int done, int total, String label) {
+        if (PROGRESS_FILE == null) return;
+        String s = "done=" + done + "\ntotal=" + total + "\nlabel=" + label
+                + "\nts=" + System.currentTimeMillis() + "\n";
+        try {
+            Path tmp = PROGRESS_FILE.resolveSibling("progress.tmp");
+            Files.write(tmp, s.getBytes(StandardCharsets.UTF_8));
+            Files.move(tmp, PROGRESS_FILE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception ignore) { }
     }
 
     // 统一收尾：写 exit 标记（CLI 靠它判断退出码），刷 stdout/stderr，再退出
@@ -108,6 +122,7 @@ public class ExportDriver {
         j.jobDir = Paths.get(args[0]).toAbsolutePath().getParent();
         CURRENT_JOB_DIR = j.jobDir;
         LOG_FILE = j.jobDir.resolve("driver.self.log");
+        PROGRESS_FILE = j.jobDir.resolve("progress.txt");
         log("[driver] 启动 pid=" + ProcessHandle.current().pid() + " java=" + System.getProperty("java.version"));
         try {
             Files.write(j.jobDir.resolve("started"),
@@ -229,6 +244,8 @@ public class ExportDriver {
                 }
                 System.out.println("[driver] 导出块 " + i + ": " + type + " / " + name);
                 System.out.flush();
+                PROGRESS_LABEL = "导出块 " + i + "/" + j.blocks + " " + name;
+                progress(0, totSols, PROGRESS_LABEL);
                 try {
                     h.run(j, i);
                 } catch (Exception e) {
@@ -350,6 +367,10 @@ public class ExportDriver {
     static LinkedHashMap<String, int[]> walkSols(Job j, String[] nodes, SliceSink sink) throws Exception {
         LinkedHashMap<String, int[]> stat = new LinkedHashMap<>();
         int chunk = chunkSize(j);
+        int totN = 0;
+        for (SolUse u : j.sols) { if (u.n > 0) totN += u.n; }
+        int doneN = 0;
+        progress(0, totN, PROGRESS_LABEL);
         for (SolUse u : j.sols) {
             if (u.n <= 0) continue;
             String dset = datasetFor(j, u.tag);
@@ -365,10 +386,13 @@ public class ExportDriver {
                 }
                 sink.slice(u.tag, from, nCols, v);
                 got += nCols;
+                doneN += nCols;
+                progress(doneN, totN, PROGRESS_LABEL);
             }
             for (String nd : nodes) unpinChunk(j, nd);
             stat.put(u.tag, new int[] { u.n, got });
         }
+        progress(totN, totN, PROGRESS_LABEL);
         return stat;
     }
 

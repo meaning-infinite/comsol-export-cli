@@ -1,4 +1,4 @@
-# COMSOL 导出 CLI · API 文档
+﻿# COMSOL 导出 CLI · API 文档
 
 > 最后更新：2026-11-12 · 对应 v1.1 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
 > 接口与内部约定的参考手册，随版本持续更新。使用说明见 [README.md](../README.md)，配方写法见 [recipes/README.md](../recipes/README.md)。
@@ -34,6 +34,9 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 | `-Resume` | switch | 跳过选择，直接调度队列里未完成的作业 |
 | `-Mode` | string | `solve` 求解并导出（默认）/ `export` 只导出已有解的模型；空 = 交互询问 |
 | `-KillJob <n>` | int | 终止队列里第 n 个作业（不受单实例守卫限制） |
+| `-ProgressStyle <1\|2\|3>` | string | 进度显示样式，默认 `2`；环境变量 `COMSOL_EXPORT_STYLE` 覆盖；配置 `ProgressStyle` 次之 |
+| `-Cores <n>` | int | 求解核数（传给 `comsolbatch -np`），默认 `0` = 让 COMSOL 自己决定 |
+| `-Heap <6g>` | string | Java 堆，覆盖按物理内存自动估算的值；环境变量 `COMSOL_EXPORT_XMX` 亦可 |
 | `-Help` | switch | 帮助 |
 
 ### 2.2 退出码
@@ -251,6 +254,39 @@ static void exportFoo(Job j, int i) throws Exception {
 
 `%LOCALAPPDATA%\comsol-export\state\stats.json`：`{ "exported": 12 }`。
 
+### 6.4 两阶段执行（v1.7 起）
+
+求解与导出拆成两个进程，CLI 负责交接：
+
+1. **求解阶段**：`comsolbatch.exe -inputfile <原模型> -outputfile <modelsdir>\solved\<outname>.mph -batchlog <jobDir>\solve.log -batchlogout -alivetime 5`（配方给了 `Study` 就加 `-study`，`-Cores` 给了就加 `-np`）。
+   - 不弹 COMSOL 窗口，headless；**不在原模型旁留 `.lock`**（实测只有它自己的输出模型会被写）。
+   - 成功后 CLI 写 `solved` 标记，立刻起导出阶段，不需要人工干预。
+2. **导出阶段**：驱动 `solve=0`，只做 打开 → 清点解 → 分块导出。
+
+作业目录里的 `phase` 文件记录当前在 `solve` 还是 `export`，重启 CLI 后据此续跑。
+
+### 6.5 进度显示（v1.7 起）
+
+| 阶段 | 来源 | 口径 |
+|---|---|---|
+| 求解 | `jobDir\solve.log` 里最后一条 `当前进度: NN % - 阶段` | COMSOL 给的是**整项研究**的全局百分比，不在每个扫参点归零，可直接用；`-batchlogout` 写 stdout 的是 GBK，一律只读 log 文件 |
+| 导出 | `jobDir\progress.txt`（驱动原子写 `done=` / `total=` / `label=`） | 解是我们自己枚举的，`已取 x/N` 精确 |
+
+- **已用时间**到秒（定态显示，用来确认进程还活着）；**剩余时间**到分钟；**完成时间点**写成 `21:08` 这种。
+- ETA 只用**本次作业实测速率**外推，不看历史：导出 `已用×(总数−已取)/已取`（不平滑）；求解 `已用×(100−p)/p`（`p≥3%` 且已用 ≥8 s 才算，p 上涨时按 `0.6×旧 + 0.4×新` 平滑；p=100% 立即归零）。
+- 阶段名由日志里的短语归类：准备 / 网格与建模 / 编译 / 建立求解器 / 组装矩阵 / 矩阵分解 / 解方程 / 收尾。
+- 输出被重定向（日志、管道）时自动降级为「阶段变化才打一行」，不会刷屏。
+
+三套样式（`-ProgressStyle`）：
+
+| 样式 | 形态 | 适合 |
+|---|---|---|
+| 1 | 单行：`▌【求解 1/2】[██░…] 42% 已用 00:07:12 · 剩 约 10 min → 21:08 · 矩阵分解 · sim_xy=501.0 · Q退出 K终止` | 长时间挂着，不滚屏 |
+| 2（默认） | 方框五行：作业 / 进度 / 阶段 / 时间 / 按键 | 信息最全 |
+| 3 | 八段阶段链 `√准备 √网格 √编译 … ▸收尾` + 解计数 | 一眼看出卡在哪一步 |
+
+窗口标题同步显示 `【求解 42%】<模型名> - COMSOL 导出`，任务栏可见。
+
 ## 7. 变更记录
 
 | 版本 | 日期 | 内容 |
@@ -263,6 +299,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.4 | 2026-11-16 | 新增 `bigtable`（参数化大表：全局参数 + 谱线 + 相位 + 各 ITO 域吸收）；表头全 ASCII |
 | v1.5 | 2026-11-17 | 修多步骤/多研究模型只导出第一步解：改为每个解节点建独立 `Solution` 数据集，取 `getReal()` 的全部解列；不再逐次 `set("solnum")` |
 | v1.6 | 2026-11-18 | 修 651 解只导出 400 行：改按 `getSize()[1]` 逐块（`Chunk`，默认 200）显式取解编号，每块校验列数，取不满即报错；NaN 不再静默丢行（`Allownan=1` 才放行）；CSV 改流式写 `.part`；去重 O(n²)→哈希；`-Xmx4g` 改按物理内存自动（`-Heap`/`COMSOL_EXPORT_XMX` 可覆盖） |
+| v1.7 | 2026-11-18 | 求解改走 `comsolbatch -batchlog` 的两阶段流程（headless、不留锁、求解完成自动交接导出），CLI 实时显示 求解百分比/导出 `已取 x/N`、已用（秒）、剩余（分钟）、预计完成时刻；新增 `-ProgressStyle 1/2/3` 三套样式、`-Cores`、`-Heap`；不再用历史耗时猜进度 |
 
 ## 8. 待验证 / 已知缺口
 

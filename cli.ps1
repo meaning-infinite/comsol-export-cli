@@ -31,6 +31,9 @@ param(
     [string]$Mode = '',
     [int]$KillJob = 0,
     [string]$Heap,
+    [ValidateSet('','1','2','3')]
+    [string]$ProgressStyle = '',
+    [int]$Cores = 0,
     [switch]$Setup,
     [switch]$Modules,
     [switch]$Help
@@ -198,10 +201,15 @@ function Show-Help {
     Write-Host '    -Recipe <name>   直接指定配方（不交互）'
     Write-Host '    -ModelIndex <n>  直接指定第 n 个模型（从 1 开始）'
     Write-Host '    -DryRun          只打印计划，不写队列、不启动计算'
+    Write-Host '    -Mode <solve|export>  求解并导出 / 只导出已有解的模型'
+    Write-Host '    -ProgressStyle 1|2|3  进度样式：1 单行 / 2 方框仪表 / 3 阶段链'
+    Write-Host '    -Cores <n>       求解用几个核（默认交给 COMSOL 自己定）'
+    Write-Host '    -Heap <6g>       Java 堆（默认按物理内存 70%）'
+    Write-Host '    -Resume          接着监视队列里未完成的作业'
     Write-Host '    -Help            显示本帮助'
     Write-Host ''
     Write-Host '  配方字段: Task / Study / NameTemplate / Export'
-    Write-Host '  Export 块 Type: global | spectrum | image | eigenslice'
+    Write-Host '  Export 块 Type: global | spectrum | image | eigenslice | slice2d | integral | modes | bigtable'
     Write-Host ''
 }
 
@@ -641,6 +649,12 @@ function Test-JobAlive($procId, $jobDir) {
     if (-not $p) { return $true }   # 拿不到命令行时只认 pid，宁可当它在跑
     $cl = [string]$p.CommandLine
     if (-not $cl) { return $true }
+    if ($p.Name -like 'comsol*') {
+        # 求解阶段跑的是 comsolbatch.exe（命令行里带作业目录或模型路径）
+        if ($cl -like ('*' + $jobDir + '*')) { return $true }
+        if ($leaf -and $cl -like ('*' + $leaf + '*')) { return $true }
+        return $false
+    }
     if ($p.Name -notlike 'java*') { return $false }
     if ($cl -notlike '*ExportDriver*') { return $false }
     # 网络盘/映射盘的命令行可能与作业目录写法不同，用目录名兜底
@@ -690,6 +704,444 @@ function Get-HeapArg {
         }
     } catch { }
     return ('-Xmx' + $mb + 'm')
+}
+
+# ---------------- 两阶段：comsolbatch 求解 -> 驱动导出 ----------------
+# 求解为什么交给 comsolbatch.exe：驱动在 java 里跑 study 时命令行拿不到任何百分比，
+# 而 comsolbatch 是 COMSOL 官方批处理程序（无窗口、不弹 GUI），日志里有逐级
+# “当前进度: NN % - 矩阵分解”这样的行；导出仍由驱动按解编号分块做，进度写 progress.txt。
+
+function Read-JobSpec([string]$jobDir) {
+    $o = @{}
+    $sp = Join-Path $jobDir 'job.properties'
+    if (-not (Test-Path -LiteralPath $sp)) { return $o }
+    foreach ($ln in [System.IO.File]::ReadAllLines($sp)) {
+        $k = $ln.IndexOf('=')
+        if ($k -gt 0) { $o[$ln.Substring(0, $k)] = $ln.Substring($k + 1) }
+    }
+    return $o
+}
+
+function Get-JobSolvedPath($job) {
+    # 与驱动同一口径：<modelsdir>/solved/<outname>.mph
+    $spec = Read-JobSpec $job.jobDir
+    $outname = [string]$spec['outname']
+    $md = [string]$spec['modelsdir']
+    if ([string]::IsNullOrWhiteSpace($outname)) { return '' }
+    if ([string]::IsNullOrWhiteSpace($md)) { $md = Join-Path $Root 'models' }
+    return (Join-Path (Join-Path $md 'solved') ($outname + '.mph'))
+}
+
+function Set-JobPhase($job, [string]$phase) {
+    Set-JobProp $job 'phase' $phase
+    try {
+        [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'phase'), $phase, (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
+function Get-JobPhase($job) {
+    if ($job.PSObject.Properties['phase'] -and $job.phase) { return [string]$job.phase }
+    $f = Join-Path $job.jobDir 'phase'
+    if (Test-Path -LiteralPath $f) {
+        try { $v = ([System.IO.File]::ReadAllText($f)).Trim(); if ($v) { return $v } } catch { }
+    }
+    if ([string]$job.mode -eq 'export') { return 'export' }
+    return 'solve'
+}
+
+function Read-FileTailText([string]$path, [int]$maxBytes = 65536) {
+    # 读正在增长的文件末尾：必须用 FileShare.ReadWrite，否则会撞上写锁
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $len = $fs.Length
+            if ($len -le 0) { return '' }
+            $room = [math]::Min([int64]$maxBytes, $len)
+            $fs.Seek(($len - $room), [System.IO.SeekOrigin]::Begin) | Out-Null
+            $buf = New-Object byte[] ([int]$room)
+            $got = $fs.Read($buf, 0, [int]$room)
+            return [System.Text.Encoding]::UTF8.GetString($buf, 0, $got)
+        } finally { $fs.Close() }
+    } catch { return '' }
+}
+
+# 求解阶段：只认 comsolbatch 写出来的 solve.log（UTF-8）。它的百分比是整项研究的进度，
+# 不会在每个扫参点归零（实测 2 个 sim_xy 点：先 0→50，再从 50→100）。
+function Get-SolveLogState($job) {
+    $o = @{ Pct = -1; Stage = ''; Param = ''; Opened = $false; Running = $false }
+    $txt = Read-FileTailText (Join-Path $job.jobDir 'solve.log') 131072
+    if ([string]::IsNullOrWhiteSpace($txt)) { return $o }
+    if ($txt -match '正在打开文件') { $o.Opened = $true }
+    if ($txt -match '正在运行|研究\d|参数化扫描') { $o.Running = $true }
+    $ms = [regex]::Matches($txt, '当前进度:\s*(\d+)\s*%[^\S\r\n]*-[^\S\r\n]*([^\r\n]*)')
+    if ($ms.Count -gt 0) {
+        $last = $ms[$ms.Count - 1]
+        $o.Pct = [int]$last.Groups[1].Value
+        $o.Stage = $last.Groups[2].Value.Trim()
+        # 阶段名为空的行（组装扫参点时常见）沿用上一次非空阶段
+        if ($o.Stage -eq '') {
+            for ($k = $ms.Count - 1; $k -ge 0; $k--) {
+                $sv = $ms[$k].Groups[2].Value.Trim()
+                if ($sv -ne '') { $o.Stage = $sv; break }
+            }
+        }
+        $o.Running = $true
+    }
+    $mp = [regex]::Matches($txt, '参数\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\r\n。]{1,40})')
+    if ($mp.Count -gt 0) {
+        $x = $mp[$mp.Count - 1]
+        $o.Param = ($x.Groups[1].Value + '=' + $x.Groups[2].Value.Trim())
+    }
+    return $o
+}
+
+function Get-StageLabel([string]$stage) {
+    if ([string]::IsNullOrWhiteSpace($stage)) { return '准备' }
+    $s = $stage.Trim()
+    if ($s -match '矩阵分解') { return '矩阵分解' }
+    if ($s -match '组装') { return '组装矩阵' }
+    if ($s -match '线性方程组|解方程') { return '解方程' }
+    if ($s -match '编译') { return '编译方程' }
+    if ($s -match '稳态求解器|求解器') { return '建立求解器' }
+    if ($s -match '因变量|初始化') { return '初始化' }
+    if ($s -match '完成|正在保存|保存模型') { return '收尾' }
+    # 0-1% 的建模/网格段：材料名、形成联合体、布尔操作、各种网格操作
+    if ($s -match '网格|联合体|布尔|选择|方程|边|单元|点') { return '网格与建模' }
+    if ($s -match '^[\x20-\x7E]+$') { return '网格与建模' }
+    return $s
+}
+
+function Get-StageIndex([string]$stage) {
+    $s = Get-StageLabel $stage
+    switch -Regex ($s) {
+        '准备'     { return 0 }
+        '网格'     { return 1 }
+        '编译'     { return 2 }
+        '建立求解' { return 3 }
+        '组装'     { return 4 }
+        '分解'     { return 5 }
+        '解方程'   { return 6 }
+        '收尾'     { return 7 }
+        default    { return 4 }
+    }
+}
+
+# 导出阶段：读驱动写的 progress.txt（done/total/label）
+function Get-ExportState($job) {
+    $o = @{ Done = -1; Total = -1; Label = '' }
+    $txt = Read-FileTailText (Join-Path $job.jobDir 'progress.txt') 4096
+    if ([string]::IsNullOrWhiteSpace($txt)) { return $o }
+    foreach ($ln in ($txt -split "`r?`n")) {
+        if ($ln -match '^done=(\d+)') { $o.Done = [int]$Matches[1] }
+        elseif ($ln -match '^total=(\d+)') { $o.Total = [int]$Matches[1] }
+        elseif ($ln -match '^label=(.*)$') { $o.Label = $Matches[1] }
+    }
+    return $o
+}
+
+$script:ProgState = @{}
+function Get-ProgState($job) {
+    $key = [string]$job.jobDir
+    if (-not $script:ProgState.ContainsKey($key)) {
+        $script:ProgState[$key] = @{ Phase = ''; Pct = -1; Eta = -1.0 }
+    }
+    return $script:ProgState[$key]
+}
+
+function Parse-DateOrNull($s) {
+    if (-not $s) { return $null }
+    try { return [datetime]::Parse([string]$s) } catch { return $null }
+}
+
+# 进度总口径：全部用“本次作业自己”的量算，不看历史耗时
+#   求解：百分比来自 solve.log；剩余 = 已用 ×(100-p)/p
+#   导出：百分比来自 progress.txt 的 done/total；剩余按本阶段已解个数外推
+function Get-ProgressInfo($job) {
+    $st = Get-ProgState $job
+    $phase = Get-JobPhase $job
+    if ($st.Phase -ne $phase) { $st.Phase = $phase; $st.Pct = -1; $st.Eta = -1.0 }
+    $now = Get-Date
+
+    $phaseStart = $null
+    if ($phase -eq 'solve') { $phaseStart = Parse-DateOrNull (Get-JobProp $job 'solveStarted') }
+    else { $phaseStart = Parse-DateOrNull (Get-JobProp $job 'exportStarted') }
+    if (-not $phaseStart) { $phaseStart = Parse-DateOrNull $job.started }
+    $totStart = Parse-DateOrNull $job.started
+
+    $elapsed = 0.0
+    if ($phaseStart) { $elapsed = [math]::Max(0, ($now - $phaseStart).TotalSeconds) }
+    $totalElapsed = $elapsed
+    if ($totStart) { $totalElapsed = [math]::Max(0, ($now - $totStart).TotalSeconds) }
+
+    $pct = -1
+    $detail = ''
+    $stageIdx = -1
+    $stageName = ''
+    $solDone = -1; $solTotal = -1
+    if ($phase -eq 'solve') {
+        $s = Get-SolveLogState $job
+        $stageIdx = Get-StageIndex $s.Stage
+        $stageName = Get-StageLabel $s.Stage
+        if ($s.Pct -ge 0) { $pct = $s.Pct }
+        if ($s.Running) { $detail = $stageName } elseif ($s.Opened) { $detail = '打开模型（大模型要几分钟）' } else { $detail = '启动 comsolbatch' }
+        if ($s.Param) { $detail = $detail + ' · ' + $s.Param }
+    } else {
+        $e = Get-ExportState $job
+        $solDone = $e.Done; $solTotal = $e.Total
+        if ($e.Total -gt 0 -and $e.Done -ge 0) {
+            $pct = [int][math]::Min(100, [math]::Round(100.0 * $e.Done / $e.Total))
+        }
+        if ($e.Total -gt 0) { $detail = ('已取 ' + $e.Done + '/' + $e.Total + ' 个解') }
+        else { $detail = '打开模型（大模型要几分钟）' }
+        if ($e.Label) { $detail = $detail + ' · ' + $e.Label }
+        $stageName = '导出'
+    }
+
+    # 剩余时间：本阶段实测速率外推（p<3% 时噪声太大，先不给）
+    $eta = -1.0
+    $exact = ($phase -ne 'solve' -and $solTotal -gt 0 -and $solDone -ge 0)
+    if ($pct -ge 100) { $eta = 0.0 }
+    elseif ($exact -and $solDone -gt 0 -and $elapsed -ge 5) { $eta = $elapsed * ($solTotal - $solDone) / $solDone }
+    elseif ($pct -ge 3 -and $elapsed -ge 8) { $eta = $elapsed * (100.0 - $pct) / $pct }
+    if ($eta -ge 0) {
+        if (-not $exact -and $pct -lt 100 -and $st.Eta -ge 0 -and $pct -gt $st.Pct) {
+            $eta = 0.6 * $st.Eta + 0.4 * $eta
+        }
+        $st.Eta = $eta
+    }
+    $st.Pct = $pct
+    $finish = $null
+    if ($eta -ge 0) { $finish = $now.AddSeconds($eta) }
+
+    $phaseNo = 1; $phaseAll = 1
+    if ([string]$job.mode -ne 'export') { $phaseAll = 2; if ($phase -eq 'export') { $phaseNo = 2 } }
+
+    $fg = 'Black'; $bg = 'DarkYellow'
+    if ($phase -eq 'export') { $bg = 'DarkCyan' }
+
+    return [pscustomobject]@{
+        Phase = $phase
+        PhaseLabel = $(if ($phase -eq 'solve') { '求解' } else { '导出' })
+        PhaseNo = $phaseNo
+        PhaseAll = $phaseAll
+        Pct = $pct
+        StageName = $stageName
+        StageIdx = $stageIdx
+        Detail = $detail
+        Elapsed = $elapsed
+        TotalElapsed = $totalElapsed
+        Eta = $eta
+        HasEta = ($eta -ge 0)
+        Finish = $finish
+        SolDone = $solDone
+        SolTotal = $solTotal
+        Fg = $fg
+        Bg = $bg
+    }
+}
+
+function Format-TimeLine($info, [string]$sep = ' · ') {
+    $s = '剩 ' + (Format-Eta $info.Eta)
+    if ($info.HasEta -and $info.Eta -ge 30) {
+        $s = $s + $sep + '预计 ' + (Format-Finish $info.Finish) + ' 完成'
+    }
+    return $s
+}
+
+function Get-Bar([int]$pct, [int]$width) {
+    if ($width -lt 4) { $width = 4 }
+    if ($pct -lt 0) { $pct = 0 }
+    if ($pct -gt 100) { $pct = 100 }
+    $fill = [int][math]::Round($width * $pct / 100.0)
+    return (('█' * $fill) + ('░' * ($width - $fill)))
+}
+
+function Format-Eta($sec) {
+    if ($sec -lt 0) { return '未知' }
+    if ($sec -lt 30) { return '即将完成' }
+    $m = [int][math]::Round($sec / 60.0)
+    if ($m -lt 1) { return '不到 1 min' }
+    if ($m -lt 60) { return ('约 ' + $m + ' min') }
+    $h = [int][math]::Floor($m / 60)
+    return ('约 ' + $h + ' 小时 ' + ($m % 60) + ' min')
+}
+
+function Format-Finish($t) {
+    if ($null -eq $t) { return '——' }
+    return $t.ToString('HH:mm')
+}
+
+function Get-PhaseTag($info) {
+    if ($info.PhaseAll -gt 1) { return ($info.PhaseLabel + ' ' + $info.PhaseNo + '/' + $info.PhaseAll) }
+    return $info.PhaseLabel
+}
+
+function Get-PctText($info) {
+    if ($info.Pct -lt 0) { return '  ?%' }
+    return ((('{0,3}' -f $info.Pct)) + '%')
+}
+
+# 样式 1：单行（窄窗口/最省屏）
+function Render-Progress1($info, [string]$jobName, $ord, $total) {
+    $bar = '[' + (Get-Bar $info.Pct 18) + ']'
+    $etaTxt = '剩 ' + (Format-Eta $info.Eta)
+    if ($info.HasEta -and $info.Eta -ge 30) { $etaTxt = $etaTxt + ' → ' + (Format-Finish $info.Finish) }
+    $tail = 'Q退出 K终止'
+    if ([int]$total -gt 1) { $tail = ('作业 ' + $ord + '/' + $total + ' · ' + $tail) }
+    $txt = '▌【' + (Get-PhaseTag $info) + '】' + $bar + ' ' + (Get-PctText $info) + ' 已用 ' + (Format-Elapsed $info.Elapsed) + ' · ' + $etaTxt + ' · ' + $info.Detail + ' · ' + $tail
+    Show-StatusLine $txt $info.Fg $info.Bg
+}
+
+# 样式 2：方框仪表（与 CLI 其它框一致）
+function Render-Progress2($info, [string]$jobName, $ord, $total) {
+    $bar = (Get-Bar $info.Pct 30)
+    $lines = @(
+        ('作业   ' + $ord + '/' + [math]::Max(1, $total) + '   ' + $jobName),
+        ('进度   ' + $bar + '   ' + (Get-PctText $info)),
+        ('阶段   ' + (Get-PhaseTag $info) + ' · ' + $info.Detail),
+        ('时间   已用 ' + (Format-Elapsed $info.Elapsed) + '（合计 ' + (Format-Elapsed $info.TotalElapsed) + '） · ' + (Format-TimeLine $info)),
+        ('按键   Q 退出监视（计算不受影响）   K 终止作业')
+    )
+    # 固定宽度：避免每秒刷新时框线抖动
+    $fixed = @()
+    foreach ($l in $lines) { $fixed += (Pad-Text $l 74) }
+    Show-LiveBox ('COMSOL 计算进度') $fixed $info.Bg
+}
+
+# 样式 3：阶段链（看得出走到哪一步了）
+function Render-Progress3($info, [string]$jobName, $ord, $total) {
+    $bar = (Get-Bar $info.Pct 34)
+    $chain = ''
+    if ($info.Phase -eq 'solve') {
+        $names = @('准备', '网格', '编译', '求解器', '组装', '分解', '解方程', '收尾')
+        for ($q = 0; $q -lt $names.Count; $q++) {
+            $mark = '·'
+            if ($q -lt $info.StageIdx) { $mark = '√' }
+            elseif ($q -eq $info.StageIdx) { $mark = '▸' }
+            $chain = $chain + $mark + $names[$q] + '  '
+        }
+    } else {
+        $chain = ('第 ' + $ord + '/' + [math]::Max(1, $total) + ' 个作业   ' + $jobName)
+    }
+    $lines = @(
+        ((Get-PhaseTag $info) + '  ' + $bar + '  ' + (Get-PctText $info)),
+        $chain,
+        $info.Detail,
+        ('已用 ' + (Format-Elapsed $info.Elapsed) + ' · ' + (Format-TimeLine $info) + ' · Q 退出监视  K 终止')
+    )
+    $fixed = @()
+    foreach ($l in $lines) { $fixed += (Pad-Text $l 74) }
+    Show-LiveBox $jobName $fixed $info.Bg
+}
+
+function Show-ProgressJob($job, $ord, $total) {
+    $info = Get-ProgressInfo $job
+    $leaf = [string](Split-Path -Leaf $job.jobDir)
+    $nm = $leaf -replace '^\d{12}_', ''
+    if ($nm.Length -gt 40) { $nm = $nm.Substring(0, 40) }
+    $style = '2'
+    if ($script:PStyle) { $style = [string]$script:PStyle }
+    if ($script:IsRedirected) {
+        $sig = Get-PhaseTag $info
+        $dec = ''
+        if ($info.Pct -ge 0) { $dec = [string][math]::Floor($info.Pct / 10) }
+        $full = ($sig + '|' + $dec)
+        if ($script:LiveSig -ne $full) {
+            $script:LiveSig = $full
+            $line = '  [' + $sig + '] ' + $info.Detail
+            if ($info.HasEta) { $line = $line + ' · 剩 ' + (Format-Eta $info.Eta) }
+            Write-Host $line
+        }
+        return
+    }
+    if ($style -eq '1') { Render-Progress1 $info $nm $ord $total }
+    elseif ($style -eq '3') { Render-Progress3 $info $nm $ord $total }
+    else { Render-Progress2 $info $nm $ord $total }
+}
+
+function Test-SolveOk($job) {
+    # 求解阶段结束的判据：comsolbatch 写出 <outname>.mph 且状态文件写到 Done（或日志里有总时间）
+    $solved = Get-JobSolvedPath $job
+    if (-not $solved) { return 'solve-no-spec' }
+    if (-not (Test-Path -LiteralPath $solved)) { return 'solve-no-output' }
+    $logTail = Read-FileTailText (Join-Path $job.jobDir 'solve.log') 8192
+    if ($logTail -match '错误|\*\*\*\*\*错误') { return 'solve-error' }
+    $stF = $solved + '.status'
+    if (Test-Path -LiteralPath $stF) {
+        $st = Read-FileTailText $stF 256
+        if ($st -match 'Done') { return '' }
+    }
+    if ($logTail -match '总时间:') { return '' }
+    return 'solve-incomplete'
+}
+
+function Start-SolvePhase($job) {
+    Set-JobPhase $job 'solve'
+    $spec = Read-JobSpec $job.jobDir
+    $solved = Get-JobSolvedPath $job
+    $model = [string]$spec['model']
+    $study = [string]$spec['study']
+    $solvedDir = Split-Path -Parent $solved
+    if (-not (Test-Path -LiteralPath $solvedDir)) { New-Item -ItemType Directory -Path $solvedDir -Force | Out-Null }
+    foreach ($f in @($solved, ($solved + '.status'), ($solved + '.recovery'),
+                     (Join-Path $job.jobDir 'solve.log'), (Join-Path $job.jobDir 'solve.out'), (Join-Path $job.jobDir 'solve.err'))) {
+        try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { }
+    }
+    $logF = Join-Path $job.jobDir 'solve.log'
+    $outF = Join-Path $job.jobDir 'solve.out'
+    $errF = Join-Path $job.jobDir 'solve.err'
+    $argList = @('-inputfile', ('"' + $model + '"'), '-outputfile', ('"' + $solved + '"'),
+                 '-batchlog', ('"' + $logF + '"'), '-batchlogout', '-alivetime', '5')
+    if (-not [string]::IsNullOrWhiteSpace($study)) { $argList += @('-study', ('"' + $study + '"')) }
+    if ($Cores -gt 0) { $argList += @('-np', [string]$Cores) }
+    $launchInfo = @(
+        'time=' + (Get-Date).ToString('o'),
+        'comsolbatch=' + $comsolBatch,
+        'args=' + ($argList -join ' '),
+        'jobdir=' + $job.jobDir
+    ) -join "`r`n"
+    try { [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'launch-solve.txt'), $launchInfo, (New-Object System.Text.UTF8Encoding($false))) } catch { }
+    if (-not (Test-Path -LiteralPath $comsolBatch)) {
+        $job.status = 'failed'
+        Set-JobProp $job 'exitcode' 'no-comsolbatch'
+        return
+    }
+    try {
+        $proc = Start-Process -FilePath $comsolBatch -ArgumentList $argList `
+                              -RedirectStandardOutput $outF -RedirectStandardError $errF `
+                              -WindowStyle Hidden -WorkingDirectory $job.jobDir -PassThru
+    } catch {
+        try { Add-Content -LiteralPath (Join-Path $job.jobDir 'launch-solve.txt') -Value ('start-error=' + $_.Exception.Message) -Encoding UTF8 } catch { }
+        Set-JobProp $job 'exitcode' 'launch-error'
+        $job.status = 'failed'
+        return
+    }
+    $job.pid = $proc.Id
+    if (-not $job.started) { Set-JobProp $job 'started' (Get-Date).ToString('o') }
+    Set-JobProp $job 'solveStarted' ([string]$job.started)
+    Set-JobProp $job 'exportStarted' ''
+    $job.status = 'running'
+}
+
+function Start-OneJob($job) {
+    # 分派：需要求解且还没有解 -> 先 comsolbatch；否则直接进导出
+    $hasSolvedMarker = Test-Path -LiteralPath (Join-Path $job.jobDir 'solved')
+    $solvedPath = Get-JobSolvedPath $job
+    $hasSolvedFile = $false
+    if ($solvedPath) { $hasSolvedFile = Test-Path -LiteralPath $solvedPath }
+    if ([string]$job.mode -eq 'export') {
+        Set-JobPhase $job 'export'
+        Start-ExportPhase $job
+        return
+    }
+    if ($hasSolvedMarker -and $hasSolvedFile) {
+        # 上一轮已经算完（例如导出阶段失败过）：直接重跑导出
+        Set-JobPhase $job 'export'
+        Start-ExportPhase $job
+        return
+    }
+    Start-SolvePhase $job
 }
 
 function Start-JobDriver($dir) {
@@ -769,7 +1221,8 @@ function Clear-JobLock($job) {
     return '已清除'
 }
 
-function Start-OneJob($job) {
+function Start-ExportPhase($job) {
+    Set-JobPhase $job 'export'
     $logFile = Join-Path $job.jobDir 'driver.log'
     $errFile = Join-Path $job.jobDir 'driver.err'
     $cp = (Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir
@@ -801,8 +1254,9 @@ function Start-OneJob($job) {
         $job.status = 'failed'
         return
     }
+    if (-not $job.started) { Set-JobProp $job 'started' (Get-Date).ToString('o') }
+    Set-JobProp $job 'exportStarted' (Get-Date).ToString('o')
     $job.pid = $proc.Id
-    $job.started = (Get-Date).ToString('o')
     $job.status = 'running'
 }
 
@@ -812,7 +1266,8 @@ function Stop-OneJob($job) {
     $targets = @()
     if ($job.pid -and [int]$job.pid -gt 0) { $targets += [int]$job.pid }
     try {
-        foreach ($pp in @(Get-CimInstance Win32_Process -Filter "Name like '%java%'" -ErrorAction SilentlyContinue)) {
+        foreach ($pp in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                          Where-Object { $_.Name -like 'java*' -or $_.Name -like 'comsol*' })) {
             $cl = [string]$pp.CommandLine
             if (-not $cl) { continue }
             if ($cl -like ('*' + $job.jobDir + '*') -or ($leaf -and $cl -like ('*' + $leaf + '*'))) {
@@ -827,7 +1282,7 @@ function Stop-OneJob($job) {
     foreach ($tpid in $targets) {
         $pp = Get-Process -Id $tpid -ErrorAction SilentlyContinue
         if (-not $pp) { continue }
-        if ($pp.ProcessName -notlike 'java*') { continue }
+        if ($pp.ProcessName -notlike 'java*' -and $pp.ProcessName -notlike 'comsol*') { continue }
         $tkOut = (& taskkill.exe /PID $tpid /T /F 2>&1 | Out-String).Trim()
         $script:LastKillMsg = $tkOut
         $killed += $tpid
@@ -877,6 +1332,11 @@ function Invoke-KillMenu {
     Write-Host ('  ' + $msg) -ForegroundColor Yellow
 }
 
+function Get-JobProp($job, $name) {
+    if ($job.PSObject.Properties[$name]) { return $job.$name }
+    return ''
+}
+
 function Set-JobProp($job, $name, $value) {
     if ($job.PSObject.Properties[$name]) { $job.$name = $value }
     else { $job | Add-Member -NotePropertyName $name -NotePropertyValue $value -Force }
@@ -905,34 +1365,9 @@ function Add-Stat($key, $delta) {
     [System.IO.File]::WriteAllText($f, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
 
-function Get-MedianSeconds($model) {
-    # 用历史完成耗时估个“预计总时长”，只用于显示进度条，不参与任何判定
-    $q = @(Get-Queue)
-    $ds = @($q | Where-Object { $_.duration -and ([string]$_.model) -eq ([string]$model) } | ForEach-Object { [double]$_.duration })
-    if ($ds.Count -lt 1) { $ds = @($q | Where-Object { $_.duration } | ForEach-Object { [double]$_.duration }) }
-    if ($ds.Count -lt 1) { return 180.0 }
-    $s = @($ds | Sort-Object)
-    $m = [int][math]::Floor($s.Count / 2)
-    if ($s.Count % 2 -eq 1) { return [double]$s[$m] }
-    return (([double]$s[$m - 1] + [double]$s[$m]) / 2.0)
-}
-
 function Get-JobDisplay($job) {
-    # 阶段 + 估算百分比（按历史耗时线性外推，仅提示用）
-    if (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported')) { return [pscustomobject]@{ Stage = '完成'; Pct = 100; Elapsed = 0; Left = 0 } }
-    $stage = '求解中'
-    if ([string]$job.mode -eq 'export') { $stage = '导出中' }
-    if (Test-Path -LiteralPath (Join-Path $job.jobDir 'exporting')) { $stage = '导出中' }
-    $started = $null
-    if ($job.started) { try { $started = [datetime]::Parse([string]$job.started) } catch { } }
-    if (-not $started) { return [pscustomobject]@{ Stage = $stage; Pct = 0; Elapsed = 0; Left = 0 } }
-    $el = ((Get-Date) - $started).TotalSeconds
-    $exp = Get-MedianSeconds $job.model
-    $pct = [int][math]::Round(100.0 * $el / [math]::Max(1.0, $exp))
-    if ($pct -gt 99) { $pct = 99 }
-    if ($stage -eq '导出中') { $pct = 99 }
-    $left = [math]::Max(0, $exp - $el)
-    return [pscustomobject]@{ Stage = $stage; Pct = $pct; Elapsed = $el; Left = $left; Expected = $exp }
+    # 只做实时口径的转发：进度/剩余/完成时间点全部来自本次作业自己的日志与解计数
+    return (Get-ProgressInfo $job)
 }
 
 function Format-Elapsed($ts) {
@@ -977,8 +1412,25 @@ function Invoke-Scheduler {
                     }
                     elseif (-not (Test-JobAlive $job.pid $job.jobDir)) {
                         # 进程刚退出时文件可能还在落盘，等一拍再判
-                        Start-Sleep -Milliseconds 300
-                        if (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported')) {
+                        Start-Sleep -Milliseconds 400
+                        $phaseNow = Get-JobPhase $job
+                        if ($phaseNow -eq 'solve' -and -not (Test-Path -LiteralPath (Join-Path $job.jobDir 'killed'))) {
+                            $why = Test-SolveOk $job
+                            if ($why -eq '') {
+                                # 求解成功：写 solved 标记（驱动据此走 resume），接着起导出
+                                [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'solved'), '', (New-Object System.Text.UTF8Encoding($false)))
+                                Clear-LiveBox
+                                $durTxt = ''
+                                $ss = Parse-DateOrNull (Get-JobProp $job 'solveStarted')
+                                if ($ss) { $durTxt = '  用时 ' + (Format-Elapsed ((Get-Date) - $ss).TotalSeconds) }
+                                Write-Host ('  [求解完成] ' + (Split-Path -Leaf $job.jobDir) + $durTxt + '，开始导出…') -ForegroundColor Green
+                                Start-ExportPhase $job
+                            } else {
+                                $job.status = 'failed'
+                                Set-JobProp $job 'exitcode' $why
+                            }
+                        }
+                        elseif (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported')) {
                             # 留给下一拍走"已导出"分支
                         } elseif (Test-Path -LiteralPath (Join-Path $job.jobDir 'killed')) {
                             $job.status = 'killed'
@@ -1017,15 +1469,9 @@ function Invoke-Scheduler {
             if ($cur.Count -gt 0) {
                 $job = $cur[0]
                 $ord = [array]::IndexOf($sessionIds, $job.jobDir) + 1
-                $d = Get-JobDisplay $job
-                $nm = [string](Split-Path -Leaf $job.jobDir)
-                if ($nm.Length -gt 24) { $nm = $nm.Substring(0, 24) }
-                if ($d.Stage -eq '导出中') { $fg = 'Black'; $bg = 'DarkCyan' }
-                elseif ($d.Stage -eq '求解中') { $fg = 'Black'; $bg = 'DarkYellow' }
-                else { $fg = 'White'; $bg = 'DarkGray' }
-                $body = ('【' + $d.Stage + '】已用 ' + (Format-Elapsed $d.Elapsed) + ' · 作业 ' + $ord + '/' + [math]::Max(1, $total) + ' · ' + $nm + ' · Q 退出监视  K 终止作业')
-                Show-StatusLine $body $fg $bg
+                Show-ProgressJob $job $ord $total
             } else {
+                Clear-LiveBox
                 $body = ('【调度中】已用 ' + (Format-Elapsed $el.TotalSeconds) + ' · 完成 ' + $fin.Count + '/' + [math]::Max(1, $total) + ' · Q 退出监视  K 终止作业')
                 Show-StatusLine $body 'White' 'DarkGray'
             }
@@ -1034,7 +1480,7 @@ function Invoke-Scheduler {
                 try {
                     if ($cur.Count -gt 0) {
                         $dT = Get-JobDisplay $cur[0]
-                        $Host.UI.RawUI.WindowTitle = ('【' + $dT.Stage + '】' + (Split-Path -Leaf $cur[0].jobDir) + ' - COMSOL 导出')
+                        $Host.UI.RawUI.WindowTitle = ('【' + (Get-PhaseTag $dT) + ' ' + (Get-PctText $dT).Trim() + '】' + (Split-Path -Leaf $cur[0].jobDir) + ' - COMSOL 导出')
                     } else {
                         $Host.UI.RawUI.WindowTitle = ('【调度中 ' + $fin.Count + '/' + [math]::Max(1, $total) + '】COMSOL 导出')
                     }
@@ -1121,6 +1567,12 @@ function Invoke-Scheduler {
 
 $MaxParallel = [int](Read-Config).MaxParallel
 if ($MaxParallel -lt 1) { $MaxParallel = 1 }
+$script:PStyle = $ProgressStyle
+if ([string]::IsNullOrWhiteSpace($script:PStyle)) {
+    $script:PStyle = [string](Read-Config).ProgressStyle
+    if ([string]::IsNullOrWhiteSpace($script:PStyle)) { $script:PStyle = '2' }
+}
+if ($env:COMSOL_EXPORT_STYLE) { $script:PStyle = [string]$env:COMSOL_EXPORT_STYLE }
 $comsolBatch = Resolve-Comsol $ComsolPath
 Write-Host ('  COMSOL   : ' + $comsolBatch)
 Write-Host ''
