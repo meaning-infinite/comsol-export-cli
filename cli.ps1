@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
   COMSOL 远程自动导出 CLI  -  阶段 1：只预览，不启动任何计算
 

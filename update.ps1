@@ -15,6 +15,25 @@ function Fail([string]$msg, [int]$code) {
 }
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 Set-Location $ScriptDir
+
+# 脚本文件必须是 UTF-8 带 BOM：PowerShell 5.1 会把无 BOM 的 UTF-8 当 GBK 解码，
+# 中文串被引号/括号吃坏，整份脚本直接解析失败（Missing closing '}'）。
+# 更新后统一扫一遍，缺 BOM 的补上。
+function Repair-Bom {
+    param([string]$Dir)
+    $bom = [byte[]](0xEF, 0xBB, 0xBF)
+    foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -Force -File -ErrorAction SilentlyContinue)) {
+        if ($f.Extension -notin @('.ps1', '.psd1')) { continue }
+        if ($f.FullName -match '\\_dist\\|\\_backup\\|\\\.git\\') { continue }
+        $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { continue }
+        $all = New-Object byte[] ($bytes.Length + 3)
+        [Array]::Copy($bom, 0, $all, 0, 3)
+        [Array]::Copy($bytes, 0, $all, 3, $bytes.Length)
+        [System.IO.File]::WriteAllBytes($f.FullName, $all)
+        Write-Host ('  补 UTF-8 BOM：' + $f.Name) -ForegroundColor Yellow
+    }
+}
 $StateDir = Join-Path $env:LOCALAPPDATA 'comsol-export\state'
 if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
 $tokFile = Join-Path $StateDir 'gh_token.txt'
@@ -32,6 +51,8 @@ if ($isGit -and $git) {
     if ($LASTEXITCODE -ne 0) { Fail 'git reset 失败：本地文件与远端冲突，请人工检查。' 5 }
     $ver = (& git -C $ScriptDir log -1 --format='%h %ad' --date=short).Trim()
     Write-Host ''
+    Repair-Bom $ScriptDir
+
     Write-Host ('[完成] 已更新到 ' + $ver) -ForegroundColor Green
     exit 0
 }
@@ -136,6 +157,8 @@ foreach ($d in $dirs) {
 }
 Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+
+Repair-Bom $ScriptDir
 
 Write-Host ''
 Write-Host ('[完成] 已更新（' + $verName + '）') -ForegroundColor Green

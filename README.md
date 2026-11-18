@@ -112,7 +112,15 @@ set COMSOL=D:\COMSOL\COMSOL64\Multiphysics
 
 导出什么、叫什么，全在 `recipes/*.psd1` 里，见 [recipes/README.md](recipes/README.md)。
 
+
+## 编码（别踩的坑）
+
+`cli.ps1`、`update.ps1`、`pack.ps1`、`modules\*.psd1`、`recipes\*.psd1` **必须存成 UTF-8 带 BOM**。PowerShell 5.1 会把无 BOM 的 UTF-8 按 GBK 解码，中文串被吃坏后整份脚本直接解析失败，报一串 `Missing closing '}'` / `意外的标记"}"`（实测：去掉 BOM 后 132 处报错，加上就 `PARSE_OK`）。
+
+`update.ps1` 与 `pack.ps1` 现在每次运行都会自动扫一遍并补 BOM；自己改脚本或从别处拷脚本进来，也要保持 BOM。
+
 ## 文档
+
 
 - 项目接口与扩展指南：[docs/API.md](docs/API.md)
 - COMSOL Java API 笔记：[docs/COMSOL-API.md](docs/COMSOL-API.md)
