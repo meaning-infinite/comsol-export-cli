@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
   COMSOL 远程自动导出 CLI  -  阶段 1：只预览，不启动任何计算
 
@@ -30,6 +30,7 @@ param(
     [ValidateSet('solve','export','')]
     [string]$Mode = '',
     [int]$KillJob = 0,
+    [string]$Heap,
     [switch]$Setup,
     [switch]$Modules,
     [switch]$Help
@@ -674,6 +675,23 @@ function Get-JobStates {
     return $res
 }
 
+# Java 堆大小：解数据大的模型（如 651 个波长解 ≈ 5.4GB）用 4GB 堆取不全，
+# 会静默少给解。这里按物理内存自动给（默认 70%，不少于 4GB），
+# 可用参数 -Heap 8g 或环境变量 COMSOL_EXPORT_XMX 覆盖。
+function Get-HeapArg {
+    if ($Heap) { return ('-Xmx' + $Heap) }
+    if ($env:COMSOL_EXPORT_XMX) { return ('-Xmx' + $env:COMSOL_EXPORT_XMX) }
+    $mb = 4096
+    try {
+        $total = [int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
+        $want = [int]($total * 0.7)
+        if ($want -gt $mb) {
+            $mb = [int]([math]::Floor($want / 1024) * 1024)
+        }
+    } catch { }
+    return ('-Xmx' + $mb + 'm')
+}
+
 function Start-JobDriver($dir) {
     $spec = Join-Path $dir 'job.properties'
     if (-not (Test-Path -LiteralPath $spec)) { throw ('作业缺少 job.properties: ' + $dir) }
@@ -682,7 +700,7 @@ function Start-JobDriver($dir) {
     $javaNow = Join-Path $rootNow 'java\win64\jre\bin\java.exe'
     $cpNow   = (Join-Path $rootNow 'plugins\*') + ';' + (Join-Path $ScriptDir 'driver')
     $logNow  = Join-Path $dir 'driver.log'
-    $inner = '"' + $javaNow + '" -Xmx4g -cp "' + $cpNow + '" ExportDriver "' + $spec + '" > "' + $logNow + '" 2>&1'
+    $inner = '"' + $javaNow + '" ' + (Get-HeapArg) + ' -cp "' + $cpNow + '" ExportDriver "' + $spec + '" > "' + $logNow + '" 2>&1'
     $proc = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ('cmd.exe /c "' + $inner + '"') }
     if ($proc.ReturnValue -ne 0) { throw ('启动失败, 返回码 ' + $proc.ReturnValue) }
     return $proc.ProcessId
@@ -755,7 +773,7 @@ function Start-OneJob($job) {
     $logFile = Join-Path $job.jobDir 'driver.log'
     $errFile = Join-Path $job.jobDir 'driver.err'
     $cp = (Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir
-    $argStr = '-Xmx4g -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
+    $argStr = (Get-HeapArg) + ' -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
     # 启动前把实际用的路径写进 launch.txt，出问题能查
     $launchInfo = @(
         'time=' + (Get-Date).ToString('o'),
@@ -1142,7 +1160,7 @@ if ($Diag) {
     Write-Host ('  直接输出到本窗口，崩溃信息会留在屏幕上') -ForegroundColor DarkGray
     $cpD = (Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir
     Push-Location $jd
-    & $javaExe '-Xmx4g' '-Dfile.encoding=UTF-8' '-Dsun.stdout.encoding=UTF-8' '-Dsun.stderr.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' '-cp' $cpD 'ExportDriver' (Join-Path $jd 'job.properties')
+    & $javaExe (Get-HeapArg) '-Dfile.encoding=UTF-8' '-Dsun.stdout.encoding=UTF-8' '-Dsun.stderr.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' '-cp' $cpD 'ExportDriver' (Join-Path $jd 'job.properties')
     $rc = $LASTEXITCODE
     Pop-Location
     Write-Host ('  退出码: ' + $rc) -ForegroundColor Yellow
@@ -1264,6 +1282,10 @@ foreach ($m in $ModelList) {
     $spec.Add('outname='  + $n)
     $spec.Add('blocks='   + $blocks.Count)
     $spec.Add('solve='    + $(if ($doSolve) { '1' } else { '0' }))
+    # 每块取多少个解（默认 200）；解特别多又内存紧张时可在配方里写 Chunk = 100
+    $chunkVal = 200
+    if ($cfg.Chunk) { $chunkVal = [int]$cfg.Chunk }
+    $spec.Add('chunk='    + $chunkVal)
     for ($i = 0; $i -lt $blocks.Count; $i++) {
         $b = $blocks[$i]
         $k = $i + 1

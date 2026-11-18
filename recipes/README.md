@@ -40,6 +40,24 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 `NameTemplate` 里的占位符：`{task}` 配方 Task、`{model}` 模型文件名、`{stamp}` 时间戳 yyyyMMddHHmm。
 一个作业有多个导出块时，文件名是 `<outname>_<块 Name>`。
 
+## 解很多的时候（顶层两个可选字段）
+
+| 字段 | 默认 | 用途 |
+|---|---|---|
+| `Chunk` | `200` | 每次向 COMSOL 要多少个解。解数上千、内存紧时调小（如 `Chunk = 100`）；机器内存富余可调大 |
+| `Heap`（命令行 `-Heap`） | 物理内存的 70%（最少 4GB） | Java 堆。解数据总量 ≈ 解数 × 单解大小（本仓约 8.25MB/解，651 解≈5.4GB），堆不够会取数失败 |
+
+```powershell
+@{
+    Task = 'ITO-LN-ITO'; Study = 'std1'
+    NameTemplate = '{task}_{model}_{stamp}'
+    Chunk = 100
+    Use = @( @{ Module = 'bigtable'; Name = 'bigtable' } )
+}
+```
+
+导出块里还可以写 `Allownan = 1`：默认解不出数的点（NaN/Inf）会报错中止，确认这些点本来就没定义时才开这个开关跳过它们。
+
 ## 导出块
 
 ### global — 任意表达式的表
