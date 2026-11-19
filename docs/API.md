@@ -317,6 +317,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.7.1 | 2026-11-18 | 进度条改为同字形 `█` + 分段着色（黄=已完成、深灰=未完成），修「已完成比未完成高」；开窗自动设 88 列宽、高度按屏幕工作区占满并挪到左上角（`-WinWidth`/`COMSOL_EXPORT_COLS`/`COMSOL_EXPORT_NORESIZE`） |
 | v1.7.2 | 2026-11-18 | 进度框改**差量重绘**（逐行比对，只重写变化的行，不再整框重画）；`Initialize-ConsoleWindow` 加回读校验与 `mode con` 回退；终止作业重写为「先写 killed 标记 → 按命令行标记扫 java/comsol 进程 → 最多 12 轮 taskkill /T /F → 复核」，调度器见到 killed 标记即收尾，杀不干净也不挂死 |
 | v1.7.3 | 2026-11-18 | 窗口尺寸按像素定（量 `cellW/cellH` 后 `SetWindowPos`，先取消最大化），修「窗口没占满高度」；新增 `-WinDebug` 开关（不必再设环境变量） |
+| v1.7.4 | 2026-11-19 | 求解失败不再只报 `solve-error`：从 `solve.log` 抠出 comsolbatch 的报错正文（方框后的行）并在 `[失败]` 行里直接打出来；现场清单补 `launch-solve.txt`/`solve.log` 并把 solve.log 尾部两行一起显示（原来只查 `launch.txt`，求解阶段永远显示"无"） |
 
 ## 8. 待验证 / 已知缺口
 

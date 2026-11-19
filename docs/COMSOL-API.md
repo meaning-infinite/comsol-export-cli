@@ -1,4 +1,4 @@
-# COMSOL Java API 笔记（驱动用到的部分）
+﻿# COMSOL Java API 笔记（驱动用到的部分）
 
 > 最后更新：2026-11-12 · 对应 COMSOL 6.4 / 驱动 v1.1
 > 本文只记**驱动里实际调用过的 API**与踩过的坑，不是 COMSOL 官方文档的替代品。项目自身的接口见 [API.md](API.md)。
@@ -133,6 +133,50 @@ java -Xmx4g -cp "<COMSOL>\plugins\*;<driver 目录>" ExportDriver <job.propertie
 - 特征频率研究里“单解节点内多模态”的枚举：`set("solnum", k)` 逐 k 取，尚未在真实 eig 模型上完整跑过（测试模型只有波长解）。
 - 切片默认视图是自动的，几何纵向很长时图像会显得细长（测试模型 500×400 px 出图即如此），需要更好构图时再设 `view` / 旋转角。
 - `PlotGroup1D` 横轴强制设为波长（而不是扫描参数）的写法还没验证。
+
+## 9. 求解器序列生成（createAutoSequences）的坑
+
+批处理（`comsolbatch -study`）在跑之前会先"生成求解器序列"，等价于 GUI 的"显示默认求解器"。这一步失败时日志长这样（方框 + 正文两行）：
+
+```
+/*****错误********/
+/***************/
+未知解。
+ - 标记: all
+```
+
+对应的 Java 栈（`%USERPROFILE%\.comsol\v64\logs\javabridge*.log`）：
+
+```
+com.comsol.util.exceptions.UnknownEntityException: 未知解。
+  at ModelEntityListDb.findObject(391)
+  at ModelDb.sol(2132)              <- 把字面量 "all" 当成解标签去查
+  at StudyMethod.doCreateAutoSequences(328)
+  at StudyDb.createAutoSequences(202)
+```
+
+**症状**：打开模型 → 32 s → 立刻就挂，没有任何网格/求解进度；保存出来的 .mph 里没有解。
+
+**已复现的触发条件（COMSOL 6.4，2026-11-19）**：一个研究里同时存在**两个参数化扫描（Parametric）研究步**——其中一个处于启用状态、另一个被取消勾选也照样触发。逐个删/留测试：
+
+| 操作（每次重新打开模型） | 生成序列 |
+|---|---|
+| 原样（`param1` 启用 + `param` 禁用 + wave 启用） | **失败** |
+| 只删 `param1`（剩下 `param` 禁用 + wave） | 成功 |
+| 只删 `param`（剩下 `param1` 启用 + wave） | 成功 |
+| 把 `param` 取消勾选（不删除） | **仍失败** |
+| 把 `param` 的 `pname`/`plistarr` 改成和 `param1` 一样 | **仍失败** |
+| 删掉 `param` 后**新建**一个同内容的 `param2` | 成功 |
+
+→ 结论：不是列表长度、不是扫描类型，是那个**旧的研究步节点本身带着失效的内部引用**（`keepsol=all` 一类状态在 GUI 里看不出来）。取消勾选没用，**必须删掉重建**。
+
+**办法**：在 GUI 的"研究"里删掉用不到的参数化扫描步（模型 → 研究1 → 右键 → 删除），保存后重跑；生成出来的解序列应与健康模型一致（`sol1` 里只有 `st1`(wave)/`v1`/`s1`，参数化结果在运行时才出现）。
+
+## 10. 版本记录（续）
+
+| 日期 | 版本 | 内容 |
+|---|---|---|
+| 2026-11-19 | — | 补第 9 节：`createAutoSequences` 报 `未知解。- 标记: all` 的复现矩阵与修法 |
 
 ## 8. 版本记录
 

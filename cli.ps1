@@ -1303,6 +1303,39 @@ function Show-ProgressJob($job, $ord, $total) {
     else { Render-Progress2 $info $nm $ord $total }
 }
 
+function Get-SolveErrorLine($job) {
+    # 从 solve.log 里抠出 comsolbatch 的报错正文。它的格式是方框 + 后续行：
+    #   /***************/  /*****错误********/  /***************/
+    #   未知解。
+    #    - 标记: all
+    $p = Join-Path $job.jobDir 'solve.log'
+    if (-not (Test-Path -LiteralPath $p)) { return '' }
+    $lines = @((Read-FileTailText $p 32768) -split "`r?`n")
+    $start = -1
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        if ($lines[$i] -match '错误') { $start = $i; break }
+    }
+    if ($start -lt 0) { return '' }
+    $msg = @()
+    for ($j = $start + 1; $j -lt $lines.Count; $j++) {
+        $s = ([string]$lines[$j]).Trim()
+        if ($s -eq '') { if ($msg.Count -gt 0) { break } else { continue } }
+        if ($s -match '^/+\*+/+$') { continue }
+        if ($s -match '^(正在|保存时间|总时间)') { break }
+        $msg += $s
+        if ($msg.Count -ge 3) { break }
+    }
+    if ($msg.Count -eq 0) {
+        $s = ([string]$lines[$start]).Trim()
+        $k = $s.LastIndexOf('/')
+        if ($k -ge 0 -and $k -lt ($s.Length - 1)) { $s = $s.Substring($k + 1).Trim() }
+        $msg = @($s)
+    }
+    $out = ($msg -join ' ')
+    if ($out.Length -gt 160) { $out = $out.Substring(0, 160) }
+    return $out
+}
+
 function Test-SolveOk($job) {
     # 求解阶段结束的判据：comsolbatch 写出 <outname>.mph 且状态文件写到 Done（或日志里有总时间）
     $solved = Get-JobSolvedPath $job
@@ -1792,7 +1825,7 @@ function Invoke-Scheduler {
             } elseif ($job.status -eq 'failed') {
                 $code = [string]$job.exitcode
                 $ev = @()
-                foreach ($m in @('started','exit','exported','killed','launch.txt')) {
+                foreach ($m in @('started','exit','exported','killed','launch.txt','launch-solve.txt','solve.log')) {
                     $mp = Join-Path $job.jobDir $m
                     if (Test-Path -LiteralPath $mp) { $ev += ($m + '=有') } else { $ev += ($m + '=无') }
                 }
@@ -1810,13 +1843,19 @@ function Invoke-Scheduler {
                 } elseif ($code -eq 'no-java') {
                     Write-Host ('  [失败] ' + $leaf + '  找不到 Java：' + $javaExe) -ForegroundColor Red
                 } elseif ($code -eq 'launch-error') {
-                    Write-Host ('  [失败] ' + $leaf + '  启动进程失败（见 launch.txt 的 start-error）') -ForegroundColor Red
+                    Write-Host ('  [失败] ' + $leaf + '  启动进程失败（见 launch.txt / launch-solve.txt 的 start-error）') -ForegroundColor Red
+                } elseif ($code -eq 'solve-error') {
+                    $el = Get-SolveErrorLine $job
+                    if ($el) { Write-Host ('  [失败] ' + $leaf + '  求解报错：' + $el) -ForegroundColor Red }
+                    else { Write-Host ('  [失败] ' + $leaf + '  求解报错（细节见 solve.log）') -ForegroundColor Red }
+                } elseif ($code -eq 'solve-no-output' -or $code -eq 'solve-incomplete') {
+                    Write-Host ('  [失败] ' + $leaf + '  求解没跑完：' + $code + '（见 solve.log）') -ForegroundColor Red
                 } elseif ($code -eq '?') {
                     Write-Host ('  [失败] ' + $leaf + '  驱动启动了(started 有)但没有写 exit —— Java 崩溃或被外部杀掉') -ForegroundColor Red
                 } else {
                     Write-Host ('  [失败] ' + $leaf + '  退出码 ' + $code) -ForegroundColor Red
                 }
-                foreach ($f in @('driver.err', 'driver.log')) {
+                foreach ($f in @('driver.err', 'driver.log', 'solve.log')) {
                     $fp = Join-Path $job.jobDir $f
                     if (-not (Test-Path -LiteralPath $fp)) { continue }
                     $tail = @(Get-Content -LiteralPath $fp -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch '^\s+at ' } | Select-Object -Last 3)
