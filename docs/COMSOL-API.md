@@ -229,6 +229,16 @@ sol1 1-28, sol2 29-56, sol3 57-167, …   (按 model.sol().tags() 顺序，getSi
 | 2026-11-20 | v1.7.5 | 补第 11 节：场图装饰总闸（`optionsNd`）、CutPlane 偏移单位、二维坐标映射、等比例/拉伸、色标合并 |
 | 2026-11-20 | v1.7.7 | 补 11.4：`resolution`/`fontsize`/4096 上限、`quickplane` 六个值、`legendpos=bottom` |
 | 2026-11-20 | v1.7.8 | 补 11.5：`Solution` 数据集的 `solution` 只能绑一个解节点（`all` 报 `未知特征`）；全局解号需先翻成「节点 + 节点内序号」 |
+| 2026-11-20 | v1.7.10 | 补 11.6：三维用 `view=auto` 才是 GUI 同款默认视角；`logo3d/logo2d`、`axisorientation` 关徽标与三轴图标；`edges=on` 才是域边界线；二维 `view=auto` 轴范围正好框数据（手工 view2 会被 1:1 撑大）；COMSOL 一次导出只能一个 plot group，左右拼图得导出后用 ImageIO 拼 |
+
+### 11.6 场图配色与排版（v1.7.10 实测）
+
+- **三维默认视角**：`PlotGroup3D.set("view","auto")` 即 GUI 里新建三维绘图组时的默认视角；显式绑 `view1`（ModelView3D）反而可能得到被裁剪/偏移的画面。`view=auto` 时画布比例仍要自己给（几何细长就给竖长画布），否则四周大片留白。
+- **徽标与三轴图标**：`Image.export` 节点上的 `logo1d/logo2d/logo3d`、`axisorientation` 默认都是 `on`，要显式设 `off`；它们和 `optionsNd` 一样只在导出节点生效，绘图组上的同类属性无效。
+- **域边界线**：`PlotGroup2D.edges="on"` 才画出每个域的轮廓（连同单元边）；`off` 是纯净色块。要“边界线但不要密密麻麻的网格线”，只能靠网格本身够粗，COMSOL 没有单独的“只画域边界”开关。
+- **二维轴范围**：`view="auto"` 时 COMSOL 把轴范围正好框到数据；手工 `viewscaletype=manual` + 显式 `xmin/xmax` 虽然读回值正确，但导出时仍按 1:1 等比例把轴撑大（画布窄、色标又占宽时尤其明显），数据会缩成中间一条。
+- **色标位置**：`legendpos` 是绘图组属性，`right` 为竖直贴右；两张竖图左右拼接时，左图留色标、右图 `colorlegend=off`，拼完色标正好落在中间。
+- **拼接与裁边**：COMSOL 一次导出只能指定一个 plot group，多面板只能导出后自己拼（驱动里 `stitchH` 用 `Graphics2D` 白底横拼；`cropWhite` 逐像素找非白 bbox 裁边）。拼接用 300 dpi 原图，别先缩放。
 
 ## 8. 版本记录
 

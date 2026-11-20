@@ -97,7 +97,7 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.7.9";
+    static final String DRIVER_VERSION = "v1.7.10";
 
     static Path CURRENT_JOB_DIR = null;
     static Path LOG_FILE = null;
@@ -647,7 +647,7 @@ public class ExportDriver {
         String expr = j.block(i, "expr", "ewfd.normE").trim();
         String solnum = j.block(i, "solnum", "1").trim();
         String at = j.block(i, "at", "auto").trim();
-        String edges = j.block(i, "edges", "off").trim();
+        String edges = j.block(i, "edges", "on").trim();   // 默认画边：保留每个域的边界线
         String title = j.block(i, "title", "").trim();
 
         // 用切面自己的数据集（CutPlane）：解落在哪个数据集由它决定。
@@ -683,8 +683,7 @@ public class ExportDriver {
         if (!hasResult(j, tag3)) j.model.result().create(tag3, "PlotGroup3D");
         // 三维组必须给显式视图：新建的 PlotGroup3D 若沿用当前视图（常是二维视图），
         // 三维切片会被裁剪在可视范围外，导出成空白白图
-        String v3 = view3d(j);
-        if (!v3.isEmpty()) trySet(j.model.result(tag3), "view", v3);
+        trySet(j.model.result(tag3), "view", "auto");   // auto = COMSOL 默认三维视角，和 GUI 里看到的一致
         j.model.result(tag3).set("data", dsData);
         trySet(j.model.result(tag3), "solnum", localSol);
         String[][] cuts = {
@@ -720,8 +719,18 @@ public class ExportDriver {
         String t3 = title == null ? "" : title.trim();
         if (t3.isEmpty()) t3 = q3.isEmpty() ? "三维视图（三正交切片）" : "三维视图（三正交切片） · " + q3;
         applyTitle(j.model.result(tag3), t3, t3, "");
+        // 画布按几何长宽比给（不再固定 4:3）：细长样品出竖长画布，扁的给横长
+        int w3 = Integer.parseInt(j.block(i, "width", "1200").trim());
+        if (w3 <= 0) w3 = 1200;
+        double spanXY = Math.max(bb[1] - bb[0], bb[3] - bb[2]);
+        double spanZ = bb[5] - bb[4];
+        double asp3 = spanXY > 0 ? spanZ / spanXY : 1;
+        int h3, ww3;
+        if (asp3 >= 1) { h3 = (int) Math.round(Math.min(2400, Math.max(800, 900 * asp3))); ww3 = Math.max(700, (int) Math.round(h3 / asp3)); }
+        else { ww3 = (int) Math.round(Math.min(2400, Math.max(800, 900 / Math.max(asp3, 0.05)))); h3 = Math.max(700, (int) Math.round(ww3 * asp3)); }
         Path png3 = j.outdir.resolve(j.outname + "_" + name + "_3d.png");
-        exportPng(j, i, tag3, png3);
+        exportPng(j, i, tag3, png3, ww3, h3);
+        cropWhite(png3, 12);   // 画布按内容裁掉四周白边，不再被 4:3 硬比例撑出大片空白
         System.out.println("[driver] 写出 " + png3);
 
         String v2 = "";   // 第一次 run 之后按绘图组挑现成的二维视图
@@ -733,6 +742,7 @@ public class ExportDriver {
         // 真实比例出图：不做任何拉伸（二维视图保持 1:1）
         String[][] planes = {
                 { "xy", "_xy", "XY" }, { "xz", "_xz", "XZ" }, { "yz", "_zy", "ZY" } };
+        Path xzPng = null, zyPng = null;
         for (String[] pl : planes) {
             String plane = pl[0], suffix = pl[1], caption = pl[2];
             double pos = "xy".equals(plane) ? zc : ("xz".equals(plane) ? yc : xc);
@@ -749,25 +759,45 @@ public class ExportDriver {
             int[] px = canvasSize(pxW, pxH, plane, bb);
             // 竖图（细长截面）把色标挪到下方：右侧色标会吃掉本就只有几百像素的宽度，
             // COMSOL 为保 1:1 会把纵轴撑大，数据只剩中间一条
-            if (px[1] > px[0]) trySet(j.model.result(pg), "legendpos", "bottom");
+            // 色标竖排在右侧；拼成一张时它正好落在两图中间（图例在中间）
+            trySet(j.model.result(pg), "legendpos", "right");
             if (!hasResultFeature(j, pg, "surf1")) j.model.result(pg).create("surf1", "Surface");
             j.model.result(pg).feature("surf1").set("expr", expr);
             // 二维视图必须在 run() 之后才出现在 view 合法值里；先 run 再挑视图、设轴范围、再 run
-            j.model.result(pg).run();
-            if (v2.isEmpty()) v2 = pick2dView(j, pg);
-            if (v2.isEmpty()) v2 = view2d(j);
-            if (!v2.isEmpty()) {
-                trySet(j.model.result(pg), "view", v2);
-                setViewLimits(j, v2, plane, bb);
-            }
+            // 视图用 COMSOL 的 auto：它把轴范围正好框到数据，和 GUI 里看到的一致；
+            // 手工设 view2 轴范围反而会按 1:1 把轴撑大、留一圈白
+            trySet(j.model.result(pg), "view", "auto");
             decorate(j.model.result(pg), edges, caption + " 切面", title, "");
             j.model.result(pg).run();
             // 竖图太窄，标题带量名会折成三行，只用平面名
             applyTitle(j.model.result(pg), caption + " 切面",
                     px[1] > px[0] ? caption + " 切面" : title, "");
             Path png2 = j.outdir.resolve(j.outname + "_" + name + suffix + ".png");
-            exportPng(j, i, pg, png2, px[0], px[1]);
-            System.out.println("[driver] 写出 " + png2);
+            // 竖图（xz/zy）右侧留一条竖直色标：两张拼起来后色标正好落在中间；
+            // 画布宽度按实测绘图框自适应（色标会吃掉宽度，窄了纵轴会被 1:1 撑大）
+            boolean wantLegend = !"yz".equals(plane);
+            // 画布宽度 = 数据宽 + 装饰宽度（色标/刻度标签）。给足，宁可多留白再裁，
+            // 也不能让绘图框窄到被 1:1 撑大纵轴（那样数据只剩中间一条）。
+            double spX, spY;
+            if ("xy".equals(plane)) { spX = bb[1] - bb[0]; spY = bb[3] - bb[2]; }
+            else if ("xz".equals(plane)) { spX = bb[1] - bb[0]; spY = bb[5] - bb[4]; }
+            else { spX = bb[3] - bb[2]; spY = bb[5] - bb[4]; }
+            int hPx = px[1];
+            int wPx = (int) Math.round(hPx * (spX / spY)) + (wantLegend ? 380 : 150);
+            wPx = Math.max(200, Math.min(4096, wPx));
+            exportPng(j, i, pg, png2, wPx, hPx, wantLegend);
+            cropWhite(png2, 10);
+            if ("xz".equals(plane)) xzPng = png2;
+            else if ("yz".equals(plane)) zyPng = png2;
+            else System.out.println("[driver] 写出 " + png2);
+        }
+        // 把 x-z 与 z-y 两张竖图横拼成一张（左图带色标，色标落在两图中间）
+        if (xzPng != null && zyPng != null) {
+            Path merged = j.outdir.resolve(j.outname + "_" + name + "_xz_zy.png");
+            stitchH(xzPng, zyPng, merged, 24);
+            Files.deleteIfExists(xzPng);
+            Files.deleteIfExists(zyPng);
+            System.out.println("[driver] 写出 " + merged + "（x-z + z-y 合并）");
         }
     }
 
@@ -838,7 +868,50 @@ public class ExportDriver {
 
     // 画布尺寸：height=0 时按切面真实长宽比算 —— 短边至少 500px，长边相应放大，
     // 既保持真实比例，又不至于把面板压成一条线
-    static int[] canvasSize(int w, int h, String plane, double[] bb) {
+        /** 量出图片里绘图框（黑色边框矩形）的范围：{x0,x1,y0,y1}；找不到返回 null */
+    static int[] frameBox(java.awt.image.BufferedImage img) {
+        int w = img.getWidth(), h = img.getHeight();
+        int[] rows = new int[h], cols = new int[w];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                int rgb = img.getRGB(x, y);
+                int r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, bl = rgb & 0xFF;
+                if (r < 80 && g < 80 && bl < 80) { rows[y]++; cols[x]++; }
+            }
+        int y0 = -1, y1 = -1, x0 = -1, x1 = -1;
+        for (int y = 0; y < h; y++) if (rows[y] > w * 0.4) { if (y0 < 0) y0 = y; y1 = y; }
+        for (int x = 0; x < w; x++) if (cols[x] > h * 0.4) { if (x0 < 0) x0 = x; x1 = x; }
+        if (x0 < 0 || y0 < 0) return null;
+        return new int[] { x0, x1, y0, y1 };
+    }
+
+    /** 二维图按数据长宽比自适应画布宽度：色标吃掉宽度时，绘图框会被压窄、纵轴被 1:1 撑大。
+     *  导出后量一次绘图框，宽了/窄了按比例补画布宽度（最多试 3 次）。 */
+    static Path export2dFit(Job j, int i, String plotGroup, Path target,
+                            int pxW, String plane, double[] bb, boolean legend) throws Exception {
+        int[] px = canvasSize(pxW, 0, plane, bb);
+        double spanX, spanY;
+        if ("xy".equals(plane)) { spanX = bb[1] - bb[0]; spanY = bb[3] - bb[2]; }
+        else if ("xz".equals(plane)) { spanX = bb[1] - bb[0]; spanY = bb[5] - bb[4]; }
+        else { spanX = bb[3] - bb[2]; spanY = bb[5] - bb[4]; }
+        double want = spanX / spanY;
+        int w = px[0], h = px[1];
+        for (int attempt = 0; attempt < 3; attempt++) {
+            exportPng(j, i, plotGroup, target, w, h, legend);
+            java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(target.toFile());
+            int[] fb = img == null ? null : frameBox(img);
+            if (fb == null) break;
+            double got = (double) (fb[1] - fb[0]) / Math.max(1, fb[3] - fb[2]);
+            if (Math.abs(got / want - 1) < 0.03) break;
+            long need = Math.round((fb[3] - fb[2]) * want);      // 绘图框应有的宽度
+            long delta = need - (fb[1] - fb[0]);
+            w = (int) Math.max(200, Math.min(4096, w + delta));
+            if (w >= 4095) break;
+        }
+        return target;
+    }
+
+static int[] canvasSize(int w, int h, String plane, double[] bb) {
         if (h > 0) return new int[] { w, h };
         double spanX, spanY;
         if ("xy".equals(plane)) { spanX = bb[1] - bb[0]; spanY = bb[3] - bb[2]; }
@@ -858,6 +931,7 @@ public class ExportDriver {
             py = (int) Math.round(shortSide / aspect);
             if (py < longSide) { py = longSide; px = (int) Math.round(longSide * aspect); }
         }
+        // 色标/刻度标签的宽度在二维循环里按实测补（见 fit2dCanvas）
         int big = Math.max(px, py);
         if (big > maxSide) {   // COMSOL 单边上限 4096 px
             double k = (double) maxSide / big;
@@ -1391,6 +1465,10 @@ public class ExportDriver {
     }
 
     static void exportPng(Job j, int i, String plotGroup, Path target, int w, int h) throws Exception {
+        exportPng(j, i, plotGroup, target, w, h, true);
+    }
+
+    static void exportPng(Job j, int i, String plotGroup, Path target, int w, int h, boolean legend) throws Exception {
         String tag = "img_" + i + "_" + Math.abs((plotGroup + target.toString()).hashCode() % 1000000);
         if (!Arrays.asList(j.model.result().export().tags()).contains(tag)) {
             j.model.result().export().create(tag, "Image");
@@ -1418,13 +1496,75 @@ public class ExportDriver {
         trySet(ex, "title2d", "on");
         trySet(ex, "title3d", "on");
         trySet(ex, "legend1d", "on");
-        trySet(ex, "legend2d", "on");
-        trySet(ex, "legend3d", "on");
+        trySet(ex, "legend2d", legend ? "on" : "off");
+        trySet(ex, "legend3d", legend ? "on" : "off");
+        // 图下方的 COMSOL 徽标、三维左下角的坐标三轴，出图时都不需要
+        trySet(ex, "logo1d", "off");
+        trySet(ex, "logo2d", "off");
+        trySet(ex, "logo3d", "off");
+        trySet(ex, "axisorientation", "off");
         Path part = Paths.get(target.toString() + ".part.png");
         j.model.result().export(tag).set("pngfilename", part.toString().replace("\\", "/"));
         Files.createDirectories(target.getParent());
         j.model.result().export(tag).run();
         Files.move(part, target, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    // 裁掉四周纯白边（COMSOL 导出的画布按字符比例给，二维细长切面会留大片空白）
+    static void cropWhite(Path png, int pad) {
+        try {
+            java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(png.toFile());
+            int w = img.getWidth(), h = img.getHeight();
+            int x0 = w, y0 = h, x1 = -1, y1 = -1;
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    int rgb = img.getRGB(x, y);
+                    int r = (rgb >> 16) & 255, g = (rgb >> 8) & 255, b = rgb & 255;
+                    if (r < 250 || g < 250 || b < 250) {   // 非白像素
+                        if (x < x0) x0 = x;
+                        if (x > x1) x1 = x;
+                        if (y < y0) y0 = y;
+                        if (y > y1) y1 = y;
+                    }
+                }
+            }
+            if (x1 < 0) return;                            // 全白，不动
+            x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad);
+            x1 = Math.min(w - 1, x1 + pad); y1 = Math.min(h - 1, y1 + pad);
+            if (x0 == 0 && y0 == 0 && x1 == w - 1 && y1 == h - 1) return;
+            java.awt.image.BufferedImage sub = img.getSubimage(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(
+                    sub.getWidth(), sub.getHeight(), java.awt.image.BufferedImage.TYPE_INT_RGB);
+            java.awt.Graphics2D g2 = out.createGraphics();
+            g2.setColor(java.awt.Color.WHITE);
+            g2.fillRect(0, 0, out.getWidth(), out.getHeight());
+            g2.drawImage(sub, 0, 0, null);
+            g2.dispose();
+            javax.imageio.ImageIO.write(out, "png", png.toFile());
+        } catch (Exception e) {
+            System.out.println("[driver] 警告: 裁白边失败 " + e.getMessage());
+        }
+    }
+
+    // 两张图横向拼一张（等高对齐、顶部对齐，中间留 gap 像素白缝）
+    static void stitchH(Path left, Path right, Path out, int gap) {
+        try {
+            java.awt.image.BufferedImage a = javax.imageio.ImageIO.read(left.toFile());
+            java.awt.image.BufferedImage b = javax.imageio.ImageIO.read(right.toFile());
+            int h = Math.max(a.getHeight(), b.getHeight());
+            int w = a.getWidth() + gap + b.getWidth();
+            java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(
+                    w, h, java.awt.image.BufferedImage.TYPE_INT_RGB);
+            java.awt.Graphics2D g2 = img.createGraphics();
+            g2.setColor(java.awt.Color.WHITE);
+            g2.fillRect(0, 0, w, h);
+            g2.drawImage(a, 0, 0, null);
+            g2.drawImage(b, a.getWidth() + gap, 0, null);
+            g2.dispose();
+            javax.imageio.ImageIO.write(img, "png", out.toFile());
+        } catch (Exception e) {
+            throw new IllegalStateException("拼图失败: " + e.getMessage(), e);
+        }
     }
 
     // 导出尺寸：height=0 在配方里是「按切面长宽比自动算」，但导出节点要求宽高都 > 0
