@@ -946,7 +946,7 @@ function Get-JobStates {
 # 可用参数 -Heap 8g 或环境变量 COMSOL_EXPORT_XMX 覆盖。
 # 驱动 class 里的版本串（DRIVER_VERSION 常量），用来发现「只更新了脚本、没更新 driver」的情况：
 # 远程出现过 cli.ps1 是新的、driver 还是旧 class，于是同样的 bug 反复报。
-$script:ExpectedDriverVersion = 'v1.7.15'
+$script:ExpectedDriverVersion = 'v1.7.16'
 
 function Get-DriverClassVersion([string]$dir) {
     $p = Join-Path $dir 'ExportDriver.class'
@@ -2223,7 +2223,7 @@ Save-Queue (@($queue) + @($jobs))
 Write-Host ''
 Write-Host '  【计算中】关掉本窗口不影响计算；重开 CLI 加 -Resume 可接着监视' -ForegroundColor Yellow
 Write-Host ('  日志 : ' + $JobsDir)
-Write-Host ('  输出 : ' + (Join-Path $Root 'output'))
+Write-Host ('  输出 : ' + (Join-Path $Root 'output') + '  （每个模型一个同名子文件夹）')
 Write-Host ''
 Invoke-Scheduler
 

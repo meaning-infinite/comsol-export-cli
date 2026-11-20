@@ -6,7 +6,7 @@
 ## 1. 分层与调用链
 
 ```
-run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler  →  output/
+run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler  →  output/<模型名>/
              │                                    │
              └── queue.json（调度/状态）           └── logs/<作业>/{solved,exporting,exported}
 ```
@@ -83,7 +83,7 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 |---|---|
 | `model` | 模型绝对路径 |
 | `study` | 研究标签，空则取模型第一个研究 |
-| `outdir` | 输出目录 |
+| `outdir` | 输出根目录；驱动实际写 `<outdir>/<模型文件名去 .mph>/`（每个模型一个同名子文件夹） |
 | `outname` | 输出文件名（不含扩展名） |
 | `modelsdir` | 模型目录，用于存 `solved/` 下已求解模型 |
 | `solve` | `1` 求解后导出（默认）/ `0` 只导出：跳过研究求解，直接用模型里已有的解 |
@@ -122,7 +122,7 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 
 ### 4.4 image — 场图（只出 1 张组合总表，v1.7.15 起）
 
-**只产出 1 个文件**：`<outname>_<name>_all.png`。三维与三张二维切面先导到作业临时目录（`%TEMP%\comsol-export-*\img_N\`），拼完立即删除，`outdir` 里不会再留分面图。
+**只产出 1 个文件**：`<outname>_<name>_all.png`。三维与三张二维切面先导到作业临时目录（`%TEMP%\comsol-export-*\img_N\`），拼完立即删除，模型的产物子目录里不会再留分面图。
 
 总表 **300 dpi**（PNG 内写 `pHYs` = 11811 px/m；ImageIO 重编码会丢 dpi，驱动自己补写），带图题、色标、坐标轴刻度；默认画每个域的边界线，去掉了 COMSOL 徽标与三轴方向图标。
 
@@ -244,7 +244,7 @@ static void exportFoo(Job j, int i) throws Exception {
 |---|---|
 | `j.model` | 已加载的 `com.comsol.model.Model` |
 | `j.dataset` | 第一个数据集标签 |
-| `j.outdir` / `j.outname` | 输出目录 / 文件名 |
+| `j.outdir` / `j.outname` | 输出目录（已含模型同名子文件夹）/ 文件名 |
 | `j.pnames` | 研究的参数化扫描变量名（自动前置为 CSV 列） |
 | `j.study` | 研究标签 |
 | `j.block(i,key,def)` | 读字符串字段 |
@@ -362,6 +362,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.7.13 | 2026-11-20 | 场图总表改版：每分量一块（三维｜上 x-y、下 x-z 与 z-y），二维关掉 COMSOL 装饰、改为自绘竖轴+刻度+竖色标（COMSOL 二维的框去不掉）；尺寸改为等比例缩放排版 |
 | v1.7.14 | 2026-11-20 | 总表按示意图对齐：左三维占满整块高度，右侧上 x-y（方形、宽=两张侧面+间隔）、下 x-z/z-y 并排铺满其余高度；每张二维各占一格（左轴+场+右色标），不再互相压字 |
 | v1.7.15 | 2026-11-20 | 场图**只留组合总表**：分面图改写作业临时目录、拼完即删，`outdir` 不再出 `_3d/_xy/_xz/_zy`；补写 PNG `pHYs`=300 dpi（ImageIO 重编码会丢 dpi，改为 `writePng` 手插，拼版/裁白边/去框/拼图全部走它）；分辨率整体 ×1.5（`SCALE` 常量：`BLOCK_H` 2400→3600、字号边距色标同步、分面画布短边 1200/长边 3600），总表约 5265×4065 |
+| v1.7.16 | 2026-11-20 | 产物不再平铺在 `output/`：驱动把 `j.outdir` 改为 `output/<模型文件名去 .mph>/`（`modelBase()`），CSV 与场图都落该子文件夹；`modelsdir` 默认值仍取 `output` 的父目录；驱动日志首行打印产出目录 |
 | v1.7.8 | 2026-11-20 | 修 image 块多解节点报 `Unknown feature`：`Solution` 数据集的 `solution` 只能绑单个解节点，改成按全局 `SolNum` 定位节点后取节点内序号；堆上限加 64GB 封顶（公共电脑几百 GB 内存时不会给到 300GB+） |
 | v1.7.9 | 2026-11-20 | 诊断补强：驱动每次启动打 `驱动版本=` 与 class 路径/修改时间（缺这行就是旧 class）、块失败打 FlException 全文与自己的栈帧、场图每步打阶段日志；`cli.ps1` 比对 class 里的版本串（`ExpectedDriverVersion`），不一致时启动前警告并写进 launch.txt；`update.ps1` 新增 `Repair-Driver`：版本不一致时用 COMSOL 自带 javac 自动重编 |
 

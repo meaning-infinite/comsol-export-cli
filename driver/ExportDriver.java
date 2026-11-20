@@ -97,7 +97,7 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.7.15";
+    static final String DRIVER_VERSION = "v1.7.16";
 
     static Path CURRENT_JOB_DIR = null;
     static Path LOG_FILE = null;
@@ -173,11 +173,15 @@ public class ExportDriver {
             System.err.println("模型不存在: " + modelPath); finish(j.jobDir, 2);
         }
         if (j.blocks <= 0) { System.err.println("作业文件里没有 Export 块"); finish(j.jobDir, 2); }
-        j.outdir = Paths.get(outdir).toAbsolutePath();
+        // 产出按模型分文件夹：output\<模型文件名去 .mph>\ 下放该模型的全部产物，
+        // 免得多个模型的 csv/png 全挤在 output 里
+        Path outRoot = Paths.get(outdir).toAbsolutePath();
+        j.outdir = outRoot.resolve(modelBase(Paths.get(modelPath)));
+        log("[driver] 产出目录 " + j.outdir);
 
         String modelsDirProp = j.p.getOrDefault("modelsdir", "").trim();
         j.modelsDir = modelsDirProp.isEmpty()
-                ? j.outdir.getParent().resolve("models")
+                ? outRoot.getParent().resolve("models")
                 : Paths.get(modelsDirProp).toAbsolutePath();
         Path solvedModel = j.modelsDir.resolve("solved").resolve(j.outname + ".mph");
         if (!Files.isRegularFile(solvedModel)) {
@@ -2032,6 +2036,17 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
             }
         }
         Files.move(part, target, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    /** 模型文件名去掉 .mph —— 用作 output 下的产物子文件夹名（与模型同名） */
+    static String modelBase(Path modelPath) {
+        String n = modelPath == null || modelPath.getFileName() == null
+                ? "" : modelPath.getFileName().toString();
+        if (n.toLowerCase().endsWith(".mph")) n = n.substring(0, n.length() - 4);
+        n = n.trim();
+        if (n.isEmpty()) n = "model";
+        // 目录名里去掉 Windows 不允许的字符（模型名一般干净，兜底）
+        return n.replaceAll("[\\\\/:*?\"<>|]", "_");
     }
 
     static void deleteTree(Path root) throws IOException {
