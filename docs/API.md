@@ -87,7 +87,9 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 | `Stop-OneJob` | 三重校验后 `taskkill /T /F`，写 `killed` 标记 |
 | `Clear-JobLock` | 四道闸清 `.lock` |
 | `Invoke-Scheduler` | 调度循环、界面刷新、统计 |
-| `Write-Box` / `Write-BoxRows` | 画框（中文双宽对齐） |
+| `Write-Box` / `Write-BoxRows` | 画框（中文双宽对齐）；宽度统一由 `Get-BoxWidth` 定，内容超长交给 `Cut-Text`/`Trim-Row` 截断，框永不被撑宽 |
+| `Get-BoxWidth` / `$script:BoxW` | 全部方框的统一内宽（默认 76，含标题框/菜单框/进度框/汇总框）；窄终端自动收缩 |
+| `Trim-Row` | 按显示宽度截断一整行（多段、可带底色），用于菜单与进度框的动态内容 |
 
 ## 3. 作业文件 job.properties
 
@@ -379,6 +381,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.7.16 | 2026-11-20 | 产物不再平铺在 `output/`：驱动把 `j.outdir` 改为 `output/<模型文件名去 .mph>/`（`modelBase()`），CSV 与场图都落该子文件夹；`modelsdir` 默认值仍取 `output` 的父目录；驱动日志首行打印产出目录 |
 | v1.7.17 | 2026-11-20 | 只改 `cli.ps1`（驱动仍是 v1.7.16，不用重编）：① 所有选择项改成上下键菜单（`Read-Menu`：`▸` 反色、`[n]` 标号保留、数字+Enter 仍可直选；选模型空格勾选、`a` 全选；无人值守重定向时退回输入序号）；② 窗口尺寸改为启动时一次定好、收尾再按像素钉一次高度，去掉 `mode con ... lines=46` 兜底——那是"高度先满足、随后又缩回"的原因；`run.bat` 先设 88×45 消除启动闪屏；③ 去掉结尾「（每个模型一个同名子文件夹）」等废话 |
 | v1.7.18 | 2026-11-20 | 只改 `cli.ps1` + `run.bat`：① 修掉启动时 cmd 报的一段乱码——`run.bat` 改成 CRLF + 纯 ASCII 注释（UTF-8 中文注释 + LF 换行会让 cmd 把 rem 行和 powershell 行拼成一条乱命令）；② 菜单不用 `[x]` 了：游标 `❯`、勾选 `●`/`○`，勾选的白字、未选暗灰，不再和序号混淆；确定后清框只留 `✓ 已选` 一行；③ Y/N 提示全换成 `是`/`否` 菜单（`Read-Confirm`）；④ 模型列表直接显示快捷方式指向的模型名，不再写「链接名 → 目标」，也不标色；⑤ 新增 `Cut-Text`，菜单项与结论行按显示宽度截断，长名字不再撑破框 |
+| v1.7.19 | 2026-11-21 | 只改 `cli.ps1`：① 所有方框统一内宽 `$script:BoxW = 76`（`Get-BoxWidth`）——标题框、菜单框、进度框、汇总框左右边缘现在对齐，原先进度框固定 74 而其它框随内容伸缩；② 新增 `Trim-Row`，动态内容（作业名、进度细节、模型名）超宽就截断加 `…`，框不再被撑宽；③ 状态条宽度跟方框右缘对齐；④ 窄终端（BufferWidth 偏小）自动等比收缩，不会折行打乱原地刷新的框 |
 | v1.7.8 | 2026-11-20 | 修 image 块多解节点报 `Unknown feature`：`Solution` 数据集的 `solution` 只能绑单个解节点，改成按全局 `SolNum` 定位节点后取节点内序号；堆上限加 64GB 封顶（公共电脑几百 GB 内存时不会给到 300GB+） |
 | v1.7.9 | 2026-11-20 | 诊断补强：驱动每次启动打 `驱动版本=` 与 class 路径/修改时间（缺这行就是旧 class）、块失败打 FlException 全文与自己的栈帧、场图每步打阶段日志；`cli.ps1` 比对 class 里的版本串（`ExpectedDriverVersion`），不一致时启动前警告并写进 launch.txt；`update.ps1` 新增 `Repair-Driver`：版本不一致时用 COMSOL 自带 javac 自动重编 |
 

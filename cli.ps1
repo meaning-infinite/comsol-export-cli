@@ -82,13 +82,47 @@ function Cut-Text([string]$s, [int]$maxW) {
     return $cut + '…'
 }
 
+# 把一行（多段）按显示宽度截到 $w 列：超出部分整段丢弃，末段补省略号
+# 用途：动态内容（作业名、进度细节）再长也不撑破统一宽度的框
+function Trim-Row($row, [int]$w) {
+    $out = @()
+    $used = 0
+    foreach ($s in $row) {
+        $tx = [string]$s.Text
+        if (-not $tx) { continue }
+        $tw = Get-TextWidth $tx
+        if (($used + $tw) -le $w) {
+            $out += @{ Text = $tx; Color = $s.Color; Bg = $s.Bg }
+            $used = $used + $tw
+            continue
+        }
+        $room = $w - $used
+        if ($room -gt 2) {
+            $out += @{ Text = (Cut-Text $tx $room); Color = $s.Color; Bg = $s.Bg }
+        }
+        break
+    }
+    if ($out.Count -eq 0) { $out += @{ Text = ''; Color = 'Gray'; Bg = $null } }
+    return , $out
+}
+
+# 所有方框统一内宽：标题框、菜单框、进度框、汇总框左右边缘对齐
+# （进度框一直按 74 字符排版，故基准取 76 = 74 + 左右各 1 格留白）
+$script:BoxW = 76
+function Get-BoxWidth([int]$contentW) {
+    # 只用统一基准宽度：内容超长由 Cut-Text/Trim-Row 截断，绝不把框撑宽
+    $w = $script:BoxW
+    $lim = 0
+    try { $lim = [Console]::BufferWidth - 6 } catch { }
+    if ($lim -gt 40 -and $w -gt $lim) { $w = $lim }
+    return $w
+}
 function Get-BoxLines([string]$title, [string[]]$lines) {
-    $w = 0
-    foreach ($l in $lines) { if ($null -ne $l) { $w = [math]::Max($w, (Get-TextWidth $l) + 2) } }
+    $w = Get-BoxWidth 0
+    $title = Cut-Text $title ($w - 6)
     $tw = Get-TextWidth (' ' + $title + ' ')
-    $w = [math]::Max($w, $tw + 2)
-    $out = @('┌' + '─ ' + $title + ' ' + ('─' * ($w - 1 - $tw)) + '┐')
-    foreach ($l in $lines) { $out += ('│ ' + (Pad-Text $l ($w - 1)) + '│') }
+    $out = @('┌' + '─ ' + $title + ' ' + ('─' * [math]::Max(0, ($w - 1 - $tw))) + '┐')
+    foreach ($l in $lines) { $out += ('│ ' + (Pad-Text (Cut-Text $l ($w - 2)) ($w - 1)) + '│') }
     $out += ('└' + ('─' * $w) + '┘')
     return $out
 }
@@ -96,13 +130,11 @@ function Write-Box([string]$title, [string[]]$lines, [string]$color = 'Cyan') {
     foreach ($l in (Get-BoxLines $title $lines)) { Write-Host ('  ' + $l) -ForegroundColor $color }
 }
 function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
-    $texts = @($rows | ForEach-Object { [string]$_.Text })
-    $w = 0
-    foreach ($l in $texts) { $w = [math]::Max($w, (Get-TextWidth $l) + 2) }
+    $w = Get-BoxWidth 0
+    $title = Cut-Text $title ($w - 6)
     $tw = Get-TextWidth (' ' + $title + ' ')
-    $w = [math]::Max($w, $tw + 2)
-    Write-Host ('  ┌─ ' + $title + ' ' + ('─' * ($w - 1 - $tw)) + '┐') -ForegroundColor $border
-    foreach ($r in $rows) { Write-Host ('  │ ' + (Pad-Text ([string]$r.Text) ($w - 1)) + '│') -ForegroundColor $r.Color }
+    Write-Host ('  ┌─ ' + $title + ' ' + ('─' * [math]::Max(0, ($w - 1 - $tw))) + '┐') -ForegroundColor $border
+    foreach ($r in $rows) { Write-Host ('  │ ' + (Pad-Text (Cut-Text ([string]$r.Text) ($w - 2)) ($w - 1)) + '│') -ForegroundColor $r.Color }
     Write-Host ('  └' + ('─' * $w) + '┘') -ForegroundColor $border
 }
 
@@ -139,15 +171,14 @@ function Get-RowsWidth($rows) {
 
 # 把标题+行组装成"显示行"：每项 @{ Text = 纯文本（用于比对）; Segs = 段数组（用于着色写屏） }
 function New-BoxDisplay([string]$title, $rows, [string]$border) {
-    $w = Get-RowsWidth $rows
+    $w = Get-BoxWidth 0
+    $title = Cut-Text $title ($w - 6)
     $tw = Get-TextWidth (' ' + $title + ' ')
-    $w = [math]::Max($w, $tw + 2)
-    if ($w -lt 10) { $w = 10 }
     $disp = New-Object System.Collections.ArrayList
-    $topLine = '  ┌─ ' + $title + ' ' + ('─' * ($w - 1 - $tw)) + '┐'
+    $topLine = '  ┌─ ' + $title + ' ' + ('─' * [math]::Max(0, ($w - 1 - $tw))) + '┐'
     [void]$disp.Add(@{ Text = $topLine; Segs = @(@{ Text = $topLine; Color = $border }) })
     foreach ($r in $rows) {
-        $padded = Pad-Row $r ($w - 1)
+        $padded = Pad-Row (Trim-Row $r ($w - 2)) ($w - 1)
         $segs = New-Object System.Collections.ArrayList
         [void]$segs.Add(@{ Text = '  │ '; Color = $border })
         foreach ($s in $padded) { [void]$segs.Add(@{ Text = [string]$s.Text; Color = $s.Color; Bg = $s.Bg }) }
@@ -247,7 +278,10 @@ function Show-StatusLine([string]$text, [string]$fg, [string]$bg) {
     $hw = 80
     try { $hw = [Console]::WindowWidth } catch { }
     if ($hw -lt 62) { $hw = 80 }
-    if (-not $script:StatusW -or $script:StatusW -gt ($hw - 1)) { $script:StatusW = $hw - 2 }
+    # 状态条与方框右缘对齐（框总宽 = 内宽 + 6 列）
+    $want = $script:BoxW + 6
+    if ($want -gt ($hw - 1)) { $want = $hw - 2 }
+    if (-not $script:StatusW -or $script:StatusW -gt ($hw - 1)) { $script:StatusW = $want }
     $bw = $script:StatusW
     $line = '▌ ' + $text + ' '
     for ($n = 0; $n -lt 300 -and (Get-TextWidth $line) -gt ($bw - 2) -and $line.Length -gt 2; $n++) {
@@ -299,8 +333,9 @@ function ConvertTo-IndexList([string]$text, [int]$max) {
 function New-MenuRows {
     param($Items, $Colors, [int]$Cur, $Marked, [bool]$Multi, [string]$Hint)
     # 框最宽只能到窗口右边界，否则整行折行会把原地重绘算乱
-    $avail = 0
-    try { $avail = [math]::Max(24, [Console]::BufferWidth - 8) } catch { }
+    $avail = $script:BoxW - 3
+    try { if ([Console]::BufferWidth -gt 0) { $avail = [math]::Min($avail, [Console]::BufferWidth - 8) } } catch { }
+    $avail = [math]::Max(24, $avail)
     $nw = ([string]$Items.Count).Length
     $rows = @()
     for ($k = 1; $k -le $Items.Count; $k++) {
@@ -1491,17 +1526,17 @@ function Render-Progress1($info, [string]$jobName, $ord, $total) {
 # 样式 2：方框仪表（与 CLI 其它框一致）
 function Render-Progress2($info, [string]$jobName, $ord, $total) {
     $seg = (Get-BarSeg $info.Pct 30)
-    # 固定宽度 74：避免每秒刷新时框线抖动；进度条两段同字形，靠颜色区分
+    # 固定内宽（$script:BoxW - 2）：避免每秒刷新时框线抖动；进度条两段同字形，靠颜色区分
     $rows = @(
-        (Pad-Row @(@{ Text = ('作业   ' + $ord + '/' + [math]::Max(1, $total) + '   ' + $jobName); Color = $info.Bg }) 74),
+        (Pad-Row @(@{ Text = ('作业   ' + $ord + '/' + [math]::Max(1, $total) + '   ' + $jobName); Color = $info.Bg }) ($script:BoxW - 2)),
         (Pad-Row @(
                 @{ Text = '进度   '; Color = $info.Bg },
                 $seg[0], $seg[1],
                 @{ Text = ('   ' + (Get-PctText $info)); Color = $info.Bg }
-            ) 74),
-        (Pad-Row @(@{ Text = ('阶段   ' + (Get-PhaseTag $info) + ' · ' + $info.Detail); Color = $info.Bg }) 74),
-        (Pad-Row @(@{ Text = ('时间   已用 ' + (Format-Elapsed $info.Elapsed) + '（合计 ' + (Format-Elapsed $info.TotalElapsed) + '） · ' + (Format-TimeLine $info)); Color = $info.Bg }) 74),
-        (Pad-Row @(@{ Text = '按键   Q 退出监视（计算不受影响）   K 终止作业'; Color = $info.Bg }) 74)
+            ) ($script:BoxW - 2)),
+        (Pad-Row @(@{ Text = ('阶段   ' + (Get-PhaseTag $info) + ' · ' + $info.Detail); Color = $info.Bg }) ($script:BoxW - 2)),
+        (Pad-Row @(@{ Text = ('时间   已用 ' + (Format-Elapsed $info.Elapsed) + '（合计 ' + (Format-Elapsed $info.TotalElapsed) + '） · ' + (Format-TimeLine $info)); Color = $info.Bg }) ($script:BoxW - 2)),
+        (Pad-Row @(@{ Text = '按键   Q 退出监视（计算不受影响）   K 终止作业'; Color = $info.Bg }) ($script:BoxW - 2))
     )
     Show-LiveBox 'COMSOL 计算进度' $rows $info.Bg
 }
@@ -1526,10 +1561,10 @@ function Render-Progress3($info, [string]$jobName, $ord, $total) {
                 @{ Text = ((Get-PhaseTag $info) + '  '); Color = $info.Bg },
                 $seg[0], $seg[1],
                 @{ Text = ('  ' + (Get-PctText $info)); Color = $info.Bg }
-            ) 74),
-        (Pad-Row @(@{ Text = $chain; Color = $info.Bg }) 74),
-        (Pad-Row @(@{ Text = $info.Detail; Color = $info.Bg }) 74),
-        (Pad-Row @(@{ Text = ('已用 ' + (Format-Elapsed $info.Elapsed) + ' · ' + (Format-TimeLine $info) + ' · Q 退出监视  K 终止'); Color = $info.Bg }) 74)
+            ) ($script:BoxW - 2)),
+        (Pad-Row @(@{ Text = $chain; Color = $info.Bg }) ($script:BoxW - 2)),
+        (Pad-Row @(@{ Text = $info.Detail; Color = $info.Bg }) ($script:BoxW - 2)),
+        (Pad-Row @(@{ Text = ('已用 ' + (Format-Elapsed $info.Elapsed) + ' · ' + (Format-TimeLine $info) + ' · Q 退出监视  K 终止'); Color = $info.Bg }) ($script:BoxW - 2))
     )
     Show-LiveBox $jobName $rows $info.Bg
 }
