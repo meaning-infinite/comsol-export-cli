@@ -27,7 +27,7 @@ param(
     [string]$Recipe,
     [string]$ModelIndex = '',
     [string]$ComsolPath,
-    [ValidateSet('solve','export','')]
+    [ValidateSet('solve','export','watch','')]
     [string]$Mode = '',
     [int]$KillJob = 0,
     [string]$Heap,
@@ -141,6 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
+$script:CliVersion = 'v1.8.0'
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
     '██╔════╝ ██╔═══██╗  ████╗ ████║  ██╔════╝  ██╔═══██╗  ██║     ',
@@ -219,6 +220,9 @@ function Write-Banner {
         if ($cur -ne '') { [void]$sb.Append($esc + '[0m') }
         Write-Host $sb.ToString()
     }
+    Write-Host ''
+    Write-Host ('  ' + $script:CliVersion) -NoNewline -ForegroundColor White
+    Write-Host '   远程批量求解与导出' -ForegroundColor DarkGray
     Write-Host ''
 }
 
@@ -755,7 +759,7 @@ function Show-Help {
     Write-Host '    -Recipe <name>   直接指定配方（不交互）'
     Write-Host '    -ModelIndex <n>  直接指定第 n 个模型（从 1 开始；列表最后一项是 solved\ 目录）'
     Write-Host '    -DryRun          只打印计划，不写队列、不启动计算'
-    Write-Host '    -Mode <solve|export>  求解并导出 / 只导出已有解的模型'
+    Write-Host '    -Mode <solve|export|watch>  求解并导出 / 只导出已有解的模型 / 只监视在跑的任务'
     Write-Host '    -ProgressStyle 1|2|3  进度样式：1 单行 / 2 方框仪表 / 3 阶段链'
     Write-Host '    -Cores <n>       求解用几个核（默认交给 COMSOL 自己定）'
     Write-Host '    -Heap <6g>       Java 堆（默认按物理内存 70%）'
@@ -1622,7 +1626,7 @@ function Render-Progress2($info, [string]$jobName, $ord, $total) {
             ) ($script:BoxW - 2)),
         (Pad-Row @(@{ Text = ('阶段   ' + (Get-PhaseTag $info) + ' · ' + $info.Detail); Color = $info.Bg }) ($script:BoxW - 2)),
         (Pad-Row @(@{ Text = ('时间   已用 ' + (Format-Elapsed $info.Elapsed) + '（合计 ' + (Format-Elapsed $info.TotalElapsed) + '） · ' + (Format-TimeLine $info)); Color = $info.Bg }) ($script:BoxW - 2)),
-        (Pad-Row @(@{ Text = '按键   Q 退出监视（计算不受影响）   K 终止作业'; Color = $info.Bg }) ($script:BoxW - 2))
+        (Pad-Row @(@{ Text = '按键   Q 退出监视   K 终止作业'; Color = $info.Bg }) ($script:BoxW - 2))
     )
     Show-LiveBox 'COMSOL 计算进度' $rows $info.Bg
 }
@@ -2337,13 +2341,23 @@ if ($Resume) {
 
 # 模式：先决定这次是“求解+导出”还是“只导出已有解的模型”
 $doSolve = $true
+$doWatch = $false
 if ($Mode -eq 'export') { $doSolve = $false }
 elseif ($Mode -eq 'solve') { $doSolve = $true }
+elseif ($Mode -eq 'watch') { $doWatch = $true }
 elseif ([string]::IsNullOrWhiteSpace($ModelIndex)) {
-    $items = @('求解并导出（模型还没算过）', '只导出（模型里已经有解，不重新求解）')
+    $items = @('求解并导出', '只导出', '监视正在跑的任务')
     $mv = Read-Menu '选择模式' $items 1
     if ($mv -le 0) { Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow; exit 0 }
     if ($mv -eq 2) { $doSolve = $false }
+    if ($mv -eq 3) { $doWatch = $true }
+}
+
+# 监视模式：不建作业、不改队列，只看（顺带把上次没跑完的待办接着跑）
+if ($doWatch) {
+    Invoke-Scheduler
+    Remove-Item -LiteralPath $instFile -Force -ErrorAction SilentlyContinue
+    exit 0
 }
 
 $modelFiles = @(Get-ModelFiles $Models)
@@ -2507,7 +2521,7 @@ foreach ($m in $ModelList) {
 
     $tag = ''
     if (-not $doSolve) { $tag = '（只导出）' }
-    Write-Host ('  [入队]' + $tag + ' ' + $m.Name + '  →  ' + $n + '.csv')
+    Write-Host ('  [入队]' + $tag + ' ' + $m.Name)
     $jobs += [pscustomobject]@{
         id = $n; model = $m.FullName; recipe = $r.Name
         pid = 0; jobDir = $jobDir; outDir = $outDir
@@ -2536,9 +2550,6 @@ if (-not $ans) {
 
 $queue = @(Get-Queue)
 Save-Queue (@($queue) + @($jobs))
-Write-Host ''
-Write-Host ('  日志 : ' + $JobsDir)
-Write-Host ('  输出 : ' + (Join-Path $Root 'output'))
 Write-Host ''
 Invoke-Scheduler
 

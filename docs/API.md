@@ -1,4 +1,4 @@
-# COMSOL 导出 CLI · API 文档
+﻿# COMSOL 导出 CLI · API 文档
 
 > 最后更新：2026-11-12 · 对应 v1.1 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
 > 接口与内部约定的参考手册，随版本持续更新。使用说明见 [README.md](../README.md)，配方写法见 [recipes/README.md](../recipes/README.md)。
@@ -32,7 +32,7 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 | `-Setup` | switch | 配置菜单：COMSOL 路径 / 并发数 / 模型目录 / 重新扫描 |
 | `-DryRun` | switch | 只打印作业与导出块；不写队列、不启动计算、不弹确认 |
 | `-Resume` | switch | 跳过选择，直接调度队列里未完成的作业 |
-| `-Mode` | string | `solve` 求解并导出（默认）/ `export` 只导出已有解的模型；空 = 交互询问 |
+| `-Mode` | string | `solve` 求解并导出（默认）/ `export` 只导出已有解的模型 / `watch` 只监视在跑的任务；空 = 交互询问 |
 | `-KillJob <n>` | int | 终止队列里第 n 个作业（不受单实例守卫限制） |
 | `-ProgressStyle <1\|2\|3>` | string | 进度显示样式，默认 `2`；环境变量 `COMSOL_EXPORT_STYLE` 覆盖；配置 `ProgressStyle` 次之 |
 | `-Cores <n>` | int | 求解核数（传给 `comsolbatch -np`），默认 `0` = 让 COMSOL 自己决定 |
@@ -386,6 +386,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.7.19 | 2026-11-21 | 只改 `cli.ps1`：① 所有方框统一内宽 `$script:BoxW = 76`（`Get-BoxWidth`）——标题框、菜单框、进度框、汇总框左右边缘现在对齐，原先进度框固定 74 而其它框随内容伸缩；② 新增 `Trim-Row`，动态内容（作业名、进度细节、模型名）超宽就截断加 `…`，框不再被撑宽；③ 状态条宽度跟方框右缘对齐；④ 窄终端（BufferWidth 偏小）自动等比收缩，不会折行打乱原地刷新的框 |
 | v1.7.20 | 2026-11-21 | 只改 `cli.ps1`：开场加 6 行 ANSI 阴影字标 `COMSOL`（`Write-Banner`），对角渐变逐字符上色（白→亮青→深青，`Get-ArtColor` 5 色标插值）；颜色走 24 位 ANSI，靠 `Enable-VtColor` 打开 VT，重定向或拿不到 VT 时退化成单色 `DarkCyan`；字距统一，C 与第一个 O 之间不留额外空隙；标题框文字由「COMSOL 远程自动导出 CLI」改为「会话配置」（产品名已在字标里） |
 | v1.7.21 | 2026-11-21 | 只改 `cli.ps1`：① 启动不再打印「模型目录/配方目录/模式」方框与 `COMSOL : <路径>` 一行，开头只有字标；② 字标前留一个空行；③ `Initialize-ConsoleWindow` 提前到函数定义后立刻调用（原来在解析完配置之后、字标之前才调，结果先出字再改窗口），现在窗口尺寸在任何输出之前就定好 |
+| v1.8.0 | 2026-11-21 | 只改 `cli.ps1`（驱动仍 v1.7.16）：① 开跑前不再打印「日志 / 输出」两行路径；② `[入队]` 行只打模型名，不再接 `→ 输出.csv`；③ 新增第三种模式「监视」（`-Mode watch`）：不选模型、不建作业、不改队列，直接盯队列里在跑的作业（顺便把上次遗留的 pending 接着跑），窗口关掉后重开一个选它即可；④ 模式菜单去掉括号解释（`求解并导出` / `只导出` / `监视正在跑的任务`）；⑤ 进度框里 `按键 Q 退出监视（计算不受影响）` 去掉括号；⑥ 字标下新增版本行 `v1.8.0 远程批量求解与导出`（`$script:CliVersion`） |
 | v1.7.8 | 2026-11-20 | 修 image 块多解节点报 `Unknown feature`：`Solution` 数据集的 `solution` 只能绑单个解节点，改成按全局 `SolNum` 定位节点后取节点内序号；堆上限加 64GB 封顶（公共电脑几百 GB 内存时不会给到 300GB+） |
 | v1.7.9 | 2026-11-20 | 诊断补强：驱动每次启动打 `驱动版本=` 与 class 路径/修改时间（缺这行就是旧 class）、块失败打 FlException 全文与自己的栈帧、场图每步打阶段日志；`cli.ps1` 比对 class 里的版本串（`ExpectedDriverVersion`），不一致时启动前警告并写进 launch.txt；`update.ps1` 新增 `Repair-Driver`：版本不一致时用 COMSOL 自带 javac 自动重编 |
 
