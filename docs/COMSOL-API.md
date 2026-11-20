@@ -172,11 +172,37 @@ com.comsol.util.exceptions.UnknownEntityException: 未知解。
 
 **办法**：在 GUI 的"研究"里删掉用不到的参数化扫描步（模型 → 研究1 → 右键 → 删除），保存后重跑；生成出来的解序列应与健康模型一致（`sol1` 里只有 `st1`(wave)/`v1`/`s1`，参数化结果在运行时才出现）。
 
+## 11. 绘图与出图的坑（2026-11-20 实测，COMSOL 6.4）
+
+### 11.1 场图装饰：总闸在 Image 节点，不在绘图组
+- 绘图组上设 `legendactive=on`、`axisactive=on`、`title=...` **完全不影响导出**（导出文件字节一模一样）。
+- 真正生效的是 Image 导出节点上的三组开关：`options1d/options2d/options3d`（**默认 `off`**）+ `titleNd` / `legendNd`。把 `options2d/options3d` 设 `on`，图题、色标、坐标轴立刻出来。
+- 图题还要 `titletype=manual`；不设 manual 时 COMSOL 用自动量名（如「电场模 (V/m)」），可用 `getString("title")` 读出来再拼。
+
+### 11.2 二维切面：CutPlane + PlotGroup2D
+- 建立路径：`result().dataset().create(tag,"CutPlane")` → `set("data",<3D 数据集>)`、`set("quickplane","xy|zx|yz")`、`set(offsetKey, 位置)`；再 `result().create(tag,"PlotGroup2D")` + `Surface`。
+- **偏移量单位 = 几何长度单位**（本机模型 nm），不是米；乘 1e-9 会把切面推出模型外。
+- 包围盒 `getBoundingBox()` 顺序是 `[xmin,xmax,ymin,ymax,zmin,zmax]`；xy 面取 `(bb[4]+bb[5])/2`，zx 面取 `(bb[2]+bb[3])/2`，yz 面取 `(bb[0]+bb[1])/2`。
+- 二维坐标里 **plane 名的第一个字母是横轴**：`xy`→(x,y)、`zx`→(z,x)、`yz`→(y,z)。
+
+### 11.3 二维视图的轴范围与长宽比
+- 2D 绘图组的 `view` 合法值形如 `auto | new | view2`（`view2` 是模型自带的 `ResultView2D`）；`view="auto"` 只能自动适配，压不住范围。
+- `view2.axis()`：`viewscaletype` 取 `manual` 时才认 `xmin/xmax/ymin/ymax`；取 `none` 会自己缩。
+- **COMSOL 保持等比例**：把 `xmin/xmax/ymin/ymax` 设成数据范围后，画面仍按 1:1 缩放，结果就是细长截面缩成一条窄带、两侧大片空白。
+- 解决办法是同一处 `xscale/yscale` 做拉伸：`yscale = (数据宽/数据高) ÷ (画布宽/画布高)`，在 `viewscaletype=manual` + 显式轴范围之后设，数据就能铺满画布；换平面时要先把它归零（`xscale=yscale=1`），否则上一张的拉伸会把下一张的轴撑开。
+- 横向拉伸（`xscale>1`）实测是把轴范围放大（画面更空），所以只做纵向。
+
+### 11.4 尺寸与导出
+- `Image.size` 合法值：`current | manualweb | manualprint | presentation`；`presentation` 在 API 里报「仅支持文件目标」。常用 `manualweb` + `unit=px` + `width/height`。
+- 一张 2D 场图：`run()` 约 2 s、导出约 2 s（1200×900 级别），比求解便宜得多。
+- 多个绘图特征（三个 Slice）会各画一条色标；用各特征 `rangeactualminmax` 取并集，统一 `rangecoloractive=on` + `rangecolormin/max`，再把除第一个之外的 `colorlegend` 设 `off`，只留一条。
+
 ## 10. 版本记录（续）
 
 | 日期 | 版本 | 内容 |
 |---|---|---|
 | 2026-11-19 | — | 补第 9 节：`createAutoSequences` 报 `未知解。- 标记: all` 的复现矩阵与修法 |
+| 2026-11-20 | v1.7.5 | 补第 11 节：场图装饰总闸（`optionsNd`）、CutPlane 偏移单位、二维坐标映射、等比例/拉伸、色标合并 |
 
 ## 8. 版本记录
 

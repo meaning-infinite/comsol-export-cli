@@ -560,18 +560,249 @@ public class ExportDriver {
     }
 
     // ---------- image ----------
-    // expr（默认 ewfd.normE）、plane（xy|zx|yz，默认 xy）、at（切面位置，默认 0）、
-    // solnum（默认 1）、width/height（像素，默认 800x600）、title
+    // 一次出四张：三维默认视图一张（三个正交切片），xy / xz / zy 三个二维正投影各一张。
+    // expr（默认 ewfd.normE）、solnum（默认 1）、at（切面位置，默认 auto=几何中心）、
+    // plane（at 作用在哪个面上，兼容旧配方，默认 xy）、edges（on|off，默认 off）、
+    // width/height（像素，默认 800x600）、title（图题后缀）
     static void exportImage(Job j, int i) throws Exception {
         String name = j.block(i, "name", "image");
-        String tag = "pg_img_" + i;
-        buildSliceGroup(j, i, tag);
+        String expr = j.block(i, "expr", "ewfd.normE").trim();
         String solnum = j.block(i, "solnum", "1").trim();
-        try { j.model.result(tag).set("solnum", solnum); } catch (Exception ignore) { }
-        j.model.result(tag).run();
-        Path png = j.outdir.resolve(j.outname + "_" + name + ".png");
-        exportPng(j, i, tag, png);
-        System.out.println("[driver] 写出 " + png);
+        String at = j.block(i, "at", "auto").trim();
+        String edges = j.block(i, "edges", "off").trim();
+        String title = j.block(i, "title", "").trim();
+
+        double[] bb = bbox6(j);
+        double zc = (bb[4] + bb[5]) / 2, yc = (bb[2] + bb[3]) / 2, xc = (bb[0] + bb[1]) / 2;
+        if (!at.isEmpty() && !at.equalsIgnoreCase("auto")) {
+            // 兼容旧配方：at 只挪动三维视图里的主切片，坐标用模型的长度单位
+            String plane = j.block(i, "plane", "xy").trim();
+            double off = Double.parseDouble(at);
+            if ("xy".equals(plane)) zc = off;
+            else if ("zx".equals(plane)) yc = off;
+            else xc = off;
+            System.out.println("[driver] 三维主切片 " + plane + " 位置 " + off);
+        }
+
+        // 1) 三维默认视图：三个互相垂直的切片，一次看全
+        String tag3 = "pg_img3_" + i;
+        if (!hasResult(j, tag3)) j.model.result().create(tag3, "PlotGroup3D");
+        j.model.result(tag3).set("data", j.dataset);
+        trySet(j.model.result(tag3), "solnum", solnum);
+        String[][] cuts = {
+                { "sli1", "xy", "quickz", Double.toString(zc) },
+                { "sli2", "zx", "quicky", Double.toString(yc) },
+                { "sli3", "yz", "quickx", Double.toString(xc) } };
+        for (String[] c : cuts) {
+            if (!hasResultFeature(j, tag3, c[0])) j.model.result(tag3).create(c[0], "Slice");
+            j.model.result(tag3).feature(c[0]).set("quickplane", c[1]);
+            trySet(j.model.result(tag3).feature(c[0]), c[2], c[3]);
+            j.model.result(tag3).feature(c[0]).set("expr", expr);
+        }
+        decorate(j.model.result(tag3), edges, "三维视图（三正交切片）", title, "");
+        j.model.result(tag3).run();
+        // 三个切片取对数范围不同会各画一条色标；统一到共同范围，只留一条
+        double[] rng = commonRange(j, tag3, cuts.length);
+        if (rng != null) {
+            for (int d = 0; d < cuts.length; d++) {
+                Object sl = j.model.result(tag3).feature(cuts[d][0]);
+                trySet(sl, "rangecoloractive", "on");
+                trySet(sl, "rangecolormin", Double.toString(rng[0]));
+                trySet(sl, "rangecolormax", Double.toString(rng[1]));
+                trySet(sl, "colorlegend", d == 0 ? "on" : "off");
+            }
+            j.model.result(tag3).run();
+        }
+        Path png3 = j.outdir.resolve(j.outname + "_" + name + "_3d.png");
+        exportPng(j, i, tag3, png3);
+        System.out.println("[driver] 写出 " + png3);
+
+        // 2) 三个二维正投影：CutPlane 数据集 + 2D 绘图组，正对着看
+        String v2 = "";   // 第一次循环里按绘图组挑现成的二维视图
+        int pxW = Integer.parseInt(j.block(i, "width", "1200").trim());
+        int pxH = Integer.parseInt(j.block(i, "height", "900").trim());
+        boolean stretch = !"off".equalsIgnoreCase(j.block(i, "stretch", "on").trim());
+        String[][] planes = {
+                { "xy", "_xy", "XY" }, { "zx", "_xz", "XZ" }, { "yz", "_zy", "ZY" } };
+        for (String[] pl : planes) {
+            String plane = pl[0], suffix = pl[1], caption = pl[2];
+            double pos = "xy".equals(plane) ? zc : ("zx".equals(plane) ? yc : xc);
+            String dtag = "dsp2d_" + i + "_" + plane;
+            if (!hasDataset(j, dtag)) j.model.result().dataset().create(dtag, "CutPlane");
+            j.model.result().dataset(dtag).set("data", j.dataset);
+            j.model.result().dataset(dtag).set("quickplane", plane);
+            trySet(j.model.result().dataset(dtag), offsetKey(plane), Double.toString(pos));
+
+            String pg = "pg2d_" + i + "_" + plane;
+            if (!hasResult(j, pg)) j.model.result().create(pg, "PlotGroup2D");
+            j.model.result(pg).set("data", dtag);
+            trySet(j.model.result(pg), "solnum", solnum);
+            if (!hasResultFeature(j, pg, "surf1")) j.model.result(pg).create("surf1", "Surface");
+            j.model.result(pg).feature("surf1").set("expr", expr);
+            String note = "";
+            if (v2.isEmpty()) v2 = pick2dView(j, pg);
+            if (!v2.isEmpty()) {
+                trySet(j.model.result(pg), "view", v2);
+                setViewLimits(j, v2, plane, bb);
+                if (stretch) note = applyStretch(j, v2, plane, bb, pxW, pxH);
+            }
+            decorate(j.model.result(pg), edges, caption + " 切面", title, note);
+            j.model.result(pg).run();
+            Path png2 = j.outdir.resolve(j.outname + "_" + name + suffix + ".png");
+            exportPng(j, i, pg, png2);
+            System.out.println("[driver] 写出 " + png2 + (note.isEmpty() ? "" : "（" + note + "）"));
+        }
+    }
+
+    // 挑一个现成的二维结果视图：从绘图组 view 的合法值里拿（auto/new 之外的那个）
+    static String pick2dView(Job j, String group) {
+        try {
+            Object grp = j.model.result(group);
+            String[] vals = (String[]) grp.getClass()
+                    .getMethod("getAllowedPropertyValues", String.class).invoke(grp, "view");
+            for (String v : vals) {
+                String s = v == null ? "" : v.trim();
+                if (s.isEmpty() || s.equalsIgnoreCase("auto") || s.equalsIgnoreCase("new")) continue;
+                return s;
+            }
+        } catch (Exception ignore) { }
+        return "";
+    }
+
+    // 二维视图的坐标范围改成"正好包住这个切面"；二维坐标里 plane 名的第一个字母是横轴
+    static void setViewLimits(Job j, String view, String plane, double[] bb) {
+        double x0, x1, y0, y1;
+        if ("xy".equals(plane)) { x0 = bb[0]; x1 = bb[1]; y0 = bb[2]; y1 = bb[3]; }
+        else if ("zx".equals(plane)) { x0 = bb[4]; x1 = bb[5]; y0 = bb[0]; y1 = bb[1]; }
+        else { x0 = bb[2]; x1 = bb[3]; y0 = bb[4]; y1 = bb[5]; }
+        double padx = (x1 - x0) * 0.02, pady = (y1 - y0) * 0.02;
+        Object ax;
+        try { ax = j.model.view(view).axis(); } catch (Exception e) { return; }
+        trySet(ax, "viewscaletype", "manual");   // manual 才认下面的轴范围；none 会自动缩
+        trySet(ax, "xscale", "1");               // 先归零，否则上一张图的拉伸会把轴撑开
+        trySet(ax, "yscale", "1");
+        trySet(ax, "xmin", Double.toString(x0 - padx));
+        trySet(ax, "xmax", Double.toString(x1 + padx));
+        trySet(ax, "ymin", Double.toString(y0 - pady));
+        trySet(ax, "ymax", Double.toString(y1 + pady));
+    }
+
+    // 数据的长宽比与画布差太多时，二维视图按画布比例拉伸，否则图像只剩一条窄带
+    static String applyStretch(Job j, String view, String plane, double[] bb, int pxW, int pxH) {
+        double w, h;
+        if ("xy".equals(plane)) { w = bb[1] - bb[0]; h = bb[3] - bb[2]; }
+        else if ("zx".equals(plane)) { w = bb[5] - bb[4]; h = bb[1] - bb[0]; }
+        else { w = bb[3] - bb[2]; h = bb[5] - bb[4]; }
+        if (w <= 0 || h <= 0) return "";
+        double data = w / h, canvas = (double) pxW / pxH;
+        Object ax;
+        try { ax = j.model.view(view).axis(); } catch (Exception e) { return ""; }
+        trySet(ax, "xscale", "1");
+        trySet(ax, "yscale", "1");
+        double f = data / canvas;
+        if (f > 2 || f < 0.5) {
+            f = Math.max(0.1, Math.min(10.0, f));
+            trySet(ax, "yscale", String.format(Locale.ROOT, "%.3g", f));
+            return f >= 1
+                    ? String.format(Locale.ROOT, "纵向放大 ×%.3g", f)
+                    : String.format(Locale.ROOT, "纵向压缩 ×%.3g", f);
+        }
+        return "";
+    }
+
+    static String axisSpan(String plane, double[] bb, boolean horiz) {
+        double a, b;
+        if ("xy".equals(plane)) { a = horiz ? bb[0] : bb[2]; b = horiz ? bb[1] : bb[3]; }
+        else if ("zx".equals(plane)) { a = horiz ? bb[4] : bb[0]; b = horiz ? bb[5] : bb[1]; }
+        else { a = horiz ? bb[2] : bb[4]; b = horiz ? bb[3] : bb[5]; }
+        return String.format(Locale.ROOT, "%.4g … %.4g", a, b);
+    }
+
+    // 多个绘图特征共用一条色标：取各自实际范围的并集
+    static double[] commonRange(Job j, String group, int n) {
+        double lo = Double.POSITIVE_INFINITY, hi = Double.NEGATIVE_INFINITY;
+        try {
+            for (int d = 1; d <= n; d++) {
+                String s = tryGetString(j.model.result(group).feature("sli" + d), "rangeactualminmax");
+                if (s == null || s.indexOf(',') < 0) continue;
+                double a = Double.parseDouble(s.substring(0, s.indexOf(',')).trim());
+                double b = Double.parseDouble(s.substring(s.indexOf(',') + 1).trim());
+                lo = Math.min(lo, a);
+                hi = Math.max(hi, b);
+            }
+        } catch (Exception ignore) { }
+        if (lo == Double.POSITIVE_INFINITY || hi == Double.NEGATIVE_INFINITY || hi <= lo) return null;
+        return new double[] { lo, hi };
+    }
+
+    // 图题、色标、坐标轴打开（导出时还要在 Image 节点上开 optionsNd）
+    static void decorate(Object rf, String edges, String prefix, String title, String note) {
+        trySet(rf, "edges", edges);
+        String t = title == null ? "" : title.trim();
+        if (t.isEmpty()) {
+            String auto = tryGetString(rf, "title");   // COMSOL 自动标题，如「电场模 (V/m)」
+            if (auto != null) auto = auto.trim();
+            if (auto == null || auto.isEmpty()) t = prefix;
+            else t = prefix.isEmpty() ? auto : prefix + " · " + auto;
+        }
+        if (note != null && !note.isEmpty()) t = t + "（" + note + "）";
+        trySet(rf, "titletype", "manual");
+        trySet(rf, "title", t);
+        trySet(rf, "legendactive", "on");
+        trySet(rf, "axisactive", "on");
+    }
+
+    static String tryGetString(Object node, String key) {
+        try {
+            Object v = node.getClass().getMethod("getString", String.class).invoke(node, key);
+            return v == null ? "" : v.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    static void trySet(Object node, String key, String val) {
+        try {
+            node.getClass().getMethod("set", String.class, String.class).invoke(node, key, val);
+        } catch (Exception ignore) { }
+    }
+
+    static boolean hasResult(Job j, String tag) {
+        try {
+            return Arrays.asList(j.model.result().tags()).contains(tag);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static boolean hasResultFeature(Job j, String group, String tag) {
+        try {
+            return Arrays.asList(j.model.result(group).feature().tags()).contains(tag);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static boolean hasDataset(Job j, String tag) {
+        try {
+            return Arrays.asList(j.model.result().dataset().tags()).contains(tag);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // 几何包围盒 [x0,x1,y0,y1,z0,z1]，单位与几何一致（切面位置也用这个单位）
+    static double[] bbox6(Job j) {
+        try {
+            for (String c : j.model.component().tags()) {
+                for (String g : j.model.component(c).geom().tags()) {
+                    double[] bb = j.model.component(c).geom(g).getBoundingBox();
+                    if (bb.length >= 6) return new double[] { bb[0], bb[1], bb[2], bb[3], bb[4], bb[5] };
+                }
+            }
+        } catch (Exception ignore) { }
+        System.out.println("[driver] 警告：取不到几何包围盒，切片位置用 0");
+        return new double[] { 0, 0, 0, 0, 0, 0 };
     }
 
     // ---------- eigenslice ----------
@@ -631,10 +862,7 @@ public class ExportDriver {
         if (planes.length == 0) planes = new String[] { "xy", "zx", "yz" };
         String expr = j.block(i, "expr", "ewfd.normE").trim();
         String at = j.block(i, "at", "auto").trim();
-        double[] bb = j.model.component("comp1").geom("geom1").getBoundingBox();
-        String gunit = "m";
-        try { gunit = j.model.component("comp1").geom("geom1").lengthUnit(); } catch (Exception ignore) { }
-        double gf = unitFactor(gunit);
+        double[] bb = bbox6(j);   // 与几何同单位，切面偏移也用这个单位
         for (String raw : planes) {
             String plane = raw.trim().toLowerCase(Locale.ROOT);
             if (!plane.equals("xy") && !plane.equals("yz") && !plane.equals("zx")) {
@@ -648,9 +876,9 @@ public class ExportDriver {
             j.model.result().dataset(dtag).set("quickplane", plane);
             String pos = at;
             if (pos.isEmpty() || pos.equalsIgnoreCase("auto")) {
-                if (plane.equals("xy")) pos = Double.toString((bb[2] + bb[5]) / 2 * gf);
-                else if (plane.equals("zx")) pos = Double.toString((bb[1] + bb[4]) / 2 * gf);
-                else pos = Double.toString((bb[0] + bb[3]) / 2 * gf);
+                if (plane.equals("xy")) pos = Double.toString((bb[4] + bb[5]) / 2);
+                else if (plane.equals("zx")) pos = Double.toString((bb[2] + bb[3]) / 2);
+                else pos = Double.toString((bb[0] + bb[1]) / 2);
             }
             j.model.result().dataset(dtag).set(offsetKey(plane), pos);
 
@@ -663,8 +891,8 @@ public class ExportDriver {
                 j.model.result(pg).create("surf1", "Surface");
             }
             j.model.result(pg).feature("surf1").set("expr", expr);
-            String title = j.block(i, "title", "").trim();
-            if (!title.isEmpty()) { try { j.model.result(pg).set("title", title + " " + plane); } catch (Exception ignore) { } }
+            decorate(j.model.result(pg), j.block(i, "edges", "off").trim(),
+                    plane.toUpperCase(Locale.ROOT) + " 切面", j.block(i, "title", "").trim(), "");
             j.model.result(pg).run();
             Path png = j.outdir.resolve(j.outname + "_" + name + "_" + plane + ".png");
             exportPng(j, i, pg, png);
@@ -1006,8 +1234,19 @@ public class ExportDriver {
         j.model.result().export(tag).set("imagetype", "png");
         j.model.result().export(tag).set("size", "manualweb");
         j.model.result().export(tag).set("unit", "px");
-        j.model.result().export(tag).set("width", j.block(i, "width", "800").trim());
-        j.model.result().export(tag).set("height", j.block(i, "height", "600").trim());
+        j.model.result().export(tag).set("width", j.block(i, "width", "1200").trim());
+        j.model.result().export(tag).set("height", j.block(i, "height", "900").trim());
+        // 图题/色标/坐标轴的总闸在导出节点上；绘图组里那些开关不参与导出渲染
+        Object ex = j.model.result().export(tag);
+        trySet(ex, "options1d", "on");
+        trySet(ex, "options2d", "on");
+        trySet(ex, "options3d", "on");
+        trySet(ex, "title1d", "on");
+        trySet(ex, "title2d", "on");
+        trySet(ex, "title3d", "on");
+        trySet(ex, "legend1d", "on");
+        trySet(ex, "legend2d", "on");
+        trySet(ex, "legend3d", "on");
         Path part = Paths.get(target.toString() + ".part.png");
         j.model.result().export(tag).set("pngfilename", part.toString().replace("\\", "/"));
         Files.createDirectories(target.getParent());

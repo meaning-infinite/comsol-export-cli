@@ -68,7 +68,18 @@
 - 老的 `Export = @(@{Type=...})` 写法仍然可用，两种可以混写。
 - 加新模块 = 加一个 psd1（复制现有文件改 `Id`/`Kind`/`Defaults`）；加新能力 = 在 `ExportDriver.java` 的 `HANDLERS` 里加一行。
 
-固定口径：取数用 `abs(ewfd.S21)^2` / `abs(ewfd.S11)^2`（模型里没有 `ewfd.T`/`ewfd.R`）；平面名是 `xy` `zx` `yz`（COMSOL 用 `zx` 不用 `xz`）；`At` 单位米，`auto` 取该方向几何中心。
+固定口径：取数用 `abs(ewfd.S21)^2` / `abs(ewfd.S11)^2`（模型里没有 `ewfd.T`/`ewfd.R`）；平面名是 `xy` `zx` `yz`（COMSOL 用 `zx` 不用 `xz`）。
+
+场图（`Type = 'image'`，或写进配方的 `Export`）一次出四张，都带图题、色标、坐标轴刻度：
+
+| 文件 | 内容 |
+|---|---|
+| `<名>_field_3d.png` | 三维默认视角，三张互相垂直的切片 |
+| `<名>_field_xy.png` | 正对 xy（横 x 纵 y） |
+| `<名>_field_xz.png` | 正对 zx（横 z 纵 x） |
+| `<名>_field_zy.png` | 正对 yz（横 y 纵 z） |
+
+三个二维面都过几何中心。细长截面（比如 500×5080 nm 的侧壁）默认按画布比例拉伸，画面里才看得清；要真实比例设 `Stretch = 'off'`，图题会标出拉伸倍数。
 
 ## 解很多的时候（651 个波长这种）
 

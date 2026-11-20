@@ -1,4 +1,4 @@
-# 导出配方
+﻿# 导出配方
 
 配方是一个 PowerShell 数据文件（`.psd1`），**必须存成 UTF-8 带 BOM**，否则 PowerShell 5.1 读不了。
 
@@ -127,14 +127,24 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 
 `Params` 三种写法：`all`（默认，全部参数）/ `none` / `sim_xy,r`（指定名）。
 
-### image — 单张多切面图（旧）
+### image — 场图（一张三维 + 三张二维）
 
 ```powershell
-@{ Type='image'; Name='slice'; Expr='ewfd.normE'
-   Plane='zx'; At='0'; Width='1200'; Height='900' }
+@{ Type='image'; Name='field'; Expr='ewfd.normE'
+   Width='1200'; Height='900'; Stretch='on'; Edges='off' }
 ```
 
-`Plane` 取 `xy` `zx` `yz`；`At` 是切面沿法向的位置（m），一般放在器件中心；`SolNum` 选第几个解，默认 1。
+一次出四个文件，都带图题、色标、坐标轴刻度：
+
+| 文件 | 内容 |
+|---|---|
+| `<名>_field_3d.png` | 三维默认视角，三张互相垂直的切片（过几何中心） |
+| `<名>_field_xy.png` | 正对 xy 面，横 x 纵 y |
+| `<名>_field_xz.png` | 正对 zx 面，横 z 纵 x |
+| `<名>_field_zy.png` | 正对 yz 面，横 y 纵 z |
+
+`Stretch`（默认 `on`）：细长截面按画布比例纵向拉伸，画面才不剩一条窄带；图题会标出倍数，设 `off` 看真实比例。
+`Edges`（默认 `off`）：画网格边。`Title` 空 = 「平面 + COMSOL 自动量名」。
 
 ### eigenslice — 每个特征频率三张切面图
 

@@ -20,15 +20,15 @@
             Plot  = 'true'
         }
 
-        # ③ 单张多切面图：一个平面，指定位置（单位 m）
+        # ③ 场图：一次出 4 张 —— 三维默认视角 1 张 + xy/xz/zy 二维各 1 张
         @{
-            Type   = 'image'
-            Name   = 'slice'
-            Expr   = 'ewfd.normE'
-            Plane  = 'zx'      # xy | zx | yz
-            At     = '0'       # 切面沿法向的位置，单位 m
-            Width  = '1200'
-            Height = '900'
+            Type    = 'image'
+            Name    = 'field'
+            Expr    = 'ewfd.normE'
+            Width   = '1200'
+            Height  = '900'
+            Stretch = 'on'     # 细长截面按画布比例拉伸，便于看细节；'off' 看真实比例
+            Edges   = 'off'    # 是否画网格边
         }
 
         # ④ 特征频率：每个模态导出 3 张切面图 <outname>_m<k>_<plane>.png

@@ -120,16 +120,27 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 | `Cols` | `lambda_nm|T|R` | 一般不填 |
 | `Plot` | `false` | `true` 时额外输出 T/R 曲线 PNG（1D Global 图） |
 
-### 4.4 image
+### 4.4 image — 场图（一张三维 + 三张二维，v1.7.5 起）
+
+一次导四个文件，都带图题、色标、坐标轴刻度：
+
+| 文件 | 内容 |
+|---|---|
+| `<outname>_<name>_3d.png` | 三维默认视角，三张互相垂直的切片（xy / zx / yz 各过几何中心） |
+| `<outname>_<name>_xy.png` | 正对 xy 面，横 x 纵 y |
+| `<outname>_<name>_xz.png` | 正对 zx 面，横 z 纵 x |
+| `<outname>_<name>_zy.png` | 正对 yz 面，横 y 纵 z |
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `Expr` | `ewfd.normE` | 切片表达式 |
-| `Plane` | `xy` | `xy` / `zx` / `yz` |
-| `At` | `0` | 沿法向位置，单位 m |
+| `Expr` | `ewfd.normE` | 场表达式 |
 | `SolNum` | `1` | 取第几个解 |
-| `Width` / `Height` | `800` / `600` | 像素 |
-| `Title` | 空 | 图标题 |
+| `Width` / `Height` | `1200` / `900` | 像素 |
+| `Title` | 空 | 自定义图题；空则用 `平面 + COMSOL 自动量名` |
+| `Stretch` | `on` | 二维图按画布比例做纵向拉伸，避免细长截面在画面里只剩一条窄带；设 `off` 保持真实比例 |
+| `Edges` | `off` | 是否画网格边 |
+
+三个二维切面都过几何中心，位置由 `getBoundingBox()` 直接取（**单位就是几何单位**，不要乘米制系数）。
 
 ### 4.5 eigenslice
 
@@ -147,7 +158,7 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 
 字段：`Expr`（默认 `ewfd.normE`）、`Planes`（`xy|zx|yz`，默认三面全出）、`At`（米；`auto` = 该方向几何中心）、`Width`/`Height`（像素）、`Title`。
 实现：每个平面建 `CutPlane` 数据集（`quickplane` + 偏移键）+ `PlotGroup2D`（`Surface` 节点），导出 `<outname>_<name>_<plane>.png`。
-- 几何包围盒 `getBoundingBox()` 返回的是**几何长度单位**（本模型为 nm），必须乘 `lengthUnit()` 的换算系数再当米用，否则 `auto` 位置落在模型外、出空白图（踩过一次）。
+- 几何包围盒 `getBoundingBox()` 与 `CutPlane` 的偏移量**同一个单位（几何长度单位，如 nm）**，直接填即可；乘米制系数会把切面推出模型外、出空白图（v1.7.5 之前的错法）。
 - 2D 图组 + CutPlane 才是真二维投影；用 3D 图组切片的透视投影，画面是斜看的长条。
 
 ### 4.7 integral — 线/面积分（2026-11）
@@ -318,6 +329,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.7.2 | 2026-11-18 | 进度框改**差量重绘**（逐行比对，只重写变化的行，不再整框重画）；`Initialize-ConsoleWindow` 加回读校验与 `mode con` 回退；终止作业重写为「先写 killed 标记 → 按命令行标记扫 java/comsol 进程 → 最多 12 轮 taskkill /T /F → 复核」，调度器见到 killed 标记即收尾，杀不干净也不挂死 |
 | v1.7.3 | 2026-11-18 | 窗口尺寸按像素定（量 `cellW/cellH` 后 `SetWindowPos`，先取消最大化），修「窗口没占满高度」；新增 `-WinDebug` 开关（不必再设环境变量） |
 | v1.7.4 | 2026-11-19 | 求解失败不再只报 `solve-error`：从 `solve.log` 抠出 comsolbatch 的报错正文（方框后的行）并在 `[失败]` 行里直接打出来；现场清单补 `launch-solve.txt`/`solve.log` 并把 solve.log 尾部两行一起显示（原来只查 `launch.txt`，求解阶段永远显示"无"） |
+| v1.7.5 | 2026-11-20 | 场图模块重做：`image` 一次出默认三维视图 + xy/xz/zy 三张真二维切面（`CutPlane`+`PlotGroup2D`），全部带图题/色标/坐标轴；修切面中心索引与偏移单位两个错误（原来切面位置算错、可能出空白图）；新增 `Stretch`（细长截面按画布比例拉伸）与 `Edges` |
 
 ## 8. 待验证 / 已知缺口
 
