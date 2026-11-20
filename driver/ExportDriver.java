@@ -97,7 +97,7 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.7.11";
+    static final String DRIVER_VERSION = "v1.7.12";
 
     static Path CURRENT_JOB_DIR = null;
     static Path LOG_FILE = null;
@@ -649,6 +649,7 @@ public class ExportDriver {
         int n = 0;
         for (String s : list) if (!s.trim().isEmpty()) n++;
         int k = 0;
+        java.util.List<Path[]> perComp = new java.util.ArrayList<>();
         for (String s : list) {
             String e = s.trim();
             if (e.isEmpty()) continue;
@@ -658,12 +659,26 @@ public class ExportDriver {
                 fileSfx = "_" + shortName;
                 tagSfx = "_" + k;
             }
-            exportImageOne(j, i, e, tagSfx, fileSfx);
+            perComp.add(exportImageOne(j, i, e, tagSfx, fileSfx));
             k++;
+        }
+        // 六张（或三张）拼成一张总图：列 = 分量，行 = 三维 / xy / xz+zy
+        if (perComp.size() >= 1) {
+            int rowN = 3;
+            java.util.List<Path[]> rows = new java.util.ArrayList<>();
+            for (int r = 0; r < rowN; r++) {
+                Path[] line = new Path[perComp.size()];
+                for (int c = 0; c < perComp.size(); c++) line[c] = perComp.get(c)[r];
+                rows.add(line);
+            }
+            String name0 = j.block(i, "name", "image");
+            Path all = j.outdir.resolve(j.outname + "_" + name0 + "_all.png");
+            stitchGrid(rows, all, 30);
+            System.out.println("[driver] 写出 " + all + "（" + perComp.size() + " 列 × " + rowN + " 行拼图）");
         }
     }
 
-    static void exportImageOne(Job j, int i, String expr, String tagSfx, String fileSfx) throws Exception {
+    static Path[] exportImageOne(Job j, int i, String expr, String tagSfx, String fileSfx) throws Exception {
         String name = j.block(i, "name", "image");
         String solnum = j.block(i, "solnum", "1").trim();
         String at = j.block(i, "at", "auto").trim();
@@ -766,7 +781,7 @@ public class ExportDriver {
         // 真实比例出图：不做任何拉伸（二维视图保持 1:1）
         String[][] planes = {
                 { "xy", "_xy", "XY" }, { "xz", "_xz", "XZ" }, { "yz", "_zy", "ZY" } };
-        Path xzPng = null, zyPng = null;
+        Path xzPng = null, zyPng = null, xyPng = null;
         for (String[] pl : planes) {
             String plane = pl[0], suffix = pl[1], caption = pl[2];
             double pos = "xy".equals(plane) ? zc : ("xz".equals(plane) ? yc : xc);
@@ -792,6 +807,8 @@ public class ExportDriver {
             // 手工设 view2 轴范围反而会按 1:1 把轴撑大、留一圈白
             trySet(j.model.result(pg), "view", "auto");
             decorate(j.model.result(pg), edges, caption + " 切面", title, "");
+            // 二维不要 COMSOL 那个把模型包起来的坐标框：关掉轴，改由后面画一条竖线
+            trySet(j.model.result(pg), "axisactive", "off");
             j.model.result(pg).run();
             // 竖图太窄，标题带量名会折成三行，只用平面名
             applyTitle(j.model.result(pg), caption + " 切面",
@@ -811,9 +828,10 @@ public class ExportDriver {
             wPx = Math.max(200, Math.min(4096, wPx));
             exportPng(j, i, pg, png2, wPx, hPx, wantLegend);
             cropWhite(png2, 10);
+            trimFrame(png2, 10);
             if ("xz".equals(plane)) xzPng = png2;
             else if ("yz".equals(plane)) zyPng = png2;
-            else System.out.println("[driver] 写出 " + png2);
+            else { xyPng = png2; System.out.println("[driver] 写出 " + png2); }
         }
         // 把 x-z 与 z-y 两张竖图横拼成一张（左图带色标，色标落在两图中间）
         if (xzPng != null && zyPng != null) {
@@ -822,7 +840,9 @@ public class ExportDriver {
             Files.deleteIfExists(xzPng);
             Files.deleteIfExists(zyPng);
             System.out.println("[driver] 写出 " + merged + "（x-z + z-y 合并）");
+            return new Path[] { png3, xyPng, merged };
         }
+        return new Path[] { png3, xyPng, null };
     }
 
     // 二维正投影用哪个视图：二维绘图组必须挂一个 ResultView2D。
@@ -1537,6 +1557,63 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         Files.createDirectories(target.getParent());
         j.model.result().export(tag).run();
         Files.move(part, target, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    /** 去掉 COMSOL 那个把模型包起来的方框：只裁上/右/下三边（连刻度一起），保留左边那条轴 */
+    static void trimFrame(Path png, int pad) {
+        try {
+            java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(png.toFile());
+            if (img == null) return;
+            int w = img.getWidth(), h = img.getHeight();
+            if (w < 4 * pad || h < 4 * pad) return;
+            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(
+                    w - pad, h - 2 * pad, java.awt.image.BufferedImage.TYPE_INT_RGB);
+            java.awt.Graphics2D g = out.createGraphics();
+            g.drawImage(img, 0, 0, w - pad, h - 2 * pad, 0, pad, w - pad, h - pad, null);
+            g.dispose();
+            javax.imageio.ImageIO.write(out, "png", png.toFile());
+        } catch (Exception ignore) { }
+    }
+
+    /** 多行拼图：每行内各图等高对齐、整行居中；行与行之间留 gap。不缩放，保持原始像素 */
+    static void stitchGrid(java.util.List<Path[]> rows, Path out, int gap) throws Exception {
+        java.util.List<java.util.List<java.awt.image.BufferedImage>> imgs = new java.util.ArrayList<>();
+        int W = 0, H = gap * (rows.size() - 1);
+        int[] rowH = new int[rows.size()];
+        for (int r = 0; r < rows.size(); r++) {
+            java.util.List<java.awt.image.BufferedImage> line = new java.util.ArrayList<>();
+            int w = gap * Math.max(0, rows.get(r).length - 1);
+            for (Path p : rows.get(r)) {
+                java.awt.image.BufferedImage im = p == null ? null : javax.imageio.ImageIO.read(p.toFile());
+                line.add(im);
+                if (im != null) {
+                    w += im.getWidth();
+                    rowH[r] = Math.max(rowH[r], im.getHeight());
+                }
+            }
+            imgs.add(line);
+            W = Math.max(W, w);
+            H += rowH[r];
+        }
+        java.awt.image.BufferedImage canvas = new java.awt.image.BufferedImage(W, H, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = canvas.createGraphics();
+        g.setColor(java.awt.Color.WHITE);
+        g.fillRect(0, 0, W, H);
+        int y = 0;
+        for (int r = 0; r < rows.size(); r++) {
+            int rowW = gap * Math.max(0, imgs.get(r).size() - 1);
+            for (java.awt.image.BufferedImage im : imgs.get(r)) if (im != null) rowW += im.getWidth();
+            int x = 0;   // 行左对齐，像一张清单
+            for (java.awt.image.BufferedImage im : imgs.get(r)) {
+                if (im != null) {
+                    g.drawImage(im, x, y + (rowH[r] - im.getHeight()) / 2, null);
+                    x += im.getWidth() + gap;
+                }
+            }
+            y += rowH[r] + gap;
+        }
+        g.dispose();
+        javax.imageio.ImageIO.write(canvas, "png", out.toFile());
     }
 
     // 裁掉四周纯白边（COMSOL 导出的画布按字符比例给，二维细长切面会留大片空白）

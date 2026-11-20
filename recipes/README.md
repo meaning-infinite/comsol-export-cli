@@ -128,7 +128,7 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 
 `Params` 三种写法：`all`（默认，全部参数）/ `none` / `sim_xy,r`（指定名）。
 
-### image — 场图（三维 1 张 + 二维 2 张）
+### image — 场图（三维 1 张 + 二维 2 张 + 一张总图）
 
 ```powershell
 @{ Type='image'; Name='field'; Expr='ewfd.Ex,ewfd.Ey'; Width='1200'; Edges='on'; Grid='off' }
@@ -141,6 +141,7 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 | `<名>_field_Ex_3d.png` | 三维默认视角，三张互相垂直切片（过几何中心），色标在下方、默认不画坐标框 |
 | `<名>_field_Ex_xy.png` | 正对 xy 面，横 x 纵 y |
 | `<名>_field_Ex_xz_zy.png` | 左 x-z、右 z-y 左右拼一张，顶部各带切面名，竖直色标在中间 |
+| `<名>_field_all.png` | 各分量的上述三张拼成一张总图（列 = 分量，行 = 三维/xy/xz+zy），原分辨率 |
 
 二维图按切面真实长宽比出图（`Height` 不写就自动算），不做拉伸。
 `Width` 是长边像素（上限 4096）；`Edges`（默认 `on`）画域边界线；`Grid`（默认 `off`）画三维坐标框；`Title` 空 = 「平面 + COMSOL 自动量名」。

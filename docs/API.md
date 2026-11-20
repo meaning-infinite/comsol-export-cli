@@ -129,6 +129,7 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 | `<outname>_<name>_3d.png` | 三维默认视角（`view=auto`，与 GUI 一致），三张互相垂直的切片各过几何中心；色标在下方，只留一条；默认**不画坐标框/栅格** | 584×2328 |
 | `<outname>_<name>_xy.png` | 横 x 纵 y | 2717×2359 |
 | `<outname>_<name>_xz_zy.png` | 左 x-z、右 z-y **左右拼成一张**，两个面板顶部各带切面名，竖直色标落在两图中间 | 1317×4055 |
+| `<outname>_<name>_all.png` | **六张（或三张）拼成一张总图**：列 = 分量（Ex/Ey），行 = 三维 / xy / xz+zy；原分辨率拼接、不缩放 | 5439×8762 |
 
 `Expr` 写多个表达式（逗号分隔）时，**每个分量各出一整套图**，文件名加分量后缀：`<outname>_<name>_Ex_3d.png`、`_Ex_xy.png`、`_Ex_xz_zy.png`、`_Ey_…`。默认 `ewfd.Ex,ewfd.Ey`。
 
@@ -144,6 +145,7 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 
 画布比例不再固定 4:3：三维按几何 bbox 的长宽比给竖长/横长画布，二维按切面长宽比算；导出后统一按内容 bbox 裁白边（`cropWhite`）。
 二维一律 **1:1 真实比例**，不做拉伸。色标固定竖排在右侧（左面板的色标拼图后正好落在中间）。
+二维不再画 COMSOL 那个把模型包起来的方框：导出后裁掉上/右/下三边（连刻度），只留左边那条轴（`trimFrame`）。
 分辨率固定 300 dpi（PNG 带 dpi 元数据），字号按短边自动缩放（3–9 pt）。
 
 三个二维切面都过几何中心，位置由 `getBoundingBox()` 直接取（**单位就是几何单位**，不要乘米制系数）。
@@ -355,6 +357,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.7.7 | 2026-11-20 | 场图改 300 dpi；xz/zy 都出竖图（二维面从 zx 换到 xz）；竖图色标移到底部、标题只用平面名；画布按真实长宽比自动定尺寸 |
 | v1.7.10 | 2026-11-20 | 场图改版：三维用 `view=auto`（GUI 同款默认视角）并按几何长宽比给画布；二维 xz/zy 改 `view=auto` 后左右拼成一张 `_xz_zy.png`（色标竖排落在中间）；默认 `Edges=on` 画域边界线；关 COMSOL 徽标与三轴图标；导出后按内容裁白边 |
 | v1.7.11 | 2026-11-20 | 场图默认改分量 `Ex,Ey`（逗号分隔逐分量各出一套图）；三维色标移到下方、默认不画坐标框（`Grid` 字段）；三维恢复画域边界线 |
+| v1.7.12 | 2026-11-20 | 六张图自动拼成 `_all.png` 总图（2 列 × 3 行，原分辨率）；二维裁掉 COMSOL 方框，只留左边一条轴 |
 | v1.7.8 | 2026-11-20 | 修 image 块多解节点报 `Unknown feature`：`Solution` 数据集的 `solution` 只能绑单个解节点，改成按全局 `SolNum` 定位节点后取节点内序号；堆上限加 64GB 封顶（公共电脑几百 GB 内存时不会给到 300GB+） |
 | v1.7.9 | 2026-11-20 | 诊断补强：驱动每次启动打 `驱动版本=` 与 class 路径/修改时间（缺这行就是旧 class）、块失败打 FlException 全文与自己的栈帧、场图每步打阶段日志；`cli.ps1` 比对 class 里的版本串（`ExpectedDriverVersion`），不一致时启动前警告并写进 launch.txt；`update.ps1` 新增 `Repair-Driver`：版本不一致时用 COMSOL 自带 javac 自动重编 |
 
