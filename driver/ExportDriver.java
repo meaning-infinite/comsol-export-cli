@@ -613,6 +613,15 @@ public class ExportDriver {
             }
             j.model.result(tag3).run();
         }
+        // 三维组的自动标题会把三个 Slice 的标题拼三遍（「切面: … 切面: … 切面: …」），
+        // 改成从第一个 Slice 的自动标题里取一次量名
+        String q3 = tryGetString(j.model.result(tag3).feature(cuts[0][0]), "title").trim();
+        int colon = q3.indexOf(':');
+        if (colon < 0) colon = q3.indexOf('：');
+        if (colon >= 0) q3 = q3.substring(colon + 1).trim();
+        String t3 = title == null ? "" : title.trim();
+        if (t3.isEmpty()) t3 = q3.isEmpty() ? "三维视图（三正交切片）" : "三维视图（三正交切片） · " + q3;
+        applyTitle(j.model.result(tag3), t3, t3, "");
         Path png3 = j.outdir.resolve(j.outname + "_" + name + "_3d.png");
         exportPng(j, i, tag3, png3);
         System.out.println("[driver] 写出 " + png3);
@@ -648,6 +657,7 @@ public class ExportDriver {
             }
             decorate(j.model.result(pg), edges, caption + " 切面", title, note);
             j.model.result(pg).run();
+            applyTitle(j.model.result(pg), caption + " 切面", title, note);
             Path png2 = j.outdir.resolve(j.outname + "_" + name + suffix + ".png");
             exportPng(j, i, pg, png2);
             System.out.println("[driver] 写出 " + png2 + (note.isEmpty() ? "" : "（" + note + "）"));
@@ -738,18 +748,22 @@ public class ExportDriver {
     // 图题、色标、坐标轴打开（导出时还要在 Image 节点上开 optionsNd）
     static void decorate(Object rf, String edges, String prefix, String title, String note) {
         trySet(rf, "edges", edges);
+        trySet(rf, "legendactive", "on");
+        trySet(rf, "axisactive", "on");
+    }
+
+    // 图题必须在 run() 之后拼：run 之前 getString("title") 是空串，run 之后才是「电场模 (V/m)」这种自动名
+    static void applyTitle(Object rf, String prefix, String title, String note) {
         String t = title == null ? "" : title.trim();
         if (t.isEmpty()) {
-            String auto = tryGetString(rf, "title");   // COMSOL 自动标题，如「电场模 (V/m)」
+            String auto = tryGetString(rf, "title");
             if (auto != null) auto = auto.trim();
-            if (auto == null || auto.isEmpty()) t = prefix;
+            if (auto.isEmpty()) t = prefix;
             else t = prefix.isEmpty() ? auto : prefix + " · " + auto;
         }
         if (note != null && !note.isEmpty()) t = t + "（" + note + "）";
         trySet(rf, "titletype", "manual");
         trySet(rf, "title", t);
-        trySet(rf, "legendactive", "on");
-        trySet(rf, "axisactive", "on");
     }
 
     static String tryGetString(Object node, String key) {
