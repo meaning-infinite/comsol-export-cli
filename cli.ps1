@@ -138,6 +138,90 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
     Write-Host ('  └' + ('─' * $w) + '┘') -ForegroundColor $border
 }
 
+# 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
+# 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
+# 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
+$script:ArtRows = @(
+    ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
+    '██╔════╝ ██╔═══██╗  ████╗ ████║  ██╔════╝  ██╔═══██╗  ██║     ',
+    '██║      ██║   ██║  ██╔████╔██║  ███████╗  ██║   ██║  ██║     ',
+    '██║      ██║   ██║  ██║╚██╔╝██║  ╚════██║  ██║   ██║  ██║     ',
+    '╚██████╗ ╚██████╔╝  ██║ ╚═╝ ██║  ███████║  ╚██████╔╝  ███████╗',
+    ' ╚═════╝  ╚═════╝   ╚═╝     ╚═╝  ╚══════╝   ╚═════╝   ╚══════╝'
+)
+$script:ArtCols = 62
+$script:ArtStops = @(
+    [int[]]@(252, 252, 252),
+    [int[]]@(150, 232, 240),
+    [int[]]@(86, 204, 218),
+    [int[]]@(40, 156, 176),
+    [int[]]@(22, 108, 128)
+)
+$script:VtOk = $null
+function Enable-VtColor {
+    if ($script:VtOk -ne $null) { return [bool]$script:VtOk }
+    $script:VtOk = $false
+    if ($script:IsRedirected) { return $false }
+    try {
+        if (-not ('ComsolCli.Con2' -as [type])) {
+            Add-Type -Namespace ComsolCli -Name Con2 -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);
+'@
+        }
+        $h = [ComsolCli.Con2]::GetStdHandle(-11)
+        $m = [uint32]0
+        if ([ComsolCli.Con2]::GetConsoleMode($h, [ref]$m)) {
+            $script:VtOk = [ComsolCli.Con2]::SetConsoleMode($h, ($m -bor 0x4))
+        }
+    } catch { }
+    return [bool]$script:VtOk
+}
+# 对角渐变：竖向权重 0.62、横向 0.38，逐格插值后返回 "r;g;b"
+function Get-ArtColor([int]$r, [int]$c) {
+    $t = 0.62 * ($r / 5.0) + 0.38 * ($c / ([double][math]::Max(1, $script:ArtCols - 1)))
+    if ($t -lt 0) { $t = 0.0 }
+    if ($t -gt 1) { $t = 1.0 }
+    $st = $script:ArtStops
+    $x = $t * ($st.Count - 1)
+    $i = [int][math]::Floor($x)
+    if ($i -gt ($st.Count - 2)) { $i = $st.Count - 2 }
+    $f = $x - $i
+    $a = $st[$i]; $b = $st[$i + 1]
+    $rr = [int][math]::Round($a[0] + ($b[0] - $a[0]) * $f)
+    $gg = [int][math]::Round($a[1] + ($b[1] - $a[1]) * $f)
+    $bb = [int][math]::Round($a[2] + ($b[2] - $a[2]) * $f)
+    return ('{0};{1};{2}' -f $rr, $gg, $bb)
+}
+function Write-Banner {
+    $vt = Enable-VtColor
+    $esc = [string][char]27
+    for ($r = 0; $r -lt $script:ArtRows.Count; $r++) {
+        $row = [string]$script:ArtRows[$r]
+        if (-not $vt) {
+            Write-Host ('  ' + $row.TrimEnd()) -ForegroundColor DarkCyan
+            continue
+        }
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.Append('  ')
+        $cur = ''
+        for ($c = 0; $c -lt $row.Length; $c++) {
+            $ch = $row[$c]
+            if ($ch -eq ' ') { [void]$sb.Append(' '); continue }
+            $col = Get-ArtColor $r $c
+            if ($col -ne $cur) {
+                [void]$sb.Append($esc + '[38;2;' + $col + 'm')
+                $cur = $col
+            }
+            [void]$sb.Append($ch)
+        }
+        if ($cur -ne '') { [void]$sb.Append($esc + '[0m') }
+        Write-Host $sb.ToString()
+    }
+    Write-Host ''
+}
+
 # 原地刷新的活动框：LiveTop=-1 表示还没画过
 # 刷新策略：逐行比对，只重写"内容变了"的那一行（差量），绝不整框重画
 $script:LiveTop = -1
@@ -1754,7 +1838,8 @@ $head = @(
     ('配方目录 : ' + $RecipeDir)
 )
 if ($DryRun) { $head += '模式     : 预览（不启动计算、不写队列）' }
-Write-Box 'COMSOL 远程自动导出 CLI' $head 'Cyan'
+Write-Banner
+Write-Box '会话配置' $head 'Cyan'
 $ModelList = $modelList
 
 function Save-Queue($q) {
