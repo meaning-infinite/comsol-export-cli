@@ -38,6 +38,62 @@ $StateDir = Join-Path $env:LOCALAPPDATA 'comsol-export\state'
 if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
 $tokFile = Join-Path $StateDir 'gh_token.txt'
 
+# driver 里的 .class 必须和 .java 对得上：只更新了脚本、漏掉 driver 目录时，
+# 远程会继续跑旧 class，同一个 bug 反复出现却看不出来。这里比对两者的版本串，
+# 不一致就用 COMSOL 自带的 javac 重新编一遍；编不了就明确警告。
+function Get-DriverVer([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
+    try {
+        $txt = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($path))
+        $m = [regex]::Match($txt, 'v\d+\.\d+\.\d+')
+        if ($m.Success) { return $m.Value }
+    } catch { }
+    return ''
+}
+
+function Repair-Driver {
+    param([string]$Dir)
+    $drv = Join-Path $Dir 'driver'
+    $want = Get-DriverVer (Join-Path $drv 'ExportDriver.java')
+    $have = Get-DriverVer (Join-Path $drv 'ExportDriver.class')
+    if (-not $want) { return }
+    if ($have -eq $want) {
+        Write-Host ('  driver 版本 ' + $have + '，与源码一致') -ForegroundColor DarkGray
+        return
+    }
+    Write-Host ('  driver 版本不一致：class=' + $have + ' 源码=' + $want + '，尝试重新编译 ...') -ForegroundColor Yellow
+    $root = ''
+    try {
+        $cfgFile = Join-Path $StateDir 'config.psd1'
+        if (Test-Path -LiteralPath $cfgFile) {
+            $cfg = Import-PowerShellDataFile -LiteralPath $cfgFile
+            $cb = [string]$cfg.ComsolPath
+            if ($cb) { $root = Split-Path (Split-Path (Split-Path $cb -Parent) -Parent) -Parent }
+        }
+    } catch { }
+    if (-not $root) {
+        foreach ($g in @('C:\Program Files\COMSOL', 'D:\COMSOL', 'D:\Program Files\COMSOL')) {
+            if (-not (Test-Path -LiteralPath $g)) { continue }
+            $hit = Get-ChildItem -LiteralPath $g -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'COMSOL*' } | Select-Object -First 1
+            if ($hit -and (Test-Path -LiteralPath (Join-Path $hit.FullName 'Multiphysics'))) { $root = Join-Path $hit.FullName 'Multiphysics'; break }
+        }
+    }
+    $javac = ''
+    if ($root) { $javac = Join-Path $root 'java\win64\jre\bin\javac.exe' }
+    if ($root -and (Test-Path -LiteralPath $javac)) {
+        $cp = Join-Path $root 'plugins\*'
+        & $javac -encoding UTF-8 -nowarn -cp $cp -d $drv (Join-Path $drv 'ExportDriver.java') 2>&1 |
+            ForEach-Object { Write-Host ('    ' + $_) }
+        $after = Get-DriverVer (Join-Path $drv 'ExportDriver.class')
+        if ($after -eq $want) { Write-Host ('  已重新编译，driver 版本 ' + $after) -ForegroundColor Green }
+        else { Write-Host ('  编译后版本仍是 ' + $after + '，请手工检查 driver 目录') -ForegroundColor Red }
+    } else {
+        Write-Host '  找不到 COMSOL 的 javac，driver 仍是旧版：请手工用最新包覆盖 script\driver' -ForegroundColor Red
+    }
+}
+
+
 # ---------- 路线 A：已是 git 仓库 ----------
 $git = Get-Command git -ErrorAction SilentlyContinue
 $isGit = Test-Path -LiteralPath (Join-Path $ScriptDir '.git')
@@ -52,6 +108,7 @@ if ($isGit -and $git) {
     $ver = (& git -C $ScriptDir log -1 --format='%h %ad' --date=short).Trim()
     Write-Host ''
     Repair-Bom $ScriptDir
+    Repair-Driver $ScriptDir
 
     Write-Host ('[完成] 已更新到 ' + $ver) -ForegroundColor Green
     exit 0
@@ -159,6 +216,7 @@ Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Repair-Bom $ScriptDir
+Repair-Driver $ScriptDir
 
 Write-Host ''
 Write-Host ('[完成] 已更新（' + $verName + '）') -ForegroundColor Green

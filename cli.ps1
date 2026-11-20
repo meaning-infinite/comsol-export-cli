@@ -944,6 +944,22 @@ function Get-JobStates {
 # Java 堆大小：解数据大的模型（如 651 个波长解 ≈ 5.4GB）用 4GB 堆取不全，
 # 会静默少给解。这里按物理内存自动给（默认 70%，不少于 4GB），
 # 可用参数 -Heap 8g 或环境变量 COMSOL_EXPORT_XMX 覆盖。
+# 驱动 class 里的版本串（DRIVER_VERSION 常量），用来发现「只更新了脚本、没更新 driver」的情况：
+# 远程出现过 cli.ps1 是新的、driver 还是旧 class，于是同样的 bug 反复报。
+$script:ExpectedDriverVersion = 'v1.7.9'
+
+function Get-DriverClassVersion([string]$dir) {
+    $p = Join-Path $dir 'ExportDriver.class'
+    if (-not (Test-Path -LiteralPath $p)) { return '' }
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($p)
+        $txt = [System.Text.Encoding]::ASCII.GetString($bytes)
+        $m = [regex]::Match($txt, 'v\d+\.\d+\.\d+')
+        if ($m.Success) { return $m.Value }
+    } catch { }
+    return ''
+}
+
 function Get-HeapArg {
     if ($Heap) { return ('-Xmx' + $Heap) }
     if ($env:COMSOL_EXPORT_XMX) { return ('-Xmx' + $env:COMSOL_EXPORT_XMX) }
@@ -1403,6 +1419,7 @@ function Start-SolvePhase($job) {
         'time=' + (Get-Date).ToString('o'),
         'comsolbatch=' + $comsolBatch,
         'args=' + ($argList -join ' '),
+        'driver_version=' + $drvVer,
         'jobdir=' + $job.jobDir
     ) -join "`r`n"
     try { [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'launch-solve.txt'), $launchInfo, (New-Object System.Text.UTF8Encoding($false))) } catch { }
@@ -1530,6 +1547,13 @@ function Start-ExportPhase($job) {
     $logFile = Join-Path $job.jobDir 'driver.log'
     $errFile = Join-Path $job.jobDir 'driver.err'
     $cp = (Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir
+    # 更新没覆盖到 driver 时这里会看出来：class 里的版本串和脚本期望的不一致
+    $drvVer = Get-DriverClassVersion $driverDir
+    if ($drvVer -ne $script:ExpectedDriverVersion) {
+        Write-Host ''
+        $drvMsg = '  [警告] driver 目录不是最新：class 版本 ' + $drvVer + '，期望 ' + $script:ExpectedDriverVersion + '。请重跑 update.bat（或手动覆盖 script\driver）'
+        Write-Host $drvMsg -ForegroundColor Yellow
+    }
     $argStr = (Get-HeapArg) + ' -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
     # 启动前把实际用的路径写进 launch.txt，出问题能查
     $launchInfo = @(

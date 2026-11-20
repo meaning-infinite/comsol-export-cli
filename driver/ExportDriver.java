@@ -55,11 +55,49 @@ public class ExportDriver {
         HANDLERS.put("bigtable", ExportDriver::exportBigTable); // 通用原始大表（参数+谱线+域吸收）
     }
 
+    // 跑的是哪份 class：路径 + 修改时间。远程更新若只换了 .ps1 没换 .class，这里一眼看出来。
+    static String classStamp() {
+        try {
+            java.security.CodeSource cs = ExportDriver.class.getProtectionDomain().getCodeSource();
+            if (cs == null || cs.getLocation() == null) return "class=?";
+            java.nio.file.Path p = java.nio.file.Paths.get(cs.getLocation().toURI())
+                    .resolve("ExportDriver.class");
+            String ts = java.nio.file.Files.getLastModifiedTime(p).toString();
+            return "class=" + p + " (" + ts + ")";
+        } catch (Exception e) {
+            return "class=?(" + e.getClass().getSimpleName() + ")";
+        }
+    }
+
+    // 把 COMSOL 的 FlException 打印成一行也看得懂：多行合并、保留「- 标记: xxx」这类关键行
+    static String errText(Throwable e) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+        String msg = root.getMessage() == null ? "" : root.getMessage().trim();
+        msg = msg.replace("\r", "").replace("\n", " / ");
+        while (msg.contains("  ")) msg = msg.replace("  ", " ");
+        StringBuilder sb = new StringBuilder(root.getClass().getSimpleName());
+        if (!msg.isEmpty()) sb.append(": ").append(msg);
+        StackTraceElement[] st = root.getStackTrace();
+        if (st != null) {
+            for (int k = 0; k < st.length && k < 4; k++) {
+                StackTraceElement f = st[k];
+                if (f.getClassName().startsWith("com.comsol")) continue;   // 只留自己的帧
+                sb.append(" @ ").append(f.getMethodName()).append("(").append(f.getFileName()).append(":")
+                        .append(f.getLineNumber()).append(")");
+            }
+        }
+        return sb.toString();
+    }
+
     static String stackOf(Throwable t) {
         java.io.StringWriter sw = new java.io.StringWriter();
         t.printStackTrace(new java.io.PrintWriter(sw));
         return sw.toString();
     }
+
+    // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
+    static final String DRIVER_VERSION = "v1.7.9";
 
     static Path CURRENT_JOB_DIR = null;
     static Path LOG_FILE = null;
@@ -123,7 +161,8 @@ public class ExportDriver {
         CURRENT_JOB_DIR = j.jobDir;
         LOG_FILE = j.jobDir.resolve("driver.self.log");
         PROGRESS_FILE = j.jobDir.resolve("progress.txt");
-        log("[driver] 启动 pid=" + ProcessHandle.current().pid() + " java=" + System.getProperty("java.version"));
+        log("[driver] 启动 pid=" + ProcessHandle.current().pid() + " java=" + System.getProperty("java.version")
+                + " 驱动版本=" + DRIVER_VERSION + " " + classStamp());
         try {
             Files.write(j.jobDir.resolve("started"),
                     ("pid=" + ProcessHandle.current().pid()).getBytes(StandardCharsets.UTF_8));
@@ -253,7 +292,10 @@ public class ExportDriver {
                 try {
                     h.run(j, i);
                 } catch (Exception e) {
-                    System.err.println("导出块 " + name + " 失败: " + e.getMessage());
+                    String detail = errText(e);
+                    log("[driver] 导出块 " + name + " 失败: " + detail);
+                    log(stackOf(e));
+                    System.err.println("导出块 " + name + " 失败: " + detail);
                     finish(j.jobDir, 4);
                 }
             }
@@ -614,10 +656,15 @@ public class ExportDriver {
         String dsData = "ds_img_" + i;
         String[] pick = pickSol(j, solnum);
         String localSol = pick[1];
-        if (hasDataset(j, dsData)) j.model.result().dataset().remove(dsData);
+        log("[driver] 场图解 " + solnum + " → 解节点 " + pick[0] + " 第 " + localSol + " 个");
+        if (hasDataset(j, dsData)) {
+            log("[driver] 场图: 删除旧数据集 " + dsData);
+            j.model.result().dataset().remove(dsData);
+        }
+        log("[driver] 场图: 建 Solution 数据集 " + dsData + "，solution=" + pick[0]);
         j.model.result().dataset().create(dsData, "Solution");
         j.model.result().dataset(dsData).set("solution", pick[0]);
-        System.out.println("[driver] 场图解 " + solnum + " → 解节点 " + pick[0] + " 第 " + localSol + " 个");
+        log("[driver] 场图: 数据集绑定完成，开始三维组");
 
         double[] bb = bbox6(j);
         double zc = (bb[4] + bb[5]) / 2, yc = (bb[2] + bb[3]) / 2, xc = (bb[0] + bb[1]) / 2;

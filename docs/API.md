@@ -350,6 +350,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.7.5 | 2026-11-20 | 场图模块重做：`image` 一次出默认三维视图 + xy/xz/zy 三张真二维切面（`CutPlane`+`PlotGroup2D`），全部带图题/色标/坐标轴；修切面中心索引与偏移单位两个错误（原来切面位置算错、可能出空白图）；新增 `Stretch`（细长截面按画布比例拉伸）与 `Edges` |
 | v1.7.7 | 2026-11-20 | 场图改 300 dpi；xz/zy 都出竖图（二维面从 zx 换到 xz）；竖图色标移到底部、标题只用平面名；画布按真实长宽比自动定尺寸 |
 | v1.7.8 | 2026-11-20 | 修 image 块多解节点报 `Unknown feature`：`Solution` 数据集的 `solution` 只能绑单个解节点，改成按全局 `SolNum` 定位节点后取节点内序号；堆上限加 64GB 封顶（公共电脑几百 GB 内存时不会给到 300GB+） |
+| v1.7.9 | 2026-11-20 | 诊断补强：驱动每次启动打 `驱动版本=` 与 class 路径/修改时间（缺这行就是旧 class）、块失败打 FlException 全文与自己的栈帧、场图每步打阶段日志；`cli.ps1` 比对 class 里的版本串（`ExpectedDriverVersion`），不一致时启动前警告并写进 launch.txt；`update.ps1` 新增 `Repair-Driver`：版本不一致时用 COMSOL 自带 javac 自动重编 |
 
 ## 8. 待验证 / 已知缺口
 
