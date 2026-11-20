@@ -629,8 +629,8 @@ public class ExportDriver {
         // 2) 三个二维正投影：CutPlane 数据集 + 2D 绘图组，正对着看
         String v2 = "";   // 第一次循环里按绘图组挑现成的二维视图
         int pxW = Integer.parseInt(j.block(i, "width", "1200").trim());
-        int pxH = Integer.parseInt(j.block(i, "height", "900").trim());
-        boolean stretch = !"off".equalsIgnoreCase(j.block(i, "stretch", "on").trim());
+        int pxH = Integer.parseInt(j.block(i, "height", "0").trim());   // 0 = 按切面真实长宽比算高度
+        // 真实比例出图：不做任何拉伸（二维视图保持 1:1）
         String[][] planes = {
                 { "xy", "_xy", "XY" }, { "zx", "_xz", "XZ" }, { "yz", "_zy", "ZY" } };
         for (String[] pl : planes) {
@@ -648,19 +648,18 @@ public class ExportDriver {
             trySet(j.model.result(pg), "solnum", solnum);
             if (!hasResultFeature(j, pg, "surf1")) j.model.result(pg).create("surf1", "Surface");
             j.model.result(pg).feature("surf1").set("expr", expr);
-            String note = "";
             if (v2.isEmpty()) v2 = pick2dView(j, pg);
             if (!v2.isEmpty()) {
                 trySet(j.model.result(pg), "view", v2);
                 setViewLimits(j, v2, plane, bb);
-                if (stretch) note = applyStretch(j, v2, plane, bb, pxW, pxH);
             }
-            decorate(j.model.result(pg), edges, caption + " 切面", title, note);
+            decorate(j.model.result(pg), edges, caption + " 切面", title, "");
             j.model.result(pg).run();
-            applyTitle(j.model.result(pg), caption + " 切面", title, note);
+            int[] px = canvasSize(pxW, pxH, plane, bb);
+            applyTitle(j.model.result(pg), caption + " 切面", title, "");
             Path png2 = j.outdir.resolve(j.outname + "_" + name + suffix + ".png");
-            exportPng(j, i, pg, png2);
-            System.out.println("[driver] 写出 " + png2 + (note.isEmpty() ? "" : "（" + note + "）"));
+            exportPng(j, i, pg, png2, px[0], px[1]);
+            System.out.println("[driver] 写出 " + png2);
         }
     }
 
@@ -697,27 +696,34 @@ public class ExportDriver {
         trySet(ax, "ymax", Double.toString(y1 + pady));
     }
 
-    // 数据的长宽比与画布差太多时，二维视图按画布比例拉伸，否则图像只剩一条窄带
-    static String applyStretch(Job j, String view, String plane, double[] bb, int pxW, int pxH) {
-        double w, h;
-        if ("xy".equals(plane)) { w = bb[1] - bb[0]; h = bb[3] - bb[2]; }
-        else if ("zx".equals(plane)) { w = bb[5] - bb[4]; h = bb[1] - bb[0]; }
-        else { w = bb[3] - bb[2]; h = bb[5] - bb[4]; }
-        if (w <= 0 || h <= 0) return "";
-        double data = w / h, canvas = (double) pxW / pxH;
-        Object ax;
-        try { ax = j.model.view(view).axis(); } catch (Exception e) { return ""; }
-        trySet(ax, "xscale", "1");
-        trySet(ax, "yscale", "1");
-        double f = data / canvas;
-        if (f > 2 || f < 0.5) {
-            f = Math.max(0.1, Math.min(10.0, f));
-            trySet(ax, "yscale", String.format(Locale.ROOT, "%.3g", f));
-            return f >= 1
-                    ? String.format(Locale.ROOT, "纵向放大 ×%.3g", f)
-                    : String.format(Locale.ROOT, "纵向压缩 ×%.3g", f);
+    // 画布尺寸：height=0 时按切面真实长宽比算 —— 短边至少 500px，长边相应放大，
+    // 既保持真实比例，又不至于把面板压成一条线
+    static int[] canvasSize(int w, int h, String plane, double[] bb) {
+        if (h > 0) return new int[] { w, h };
+        double spanX, spanY;
+        if ("xy".equals(plane)) { spanX = bb[1] - bb[0]; spanY = bb[3] - bb[2]; }
+        else if ("zx".equals(plane)) { spanX = bb[5] - bb[4]; spanY = bb[1] - bb[0]; }
+        else { spanX = bb[3] - bb[2]; spanY = bb[5] - bb[4]; }
+        if (spanX <= 0 || spanY <= 0) return new int[] { w, 900 };
+        double aspect = spanX / spanY;                 // 横向 / 纵向
+        int shortSide = 500, longSide = 1200, maxSide = 4096;
+        int px, py;
+        if (aspect >= 1) {
+            py = shortSide;
+            px = (int) Math.round(shortSide * aspect);
+            if (px < longSide) { px = longSide; py = (int) Math.round(longSide / aspect); }
+        } else {
+            px = shortSide;
+            py = (int) Math.round(shortSide / aspect);
+            if (py < longSide) { py = longSide; px = (int) Math.round(longSide * aspect); }
         }
-        return "";
+        int big = Math.max(px, py);
+        if (big > maxSide) {   // COMSOL 单边上限 4096 px
+            double k = (double) maxSide / big;
+            px = Math.max(80, (int) Math.round(px * k));
+            py = Math.max(80, (int) Math.round(py * k));
+        }
+        return new int[] { px, py };
     }
 
     static String axisSpan(String plane, double[] bb, boolean horiz) {
@@ -1240,6 +1246,10 @@ public class ExportDriver {
     }
 
     static void exportPng(Job j, int i, String plotGroup, Path target) throws Exception {
+        exportPng(j, i, plotGroup, target, 0, 0);
+    }
+
+    static void exportPng(Job j, int i, String plotGroup, Path target, int w, int h) throws Exception {
         String tag = "img_" + i + "_" + Math.abs((plotGroup + target.toString()).hashCode() % 1000000);
         if (!Arrays.asList(j.model.result().export().tags()).contains(tag)) {
             j.model.result().export().create(tag, "Image");
@@ -1248,8 +1258,8 @@ public class ExportDriver {
         j.model.result().export(tag).set("imagetype", "png");
         j.model.result().export(tag).set("size", "manualweb");
         j.model.result().export(tag).set("unit", "px");
-        j.model.result().export(tag).set("width", j.block(i, "width", "1200").trim());
-        j.model.result().export(tag).set("height", j.block(i, "height", "900").trim());
+        j.model.result().export(tag).set("width", w > 0 ? Integer.toString(w) : j.block(i, "width", "1200").trim());
+        j.model.result().export(tag).set("height", h > 0 ? Integer.toString(h) : j.block(i, "height", "900").trim());
         // 图题/色标/坐标轴的总闸在导出节点上；绘图组里那些开关不参与导出渲染
         Object ex = j.model.result().export(tag);
         trySet(ex, "options1d", "on");

@@ -25,9 +25,7 @@
             Type    = 'image'
             Name    = 'field'
             Expr    = 'ewfd.normE'
-            Width   = '1200'
-            Height  = '900'
-            Stretch = 'on'     # 细长截面按画布比例拉伸，便于看细节；'off' 看真实比例
+            Width   = '1200'   # 长边像素；二维图按切面真实比例自动定尺寸
             Edges   = 'off'    # 是否画网格边
         }
 

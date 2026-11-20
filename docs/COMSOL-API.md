@@ -189,8 +189,8 @@ com.comsol.util.exceptions.UnknownEntityException: 未知解。
 - 2D 绘图组的 `view` 合法值形如 `auto | new | view2`（`view2` 是模型自带的 `ResultView2D`）；`view="auto"` 只能自动适配，压不住范围。
 - `view2.axis()`：`viewscaletype` 取 `manual` 时才认 `xmin/xmax/ymin/ymax`；取 `none` 会自己缩。
 - **COMSOL 保持等比例**：把 `xmin/xmax/ymin/ymax` 设成数据范围后，画面仍按 1:1 缩放，结果就是细长截面缩成一条窄带、两侧大片空白。
-- 解决办法是同一处 `xscale/yscale` 做拉伸：`yscale = (数据宽/数据高) ÷ (画布宽/画布高)`，在 `viewscaletype=manual` + 显式轴范围之后设，数据就能铺满画布；换平面时要先把它归零（`xscale=yscale=1`），否则上一张的拉伸会把下一张的轴撑开。
-- 横向拉伸（`xscale>1`）实测是把轴范围放大（画面更空），所以只做纵向。
+- 实测过的另一条路：`xscale/yscale` 能把数据拉满画布，但那是**人为变形**，出图不能用；真要铺满就改画布尺寸——按切面真实长宽比算画布（本项目 `canvasSize()` 的做法），这样 1:1 缩放时数据自然铺满。
+- 换平面时务必把 `xscale/yscale` 归零，否则上一张的拉伸会把下一张的轴撑开。
 
 ### 11.4 尺寸与导出
 - `Image.size` 合法值：`current | manualweb | manualprint | presentation`；`presentation` 在 API 里报「仅支持文件目标」。常用 `manualweb` + `unit=px` + `width/height`。

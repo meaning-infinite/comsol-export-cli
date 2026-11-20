@@ -130,8 +130,7 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 ### image — 场图（一张三维 + 三张二维）
 
 ```powershell
-@{ Type='image'; Name='field'; Expr='ewfd.normE'
-   Width='1200'; Height='900'; Stretch='on'; Edges='off' }
+@{ Type='image'; Name='field'; Expr='ewfd.normE'; Width='1200'; Edges='off' }
 ```
 
 一次出四个文件，都带图题、色标、坐标轴刻度：
@@ -143,8 +142,8 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 | `<名>_field_xz.png` | 正对 zx 面，横 z 纵 x |
 | `<名>_field_zy.png` | 正对 yz 面，横 y 纵 z |
 
-`Stretch`（默认 `on`）：细长截面按画布比例纵向拉伸，画面才不剩一条窄带；图题会标出倍数，设 `off` 看真实比例。
-`Edges`（默认 `off`）：画网格边。`Title` 空 = 「平面 + COMSOL 自动量名」。
+二维图按切面真实长宽比出图（`Height` 不写就自动算），不做拉伸。
+`Width` 是长边像素（上限 4096）；`Edges`（默认 `off`）画网格边；`Title` 空 = 「平面 + COMSOL 自动量名」。
 
 ### eigenslice — 每个特征频率三张切面图
 
