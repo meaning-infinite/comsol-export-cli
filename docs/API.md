@@ -56,13 +56,24 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 
 | 键 | 场景 | 行为 |
 |---|---|---|
+| `↑` `↓` / `Home` `End` / `PgUp` `PgDn` | 所有菜单 | 移动当前行（`▸` + 反色） |
+| `Enter` | 所有菜单 | 确认当前行；多选时为「确认勾选的集合」（没有勾选就取当前行） |
+| `n` + `Enter` | 所有菜单 | 直选（保留旧习惯）；多选用逗号，如 `1,3` |
+| `Space` | 多选菜单（选模型） | 勾选/取消 `[x]` |
+| `a` | 多选菜单 | 全选 / 全不选 |
+| `Esc` | 所有菜单 | 有数字缓冲时先清缓冲，否则取消（取消模型/配方选择 = 不启动任何作业） |
 | `Q` | 监视中 | 退出监视，不杀计算；再进一次继续显示 |
-| `K` | 监视中 | 列出本 CLI 启动且在跑的作业，选序号可终止 |
+| `K` | 监视中 | 列出本 CLI 启动且在跑的作业，上下键选一个终止 |
+
+菜单实现：`Read-Menu`（复用 `New-BoxDisplay` + `Show-LiveBox` 的差量重绘，不整屏重画）；输出被重定向（无人值守/管道）时自动退回「方框 + 输入序号」，脚本调用行为与旧版一致。
 
 ### 2.4 内部函数（维护时定位用）
 
 | 函数 | 作用 |
 |---|---|
+| `Read-Menu` | 上下键菜单（单/多选），返回 1-based 序号数组；`0`/`@()` = 取消 |
+| `New-MenuRows` / `ConvertTo-IndexList` | 菜单行渲染（反色、`[x]`、提示行）/ 逗号输入解析 |
+| `Initialize-ConsoleWindow` | 启动时一次定好窗口：宽度按列数算、高度占满可用高度（像素级 `SetWindowPos`），收尾再钉一次 |
 | `Resolve-Comsol` | 三步扫 COMSOL：桌面快捷方式 → 注册表 → 浅层磁盘 |
 | `Read-Config` / `Save-Config` | 读写 `%LOCALAPPDATA%\comsol-export\state\config.psd1` |
 | `Get-ModelFiles` / `Get-Recipes` | 扫描模型与配方 |
@@ -363,6 +374,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.7.14 | 2026-11-20 | 总表按示意图对齐：左三维占满整块高度，右侧上 x-y（方形、宽=两张侧面+间隔）、下 x-z/z-y 并排铺满其余高度；每张二维各占一格（左轴+场+右色标），不再互相压字 |
 | v1.7.15 | 2026-11-20 | 场图**只留组合总表**：分面图改写作业临时目录、拼完即删，`outdir` 不再出 `_3d/_xy/_xz/_zy`；补写 PNG `pHYs`=300 dpi（ImageIO 重编码会丢 dpi，改为 `writePng` 手插，拼版/裁白边/去框/拼图全部走它）；分辨率整体 ×1.5（`SCALE` 常量：`BLOCK_H` 2400→3600、字号边距色标同步、分面画布短边 1200/长边 3600），总表约 5265×4065 |
 | v1.7.16 | 2026-11-20 | 产物不再平铺在 `output/`：驱动把 `j.outdir` 改为 `output/<模型文件名去 .mph>/`（`modelBase()`），CSV 与场图都落该子文件夹；`modelsdir` 默认值仍取 `output` 的父目录；驱动日志首行打印产出目录 |
+| v1.7.17 | 2026-11-20 | 只改 `cli.ps1`（驱动仍是 v1.7.16，不用重编）：① 所有选择项改成上下键菜单（`Read-Menu`：`▸` 反色、`[n]` 标号保留、数字+Enter 仍可直选；选模型空格勾选、`a` 全选；无人值守重定向时退回输入序号）；② 窗口尺寸改为启动时一次定好、收尾再按像素钉一次高度，去掉 `mode con ... lines=46` 兜底——那是"高度先满足、随后又缩回"的原因；`run.bat` 先设 88×45 消除启动闪屏；③ 去掉结尾「（每个模型一个同名子文件夹）」等废话 |
 | v1.7.8 | 2026-11-20 | 修 image 块多解节点报 `Unknown feature`：`Solution` 数据集的 `solution` 只能绑单个解节点，改成按全局 `SolNum` 定位节点后取节点内序号；堆上限加 64GB 封顶（公共电脑几百 GB 内存时不会给到 300GB+） |
 | v1.7.9 | 2026-11-20 | 诊断补强：驱动每次启动打 `驱动版本=` 与 class 路径/修改时间（缺这行就是旧 class）、块失败打 FlException 全文与自己的栈帧、场图每步打阶段日志；`cli.ps1` 比对 class 里的版本串（`ExpectedDriverVersion`），不一致时启动前警告并写进 launch.txt；`update.ps1` 新增 `Repair-Driver`：版本不一致时用 COMSOL 自带 javac 自动重编 |
 

@@ -111,8 +111,8 @@ function Join-RowText($row) {
 }
 function Pad-Row($row, [int]$w) {
     $out = @()
-    foreach ($s in $row) { $out += @{ Text = [string]$s.Text; Color = $s.Color } }
-    if ($out.Count -eq 0) { $out += @{ Text = ''; Color = 'Gray' } }
+    foreach ($s in $row) { $out += @{ Text = [string]$s.Text; Color = $s.Color; Bg = $s.Bg } }
+    if ($out.Count -eq 0) { $out += @{ Text = ''; Color = 'Gray'; Bg = $null } }
     $n = $w - (Get-TextWidth (Join-RowText $out))
     if ($n -lt 0) { $n = 0 }
     $last = $out.Count - 1
@@ -138,7 +138,7 @@ function New-BoxDisplay([string]$title, $rows, [string]$border) {
         $padded = Pad-Row $r ($w - 1)
         $segs = New-Object System.Collections.ArrayList
         [void]$segs.Add(@{ Text = '  │ '; Color = $border })
-        foreach ($s in $padded) { [void]$segs.Add(@{ Text = [string]$s.Text; Color = $s.Color }) }
+        foreach ($s in $padded) { [void]$segs.Add(@{ Text = [string]$s.Text; Color = $s.Color; Bg = $s.Bg }) }
         [void]$segs.Add(@{ Text = '│'; Color = $border })
         $arr = @($segs.ToArray())
         [void]$disp.Add(@{ Text = (Join-RowText $arr); Segs = $arr })
@@ -154,7 +154,8 @@ function Write-LineSegs($segs, [int]$padTo) {
     foreach ($s in $segs) {
         $tx = [string]$s.Text
         if ($tx) {
-            Write-Host $tx -NoNewline -ForegroundColor $s.Color
+            if ($s.Bg) { Write-Host $tx -NoNewline -ForegroundColor $s.Color -BackgroundColor $s.Bg }
+            else { Write-Host $tx -NoNewline -ForegroundColor $s.Color }
             $used = $used + (Get-TextWidth $tx)
         }
     }
@@ -272,6 +273,170 @@ function Clear-LiveBox {
     $script:LiveText = @()
 }
 
+# 数字输入解析：'1,3' → @(1,3)，只保留 1..$max 内的序号
+function ConvertTo-IndexList([string]$text, [int]$max) {
+    $out = New-Object System.Collections.ArrayList
+    foreach ($piece in ($text -split ',')) {
+        $n = 0
+        if ([int]::TryParse($piece.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $max) { [void]$out.Add($n) }
+    }
+    return $out
+}
+
+# 菜单的显示行：当前行反色，多选打 [x]，末行给按键提示
+function New-MenuRows {
+    param($Items, $Colors, [int]$Cur, $Marked, [bool]$Multi, [string]$Hint)
+    # 框最宽只能到窗口右边界，否则整行折行会把原地重绘算乱
+    $avail = 0
+    try { $avail = [math]::Max(24, [Console]::BufferWidth - 8) } catch { }
+    $rows = @()
+    for ($k = 1; $k -le $Items.Count; $k++) {
+        $isCur = ($k -eq $Cur)
+        $mark = ''
+        if ($Multi) {
+            if ($Marked -contains $k) { $mark = '[x] ' } else { $mark = '[ ] ' }
+        }
+        $lead = '  '
+        if ($isCur) { $lead = '▸ ' }
+        $prefix = $lead + $mark + ('[{0}] ' -f $k)
+        $label = [string]$Items[$k - 1]
+        if ($avail -gt 0) {
+            $room = $avail - (Get-TextWidth $prefix)
+            if ($room -gt 6 -and (Get-TextWidth $label) -gt $room) {
+                $cut = ''
+                foreach ($chr in $label.ToCharArray()) {
+                    if ((Get-TextWidth ($cut + $chr)) -gt ($room - 1)) { break }
+                    $cut = $cut + $chr
+                }
+                $label = $cut + '…'
+            }
+        }
+        $text = $prefix + $label
+        $fg = 'Gray'
+        if ($Colors -and $Colors.Count -ge $k -and $Colors[$k - 1]) { $fg = [string]$Colors[$k - 1] }
+        $seg = @{ Text = $text; Color = $fg; Bg = $null }
+        if ($isCur) { $seg.Color = 'Black'; $seg.Bg = 'DarkCyan' }
+        $rows += , @($seg)
+    }
+    if ($Hint) { $rows += , @(@{ Text = $Hint; Color = 'DarkGray'; Bg = $null }) }
+    return , $rows
+}
+
+# 上下键菜单：方框与 [n] 标号保持原样，↑↓ 移动、Enter 确认；
+# 直接敲数字再回车仍然能选（多个用逗号），Esc 取消。
+# -Multi：空格勾选、a 全选/全不选，返回 int[]。
+# 输出被重定向（无人值守）时退回「方框 + 输入序号」，脚本化调用行为不变。
+function Read-Menu {
+    param(
+        [string]$Title,
+        [string[]]$Items,
+        [int]$Default = 1,
+        [switch]$Multi,
+        [string[]]$ItemColors = $null
+    )
+    $n = @($Items).Count
+    if ($n -le 0) {
+        if ($Multi) { return }
+        return 0
+    }
+
+    # 输出被重定向（无人值守）或标准输入不是键盘时退回「方框 + 输入序号」
+    $noKeys = [bool]$script:IsRedirected
+    if (-not $noKeys) { try { $noKeys = [bool][Console]::IsInputRedirected } catch { $noKeys = $false } }
+    if ($noKeys) {
+        $rows = @()
+        for ($k = 1; $k -le $n; $k++) {
+            $rows += [pscustomobject]@{ Text = ('[{0}] {1}' -f $k, [string]$Items[$k - 1]); Color = 'Gray' }
+        }
+        Write-BoxRows $Title $rows
+        while ($true) {
+            $s = Read-Host '  序号（回车=1，多个用逗号，a=全部）'
+            if ([string]::IsNullOrWhiteSpace($s)) { $s = [string]$Default }
+            $idx = @(ConvertTo-IndexList $s $n)
+            if ($Multi -and $s -match '^\s*a\s*$') { $idx = @(1..$n) }
+            if ($idx.Count -gt 0) {
+                if ($Multi) { return $idx }
+                return $idx[0]
+            }
+            Write-Host ('  请输入 1-{0}' -f $n) -ForegroundColor Yellow
+        }
+    }
+
+    $cur = [math]::Min([math]::Max(1, $Default), $n)
+    $marked = New-Object System.Collections.ArrayList
+    $buf = ''
+    $kaFail = 0
+    while ($true) {
+        $hint = '  ↑↓ 选择  Enter 确认  数字+Enter 直选  Esc 取消'
+        if ($Multi) { $hint = '  ↑↓ 移动  空格 勾选  a 全选  Enter 确认  Esc 取消' }
+        if ($buf) { $hint = $hint + '  ← 输入 ' + $buf }
+        $rows = New-MenuRows $Items $ItemColors $cur $marked ([bool]$Multi) $hint
+        Show-LiveBox $Title $rows 'Cyan'
+
+        $ka = $false
+        try { $ka = [Console]::KeyAvailable } catch { $kaFail = $kaFail + 1 }
+        if ($kaFail -ge 20) {
+            # 没有真正的键盘句柄（被宿主接管等）：别死等，按默认值继续
+            Write-Host '  （键盘不可用，用默认值继续）' -ForegroundColor Yellow
+            $script:LiveTop = -1
+            if ($Multi) { return @($cur) }
+            return $cur
+        }
+        if (-not $ka) { Start-Sleep -Milliseconds 40; continue }
+        $key = [Console]::ReadKey($true)
+        $kaFail = 0
+        $name = $key.Key.ToString()
+        $ch = [string]$key.KeyChar
+
+        if ($name -eq 'UpArrow') { $cur = $cur - 1; if ($cur -lt 1) { $cur = $n }; continue }
+        if ($name -eq 'DownArrow') { $cur = $cur + 1; if ($cur -gt $n) { $cur = 1 }; continue }
+        if ($name -eq 'Home') { $cur = 1; continue }
+        if ($name -eq 'End') { $cur = $n; continue }
+        if ($name -eq 'PageUp') { $cur = [math]::Max(1, $cur - 10); continue }
+        if ($name -eq 'PageDown') { $cur = [math]::Min($n, $cur + 10); continue }
+        if ($name -eq 'Escape') {
+            if ($buf) { $buf = ''; continue }
+            Clear-LiveBox
+            if ($Multi) { return }
+            return 0
+        }
+        if ($name -eq 'Spacebar') {
+            if ($Multi) {
+                if ($marked -contains $cur) { [void]$marked.Remove($cur) } else { [void]$marked.Add($cur) }
+            }
+            continue
+        }
+        if ($ch -match '^[0-9,]$') {
+            if ($buf.Length -lt 12) { $buf = $buf + $ch }
+            continue
+        }
+        if ($Multi -and ($ch -eq 'a' -or $ch -eq 'A')) {
+            if ($marked.Count -ge $n) { $marked.Clear() }
+            else { $marked.Clear(); foreach ($k in 1..$n) { [void]$marked.Add($k) } }
+            continue
+        }
+        if ($name -eq 'Enter') {
+            $picks = @()
+            if ($buf) {
+                $picks = @(ConvertTo-IndexList $buf $n)
+                $buf = ''
+                if ($picks.Count -eq 0) { continue }
+            } elseif ($Multi) {
+                if ($marked.Count -gt 0) { $picks = @($marked | Sort-Object) } else { $picks = @($cur) }
+            } else {
+                $picks = @($cur)
+            }
+            $label = @($picks | ForEach-Object { '{0} {1}' -f $_, [string]$Items[$_ - 1] }) -join '、'
+            Write-Host ('  已选: ' + $label) -ForegroundColor Green
+            $script:LiveTop = -1
+            $script:LiveCount = 0
+            $script:LiveText = @()
+            if ($Multi) { return $picks }
+            return $picks[0]
+        }
+    }
+}
+
 # 开窗即设好尺寸：宽度按列数算（默认 88 列，够放 74 字方框），高度占满屏幕可用高度。
 # 覆盖方式：-WinWidth <n> / 环境变量 COMSOL_EXPORT_COLS / 配置 WindowCols；COMSOL_EXPORT_NORESIZE=1 关掉。
 #
@@ -373,8 +538,8 @@ function Initialize-ConsoleWindow {
         $script:WinInfo.how = 'px'
     }
     if ($gotW -ne $cols) {
-        # 兜底：mode con（Windows Terminal 之类对像素 API 不感冒时用）
-        try { $null = & cmd.exe /c ("mode con cols={0} lines={1}" -f $cols, 46) ; $script:WinInfo.how = 'mode' } catch { }
+        # 兜底只改列：line 一起写会把高度打回 46 行（"高度又缩回去"就是这个）
+        try { $null = & cmd.exe /c ("mode con cols={0}" -f $cols); $script:WinInfo.how = 'mode' } catch { }
         Start-Sleep -Milliseconds 250
         try { $gotW = [int][Console]::WindowWidth; $gotH = [int][Console]::WindowHeight } catch { }
     }
@@ -391,6 +556,20 @@ function Initialize-ConsoleWindow {
         [Console]::SetBufferSize([Console]::BufferWidth, [math]::Max($hn + 2000, 3000))
     } catch { }
     try { [void][ComsolCli.Win2]::SetWindowPos($top, [IntPtr]::Zero, 0, $workTop, 0, 0, 0x0001) } catch { }
+    # 最后按像素再钉一次：改缓冲区、兜底 mode 命令都可能把窗口改小，收尾保证"宽度合适、高度拉满"
+    try {
+        $r9 = New-Object 'ComsolCli.Win2+RECT'
+        if ([ComsolCli.Win2]::GetWindowRect($top, [ref]$r9)) {
+            $pixW9 = [int][math]::Max(320, ($r9.Right - $r9.Left))
+            $cur9W = 0
+            try { $cur9W = [int][Console]::WindowWidth } catch { }
+            $dw9 = 0
+            if ($cur9W -gt 0 -and $script:WinInfo.cellW -gt 0) { $dw9 = [int][math]::Round(($cols - $cur9W) * $script:WinInfo.cellW) }
+            [void][ComsolCli.Win2]::SetWindowPos($top, [IntPtr]::Zero, 0, $workTop, [int][math]::Max(320, $pixW9 + $dw9), $workH, 0)
+            Start-Sleep -Milliseconds 150
+            try { $script:WinInfo.got = ('{0}x{1}' -f [int][Console]::WindowWidth, [int][Console]::WindowHeight) } catch { }
+        }
+    } catch { }
     if ($script:WinDebug -or $env:COMSOL_EXPORT_WINDEBUG -eq '1') {
         Write-Host ('  [窗口] 目标 {0} 列，实得 {1}（{2}）· 每列 {3}px，每行 {4}px，可用高 {5}px' -f `
             $cols, $script:WinInfo.got, $script:WinInfo.how, $script:WinInfo.cellW, $script:WinInfo.cellH, $workH) -ForegroundColor DarkGray
@@ -722,44 +901,48 @@ function Save-Config {
 }
 
 function Start-Setup {
+    $last = 1
     while ($true) {
         $cfg = Read-Config
         $md = if ([string]::IsNullOrWhiteSpace($cfg.Models)) { '<默认: <根目录>\model>' } else { $cfg.Models }
         Write-Host ''
         Write-Host ('  配置: ' + $ConfigFile) -ForegroundColor Cyan
-        Write-Host ('    [1] COMSOL   : ' + $cfg.ComsolBatch)
-        Write-Host ('    [2] 并发数   : ' + $cfg.MaxParallel)
-        Write-Host ('    [3] 模型目录 : ' + $md)
-        Write-Host '    [4] 重新扫描 COMSOL 安装'
-        Write-Host '    [5] 退出'
-        $s = Read-Host '  选择'
-        switch ($s) {
-            '1' {
+        $items = @(
+            ('COMSOL   : ' + $cfg.ComsolBatch),
+            ('并发数   : ' + $cfg.MaxParallel),
+            ('模型目录 : ' + $md),
+            '重新扫描 COMSOL 安装',
+            '退出'
+        )
+        $sel = Read-Menu '设置（回车=当前项，Esc=退出）' $items $last
+        if ($sel -le 0 -or $sel -eq 5) { return }
+        $last = $sel
+        switch ($sel) {
+            1 {
                 $all = @(Find-Comsol)
                 $all = @($all | Sort-Object -Unique)
                 if ($all.Count -eq 0) { Write-Host '  没扫到，直接输入完整路径' -ForegroundColor Yellow; $cfg.ComsolBatch = Read-Host '  路径'; Save-Config $cfg; continue }
-                for ($i = 0; $i -lt $all.Count; $i++) { Write-Host ('    [{0}] {1}' -f ($i + 1), $all[$i]) }
-                $n = Read-Choice '  选择' $all.Count
+                $n = Read-Menu '选择 COMSOL 安装' $all 1
+                if ($n -le 0) { continue }
                 $cfg.ComsolBatch = $all[$n - 1]
                 Save-Config $cfg
             }
-            '2' {
+            2 {
                 $v = Read-Host '  并发数 (1 = 排队串行)'
                 $n = 0
                 if ([int]::TryParse($v, [ref]$n) -and $n -ge 1) { $cfg.MaxParallel = $n; Save-Config $cfg }
             }
-            '3' {
+            3 {
                 $v = Read-Host '  模型目录（留空=根目录\model）'
                 $cfg.Models = $v.Trim()
                 Save-Config $cfg
             }
-            '4' {
+            4 {
                 $all = @(Find-Comsol)
                 $all = @($all | Sort-Object -Unique)
                 Write-Host ('  扫到 {0} 个:' -f $all.Count) -ForegroundColor Cyan
                 foreach ($a in $all) { Write-Host ('    ' + $a) }
             }
-            '5' { return }
         }
     }
 }
@@ -870,8 +1053,8 @@ function Resolve-Comsol {
         Write-Host ('  使用: ' + $pick) -ForegroundColor Green
     } else {
         Write-Host '  找到多个版本，选一个（记在本机配置里，不随 script 外传）:' -ForegroundColor Yellow
-        for ($i = 0; $i -lt $all.Count; $i++) { Write-Host ('    [{0}] {1}' -f ($i + 1), $all[$i]) }
-        $n = Read-Choice '  版本序号' $all.Count
+        $n = Read-Menu '选择 COMSOL 安装' $all 1
+        if ($n -le 0) { throw '已取消版本选择' }
         $pick = $all[$n - 1]
     }
     $cfg = Read-Config
@@ -1666,17 +1849,12 @@ function Invoke-KillMenu {
         Write-Host '  当前没有”本 CLI 启动且仍在运行”的作业，无法终止。' -ForegroundColor Yellow
         return
     }
-    Write-Host '  可终止的作业（只包含本 CLI 启动的）:' -ForegroundColor Cyan
+    $items = @()
     for ($j = 0; $j -lt $run.Count; $j++) {
-        Write-Host ('    [{0}] {1}   PID {2}' -f ($j + 1), (Split-Path -Leaf $run[$j].jobDir), $run[$j].pid)
+        $items += ((Split-Path -Leaf $run[$j].jobDir) + '   PID ' + $run[$j].pid)
     }
-    $pick = Read-Host '  终止哪个? 输入序号（直接回车取消）'
-    if ([string]::IsNullOrWhiteSpace($pick)) { Write-Host '  已取消。'; return }
-    $n = 0
-    if (-not ([int]::TryParse($pick.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $run.Count)) {
-        Write-Host '  序号无效，已取消。' -ForegroundColor Yellow
-        return
-    }
+    $n = Read-Menu '终止哪个作业（Esc=取消）' $items 1
+    if ($n -le 0) { Write-Host '  已取消。'; return }
     $job = $run[$n - 1]
     $yn = Read-Host ('  确认终止 ' + (Split-Path -Leaf $job.jobDir) + ' ?（只终止这一个，Y/N）')
     if ($yn -notmatch '^(y|Y)') { Write-Host '  已取消。'; return }
@@ -2023,14 +2201,10 @@ $doSolve = $true
 if ($Mode -eq 'export') { $doSolve = $false }
 elseif ($Mode -eq 'solve') { $doSolve = $true }
 elseif ([string]::IsNullOrWhiteSpace($ModelIndex)) {
-    Write-Host ''
-    $rows = @(
-        [pscustomobject]@{ Text = '[1] 求解并导出（模型还没算过）'; Color = 'Gray' },
-        [pscustomobject]@{ Text = '[2] 只导出（模型里已经有解，不重新求解）'; Color = 'Gray' }
-    )
-    Write-BoxRows '选择模式' $rows
-    $mv = Read-Host '  模式序号（直接回车=1）'
-    if ($mv -match '^\s*2\s*$') { $doSolve = $false }
+    $items = @('求解并导出（模型还没算过）', '只导出（模型里已经有解，不重新求解）')
+    $mv = Read-Menu '选择模式' $items 1
+    if ($mv -le 0) { Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow; exit 0 }
+    if ($mv -eq 2) { $doSolve = $false }
 }
 
 $modelFiles = @(Get-ModelFiles $Models)
@@ -2044,55 +2218,62 @@ if ($solvedFiles.Count -gt 0) { $solvedNo = $modelFiles.Count + 1 }
 if ($modelFiles.Count -eq 0 -and $solvedNo -eq 0) { throw "目录里没有 .mph 或指向 .mph 的快捷方式: $Models" }
 
 $miRaw = [string]$ModelIndex
-$shown = $false
 $pickAll = $false
 $idxs = @()
-while ($true) {
-    if (-not $shown) {
-        $rows = @()
-        for ($i = 0; $i -lt $modelFiles.Count; $i++) {
-            $label = $modelFiles[$i].Name
-            if ($modelFiles[$i].IsLink) { $label = $label + '  →  ' + [System.IO.Path]::GetFileName($modelFiles[$i].FullName) }
-            $color = 'Gray'
-            if ($modelFiles[$i].Missing) { $label = $label + '  （快捷方式目标不存在）'; $color = 'DarkYellow' }
-            $rows += [pscustomobject]@{ Text = ('[{0}] {1}' -f ($i + 1), $label); Color = $color }
-        }
-        if ($solvedNo -gt 0) {
-            $rows += [pscustomobject]@{ Text = ('[{0}] 从 solved\ 里选（已算过的模型，共 {1} 个，默认只导出）' -f $solvedNo, $solvedFiles.Count); Color = 'Cyan' }
-        }
-        $title = '选择模型'
-        if ($fromSolved) { $title = '选择模型（solved\）' }
-        Write-BoxRows $title $rows
-        $shown = $true
-    }
-    if ([string]::IsNullOrWhiteSpace($miRaw)) {
-        $miRaw = Read-Host '  选择模型序号（直接回车=1，多个用逗号，a=全部）'
-        if ([string]::IsNullOrWhiteSpace($miRaw)) { $miRaw = '1' }
-    }
-    $idxs = @()
-    if ($miRaw -match '^\s*a\s*$') { $idxs = @(1..$modelFiles.Count); $pickAll = $true }
-    elseif ($solvedNo -gt 0 -and $miRaw -match ('^\s*' + $solvedNo + '\s*$')) {
-        # 切到 solved\ 列表重选一次；切过去以后这一项就不再出现，避免套娃
+if (-not [string]::IsNullOrWhiteSpace($miRaw)) {
+    # -ModelIndex / 兼容旧的输入方式：直接解析，不弹菜单
+    if ($miRaw -match '^\s*a\s*$') {
+        $idxs = @(1..$modelFiles.Count)
+        $pickAll = $true
+    } elseif ($solvedNo -gt 0 -and $miRaw -match ('^\s*' + $solvedNo + '\s*$')) {
         $modelFiles = $solvedFiles
         $solvedNo = 0
         $fromSolved = $true
-        $shown = $false
         $miRaw = ''
-        Write-Host ('  已切到 ' + $solvedDir) -ForegroundColor Cyan
-        continue
+    } else {
+        $idxs = @(ConvertTo-IndexList $miRaw $modelFiles.Count)
+        if ($idxs.Count -eq 0) { throw ('模型序号无效: ' + $ModelIndex) }
     }
-    else {
-        foreach ($piece in ($miRaw -split ',')) {
-            $n = 0
-            if ([int]::TryParse($piece.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $modelFiles.Count) { $idxs += $n }
+}
+while ($idxs.Count -eq 0) {
+    $items = @()
+    $colors = @()
+    for ($i = 0; $i -lt $modelFiles.Count; $i++) {
+        $label = $modelFiles[$i].Name
+        if ($modelFiles[$i].IsLink) { $label = $label + '  →  ' + [System.IO.Path]::GetFileName($modelFiles[$i].FullName) }
+        $color = 'Gray'
+        if ($modelFiles[$i].Missing) { $label = $label + '  （快捷方式目标不存在）'; $color = 'DarkYellow' }
+        $items += $label
+        $colors += $color
+    }
+    if ($solvedNo -gt 0) {
+        $items += ('从 solved\ 里选（已算过的模型，共 {0} 个，默认只导出）' -f $solvedFiles.Count)
+        $colors += 'Cyan'
+    }
+    $title = '选择模型'
+    if ($fromSolved) { $title = '选择模型（solved\）' }
+
+    # 空格勾选多个；回车=当前行；Esc 放弃本次运行
+    $picks = @(Read-Menu $title $items 1 -Multi -ItemColors $colors)
+    if ($picks.Count -eq 0) {
+        Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow
+        exit 0
+    }
+    if ($solvedNo -gt 0 -and ($picks -contains $solvedNo)) {
+        Start-Sleep -Milliseconds 120
+        $plain = @($picks | Where-Object { $_ -ne $solvedNo })
+        if ($plain.Count -eq 0) {
+            # 只选了 solved\：整份列表换过去重选一次（换过去后这一项不再出现，避免套娃）
+            $modelFiles = $solvedFiles
+            $solvedNo = 0
+            $fromSolved = $true
+            Write-Host ('  已切到 ' + $solvedDir) -ForegroundColor Cyan
+            continue
         }
+        $picks = $plain
     }
-    if ($idxs.Count -gt 0) { break }
-    if (-not [string]::IsNullOrWhiteSpace($ModelIndex)) { throw ('模型序号无效: ' + $ModelIndex) }
-    $hint = '  序号无效：“' + $miRaw + '”，请输入 1-' + $modelFiles.Count
-    if ($solvedNo -gt 0) { $hint = $hint + ' 或 ' + $solvedNo + '（solved\）' }
-    Write-Host ($hint + '，多个用逗号，a=全部') -ForegroundColor Yellow
-    $miRaw = ''
+    if ($picks.Count -eq $modelFiles.Count) { $pickAll = $true }
+    $idxs = $picks
 }
 # solved\ 里的是算过的模型：默认只导出。这里强制不重算——输出路径就是
 # <models>\solved\<outname>.mph，重算时输入和输出可能同名，等于边读边覆盖自己。
@@ -2136,13 +2317,9 @@ if (-not [string]::IsNullOrWhiteSpace($Recipe)) {
     }
     $r = $hit[0]
 } else {
-    Write-Host ''
-    $rows = @()
-    for ($i = 0; $i -lt $recipes.Count; $i++) {
-        $rows += [pscustomobject]@{ Text = ('[{0}] {1}' -f ($i + 1), $recipes[$i].Name); Color = 'Gray' }
-    }
-    Write-BoxRows '选择配方' $rows
-    $ri = Read-Choice '  选择配方序号' $recipes.Count
+    $items = @($recipes | ForEach-Object { $_.Name })
+    $ri = Read-Menu '选择配方' $items 1
+    if ($ri -le 0) { Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow; exit 0 }
     $r = $recipes[$ri - 1]
 }
 
@@ -2221,9 +2398,8 @@ if ($ans -notmatch '^(y|Y)') {
 $queue = @(Get-Queue)
 Save-Queue (@($queue) + @($jobs))
 Write-Host ''
-Write-Host '  【计算中】关掉本窗口不影响计算；重开 CLI 加 -Resume 可接着监视' -ForegroundColor Yellow
 Write-Host ('  日志 : ' + $JobsDir)
-Write-Host ('  输出 : ' + (Join-Path $Root 'output') + '  （每个模型一个同名子文件夹）')
+Write-Host ('  输出 : ' + (Join-Path $Root 'output'))
 Write-Host ''
 Invoke-Scheduler
 
