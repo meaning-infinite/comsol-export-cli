@@ -196,6 +196,11 @@ com.comsol.util.exceptions.UnknownEntityException: 未知解。
 - `Image.size` 合法值：`current | manualweb | manualprint | presentation`；`presentation` 在 API 里报「仅支持文件目标」。常用 `manualweb` + `unit=px` + `width/height`。
 - 一张 2D 场图：`run()` 约 2 s、导出约 2 s（1200×900 级别），比求解便宜得多。
 - 多个绘图特征（三个 Slice）会各画一条色标；用各特征 `rangeactualminmax` 取并集，统一 `rangecoloractive=on` + `rangecolormin/max`，再把除第一个之外的 `colorlegend` 设 `off`，只留一条。
+- **dpi**：`Image` 节点有 `resolution`（默认 `96`），设 `300` 后 PNG 的 dpi 元数据读出来是 `299.9994`；`size=manualweb`+`unit=px` 时它只影响元数据与字号渲染，像素尺寸仍由 `width/height` 定。
+- **字号**：同一节点有 `fontsize`（默认 `9`）。300 dpi 下 9 pt ≈ 37 px，窄面板（403 px 宽）里字会糊满画面 → 按短边缩放，取 `round(shortSide×0.03×72/300)`，夹在 3–9。
+- **像素上限**：宽、高**都是 4096**，超了分别报 `The_width_must_not_exceed_X_pixels#4096` / `高度不得超过 4096 像素。`，`manualweb`/`manualprint`/`current` 都一样。
+- **`quickplane` 六个值**：`xy, yz, zx, yx, zy, xz`。`zx` 是横 z 纵 x（横图），`xz` 是横 x 纵 z（竖图），`yz` 是横 y 纵 z（竖图）。
+- **色标位置**：`PlotGroup2D.legendpos` 合法值 `alternating | bottom | left | leftdouble | right | rightdouble`。细长竖图用 `bottom`：右侧色标会吃掉本就只有几百像素的宽度，COMSOL 为保 1:1 把纵轴撑大，数据只剩中间一条。
 
 ## 10. 版本记录（续）
 
@@ -203,6 +208,7 @@ com.comsol.util.exceptions.UnknownEntityException: 未知解。
 |---|---|---|
 | 2026-11-19 | — | 补第 9 节：`createAutoSequences` 报 `未知解。- 标记: all` 的复现矩阵与修法 |
 | 2026-11-20 | v1.7.5 | 补第 11 节：场图装饰总闸（`optionsNd`）、CutPlane 偏移单位、二维坐标映射、等比例/拉伸、色标合并 |
+| 2026-11-20 | v1.7.7 | 补 11.4：`resolution`/`fontsize`/4096 上限、`quickplane` 六个值、`legendpos=bottom` |
 
 ## 8. 版本记录
 

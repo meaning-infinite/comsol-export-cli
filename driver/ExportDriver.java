@@ -632,10 +632,10 @@ public class ExportDriver {
         int pxH = Integer.parseInt(j.block(i, "height", "0").trim());   // 0 = 按切面真实长宽比算高度
         // 真实比例出图：不做任何拉伸（二维视图保持 1:1）
         String[][] planes = {
-                { "xy", "_xy", "XY" }, { "zx", "_xz", "XZ" }, { "yz", "_zy", "ZY" } };
+                { "xy", "_xy", "XY" }, { "xz", "_xz", "XZ" }, { "yz", "_zy", "ZY" } };
         for (String[] pl : planes) {
             String plane = pl[0], suffix = pl[1], caption = pl[2];
-            double pos = "xy".equals(plane) ? zc : ("zx".equals(plane) ? yc : xc);
+            double pos = "xy".equals(plane) ? zc : ("xz".equals(plane) ? yc : xc);
             String dtag = "dsp2d_" + i + "_" + plane;
             if (!hasDataset(j, dtag)) j.model.result().dataset().create(dtag, "CutPlane");
             j.model.result().dataset(dtag).set("data", j.dataset);
@@ -646,6 +646,10 @@ public class ExportDriver {
             if (!hasResult(j, pg)) j.model.result().create(pg, "PlotGroup2D");
             j.model.result(pg).set("data", dtag);
             trySet(j.model.result(pg), "solnum", solnum);
+            int[] px = canvasSize(pxW, pxH, plane, bb);
+            // 竖图（细长截面）把色标挪到下方：右侧色标会吃掉本就只有几百像素的宽度，
+            // COMSOL 为保 1:1 会把纵轴撑大，数据只剩中间一条
+            if (px[1] > px[0]) trySet(j.model.result(pg), "legendpos", "bottom");
             if (!hasResultFeature(j, pg, "surf1")) j.model.result(pg).create("surf1", "Surface");
             j.model.result(pg).feature("surf1").set("expr", expr);
             if (v2.isEmpty()) v2 = pick2dView(j, pg);
@@ -655,8 +659,9 @@ public class ExportDriver {
             }
             decorate(j.model.result(pg), edges, caption + " 切面", title, "");
             j.model.result(pg).run();
-            int[] px = canvasSize(pxW, pxH, plane, bb);
-            applyTitle(j.model.result(pg), caption + " 切面", title, "");
+            // 竖图太窄，标题带量名会折成三行，只用平面名
+            applyTitle(j.model.result(pg), caption + " 切面",
+                    px[1] > px[0] ? caption + " 切面" : title, "");
             Path png2 = j.outdir.resolve(j.outname + "_" + name + suffix + ".png");
             exportPng(j, i, pg, png2, px[0], px[1]);
             System.out.println("[driver] 写出 " + png2);
@@ -682,6 +687,7 @@ public class ExportDriver {
     static void setViewLimits(Job j, String view, String plane, double[] bb) {
         double x0, x1, y0, y1;
         if ("xy".equals(plane)) { x0 = bb[0]; x1 = bb[1]; y0 = bb[2]; y1 = bb[3]; }
+        else if ("xz".equals(plane)) { x0 = bb[0]; x1 = bb[1]; y0 = bb[4]; y1 = bb[5]; }
         else if ("zx".equals(plane)) { x0 = bb[4]; x1 = bb[5]; y0 = bb[0]; y1 = bb[1]; }
         else { x0 = bb[2]; x1 = bb[3]; y0 = bb[4]; y1 = bb[5]; }
         double padx = (x1 - x0) * 0.02, pady = (y1 - y0) * 0.02;
@@ -702,11 +708,12 @@ public class ExportDriver {
         if (h > 0) return new int[] { w, h };
         double spanX, spanY;
         if ("xy".equals(plane)) { spanX = bb[1] - bb[0]; spanY = bb[3] - bb[2]; }
+        else if ("xz".equals(plane)) { spanX = bb[1] - bb[0]; spanY = bb[5] - bb[4]; }
         else if ("zx".equals(plane)) { spanX = bb[5] - bb[4]; spanY = bb[1] - bb[0]; }
         else { spanX = bb[3] - bb[2]; spanY = bb[5] - bb[4]; }
         if (spanX <= 0 || spanY <= 0) return new int[] { w, 900 };
         double aspect = spanX / spanY;                 // 横向 / 纵向
-        int shortSide = 500, longSide = 1200, maxSide = 4096;
+        int shortSide = 800, longSide = 2400, maxSide = 4096;   // 300 dpi 下短边约 2.7 in
         int px, py;
         if (aspect >= 1) {
             py = shortSide;
@@ -1229,7 +1236,7 @@ public class ExportDriver {
 
     static String offsetKey(String plane) {
         if ("xy".equals(plane)) return "quickz";
-        if ("zx".equals(plane)) return "quicky";
+        if ("xz".equals(plane) || "zx".equals(plane)) return "quicky";
         return "quickx";
     }
 
@@ -1258,6 +1265,14 @@ public class ExportDriver {
         j.model.result().export(tag).set("imagetype", "png");
         j.model.result().export(tag).set("size", "manualweb");
         j.model.result().export(tag).set("unit", "px");
+        trySet(j.model.result().export(tag), "resolution", "300");   // 300 dpi，PNG 里带 dpi 元数据
+        // 300 dpi 下 9pt 字≈37px：细长面板上字会吃掉画面，按短边缩放字号
+        int shortSide = Math.min(w, h);
+        if (shortSide > 0) {
+            int fs = (int) Math.round(shortSide * 0.03 * 72.0 / 300.0);
+            trySet(j.model.result().export(tag), "fontsize",
+                    Integer.toString(Math.max(3, Math.min(9, fs))));
+        }
         j.model.result().export(tag).set("width", w > 0 ? Integer.toString(w) : j.block(i, "width", "1200").trim());
         j.model.result().export(tag).set("height", h > 0 ? Integer.toString(h) : j.block(i, "height", "900").trim());
         // 图题/色标/坐标轴的总闸在导出节点上；绘图组里那些开关不参与导出渲染
