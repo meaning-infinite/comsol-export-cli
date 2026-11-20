@@ -724,8 +724,10 @@ function Initialize-ConsoleWindow {
     }
 }
 
-
-
+# 尽早定窗口尺寸：函数一就绪就调，别等后面算完配置——否则会先刷出字再改窗口，看起来跳一下
+$script:WinCols = 0
+if ($WinWidth -gt 0) { $script:WinCols = [int]$WinWidth }
+Initialize-ConsoleWindow
 
 $ScriptDir = $PSScriptRoot
 $Root      = Split-Path -Parent $ScriptDir
@@ -1833,13 +1835,6 @@ if ($Models -and ((Split-Path -Leaf $Models) -eq 'model')) {
 }
 
 
-$head = @(
-    ('模型目录 : ' + $Models),
-    ('配方目录 : ' + $RecipeDir)
-)
-if ($DryRun) { $head += '模式     : 预览（不启动计算、不写队列）' }
-Write-Banner
-Write-Box '会话配置' $head 'Cyan'
 $ModelList = $modelList
 
 function Save-Queue($q) {
@@ -2270,13 +2265,10 @@ if ([string]::IsNullOrWhiteSpace($script:PStyle)) {
     if ([string]::IsNullOrWhiteSpace($script:PStyle)) { $script:PStyle = '2' }
 }
 if ($env:COMSOL_EXPORT_STYLE) { $script:PStyle = [string]$env:COMSOL_EXPORT_STYLE }
-$script:WinCols = 0
-if ($WinWidth -gt 0) { $script:WinCols = [int]$WinWidth }
 $script:WinDebug = [bool]$WinDebug
-Initialize-ConsoleWindow
-$comsolBatch = Resolve-Comsol $ComsolPath
-Write-Host ('  COMSOL   : ' + $comsolBatch)
 Write-Host ''
+Write-Banner
+$comsolBatch = Resolve-Comsol $ComsolPath
 
 # ---- 单实例守卫：两个 CLI 同时调度会抢同一个队列（-KillJob 除外，它是显式急停） ----
 $instFile = Join-Path $StateDir 'cli.lock'

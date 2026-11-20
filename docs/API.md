@@ -385,6 +385,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.7.18 | 2026-11-20 | 只改 `cli.ps1` + `run.bat`：① 修掉启动时 cmd 报的一段乱码——`run.bat` 改成 CRLF + 纯 ASCII 注释（UTF-8 中文注释 + LF 换行会让 cmd 把 rem 行和 powershell 行拼成一条乱命令）；② 菜单不用 `[x]` 了：游标 `❯`、勾选 `●`/`○`，勾选的白字、未选暗灰，不再和序号混淆；确定后清框只留 `✓ 已选` 一行；③ Y/N 提示全换成 `是`/`否` 菜单（`Read-Confirm`）；④ 模型列表直接显示快捷方式指向的模型名，不再写「链接名 → 目标」，也不标色；⑤ 新增 `Cut-Text`，菜单项与结论行按显示宽度截断，长名字不再撑破框 |
 | v1.7.19 | 2026-11-21 | 只改 `cli.ps1`：① 所有方框统一内宽 `$script:BoxW = 76`（`Get-BoxWidth`）——标题框、菜单框、进度框、汇总框左右边缘现在对齐，原先进度框固定 74 而其它框随内容伸缩；② 新增 `Trim-Row`，动态内容（作业名、进度细节、模型名）超宽就截断加 `…`，框不再被撑宽；③ 状态条宽度跟方框右缘对齐；④ 窄终端（BufferWidth 偏小）自动等比收缩，不会折行打乱原地刷新的框 |
 | v1.7.20 | 2026-11-21 | 只改 `cli.ps1`：开场加 6 行 ANSI 阴影字标 `COMSOL`（`Write-Banner`），对角渐变逐字符上色（白→亮青→深青，`Get-ArtColor` 5 色标插值）；颜色走 24 位 ANSI，靠 `Enable-VtColor` 打开 VT，重定向或拿不到 VT 时退化成单色 `DarkCyan`；字距统一，C 与第一个 O 之间不留额外空隙；标题框文字由「COMSOL 远程自动导出 CLI」改为「会话配置」（产品名已在字标里） |
+| v1.7.21 | 2026-11-21 | 只改 `cli.ps1`：① 启动不再打印「模型目录/配方目录/模式」方框与 `COMSOL : <路径>` 一行，开头只有字标；② 字标前留一个空行；③ `Initialize-ConsoleWindow` 提前到函数定义后立刻调用（原来在解析完配置之后、字标之前才调，结果先出字再改窗口），现在窗口尺寸在任何输出之前就定好 |
 | v1.7.8 | 2026-11-20 | 修 image 块多解节点报 `Unknown feature`：`Solution` 数据集的 `solution` 只能绑单个解节点，改成按全局 `SolNum` 定位节点后取节点内序号；堆上限加 64GB 封顶（公共电脑几百 GB 内存时不会给到 300GB+） |
 | v1.7.9 | 2026-11-20 | 诊断补强：驱动每次启动打 `驱动版本=` 与 class 路径/修改时间（缺这行就是旧 class）、块失败打 FlException 全文与自己的栈帧、场图每步打阶段日志；`cli.ps1` 比对 class 里的版本串（`ExpectedDriverVersion`），不一致时启动前警告并写进 launch.txt；`update.ps1` 新增 `Repair-Driver`：版本不一致时用 COMSOL 自带 javac 自动重编 |
 
