@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.8.0'
+$script:CliVersion = 'v1.8.1'
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
     '██╔════╝ ██╔═══██╗  ████╗ ████║  ██╔════╝  ██╔═══██╗  ██║     ',
@@ -198,16 +198,21 @@ function Get-ArtColor([int]$r, [int]$c) {
 function Write-Banner {
     $vt = Enable-VtColor
     $esc = [string][char]27
+    $last = $script:ArtRows.Count - 1
     for ($r = 0; $r -lt $script:ArtRows.Count; $r++) {
         $row = [string]$script:ArtRows[$r]
         if (-not $vt) {
-            Write-Host ('  ' + $row.TrimEnd()) -ForegroundColor DarkCyan
+            $line = '  ' + $row.TrimEnd()
+            if ($r -eq $last) { $line = $line + '   ' + $script:CliVersion }
+            Write-Host $line -ForegroundColor DarkCyan
             continue
         }
         $sb = New-Object System.Text.StringBuilder
         [void]$sb.Append('  ')
         $cur = ''
-        for ($c = 0; $c -lt $row.Length; $c++) {
+        $colCount = $row.Length
+        if ($r -eq $last) { while ($colCount -gt 0 -and $row[$colCount - 1] -eq ' ') { $colCount-- } }
+        for ($c = 0; $c -lt $colCount; $c++) {
             $ch = $row[$c]
             if ($ch -eq ' ') { [void]$sb.Append(' '); continue }
             $col = Get-ArtColor $r $c
@@ -217,12 +222,13 @@ function Write-Banner {
             }
             [void]$sb.Append($ch)
         }
+        if ($r -eq $last) {
+            if ($cur -ne '') { [void]$sb.Append($esc + '[0m'); $cur = '' }
+            [void]$sb.Append('   ' + $esc + '[38;2;235;250;252m' + $script:CliVersion + $esc + '[0m')
+        }
         if ($cur -ne '') { [void]$sb.Append($esc + '[0m') }
         Write-Host $sb.ToString()
     }
-    Write-Host ''
-    Write-Host ('  ' + $script:CliVersion) -NoNewline -ForegroundColor White
-    Write-Host '   远程批量求解与导出' -ForegroundColor DarkGray
     Write-Host ''
 }
 
@@ -318,37 +324,27 @@ function Show-LiveBox([string]$title, $rows, [string]$color) {
         $disp = New-BoxDisplay $title $norm $color
         $count = @($disp).Count
         $bw = Get-LiveWidth
-        if ($script:LiveTop -lt 0) {
-            # 首帧：一次画完，光标停在框下方
-            Write-Host ''
-            for ($i = 0; $i -lt $count; $i++) {
-                Write-LineSegs $disp[$i].Segs $bw
-                Write-Host ''
-            }
-            $script:LiveCount = $count
-            $script:LiveText = @($disp | ForEach-Object { [string]$_.Text })
-            $script:LiveTop = [math]::Max(0, [Console]::CursorTop - $count)
-            return
-        }
-        $top = $script:LiveTop
-        $maxTop = [math]::Max(0, [Console]::BufferHeight - $count - 1)
-        if ($top -gt $maxTop) { $top = $maxTop }
-        $texts = @($script:LiveText)
+        # 定位方式：不用绝对行号，靠"上一帧刚好写完 $prev 行"这个事实相对回退。
+        # 绝对行号在控制台滚屏/改窗口后会整体错位，公共电脑上就表现为错行、旧内容残留。
+        $prev = [int]$script:LiveCount
+        $cur = -1
+        try { $cur = [int][Console]::CursorTop } catch { }
+        $anchored = ($prev -gt 0 -and $cur -ge $prev)
+        if ($anchored) { [Console]::SetCursorPosition(0, $cur - $prev) } else { Write-Host '' }
+        # 整块重画（不做按行差量：差量依赖绝对行号，一旦错位就会把第一行内容糊到第二三行）
         for ($i = 0; $i -lt $count; $i++) {
-            $txt = [string]$disp[$i].Text
-            # 差量：这一行没变就不碰它（不变的光标不动 = 不闪、不滚屏）
-            if ($i -lt $texts.Count -and $texts[$i] -eq $txt) { continue }
-            [Console]::SetCursorPosition(0, $top + $i)
             Write-LineSegs $disp[$i].Segs $bw
-            if ($i -lt $texts.Count) { $texts[$i] = $txt } else { $texts += $txt }
+            Write-Host ''
         }
-        $script:LiveText = $texts
+        if ($anchored -and $count -lt $prev) {
+            # 这一帧比上一帧矮：把多出来的旧行擦干净，再退回到框外第一行
+            $blank = ' ' * [math]::Max(1, $bw - 1)
+            for ($i = $count; $i -lt $prev; $i++) { Write-Host $blank }
+            try { [Console]::SetCursorPosition(0, $cur - $prev + $count) } catch { }
+        }
         $script:LiveCount = $count
-        $script:LiveTop = $top
-        $afterRow = $top + $count
-        $maxRow = [math]::Max(0, [Console]::BufferHeight - 1)
-        if ($afterRow -gt $maxRow) { $afterRow = $maxRow }
-        [Console]::SetCursorPosition(0, $afterRow)
+        $script:LiveText = @($disp | ForEach-Object { [string]$_.Text })
+        $script:LiveTop = 0
     } catch {
         if ($title -ne $script:LiveSig) {
             $script:LiveSig = $title
@@ -392,14 +388,16 @@ function Show-StatusLine([string]$text, [string]$fg, [string]$bg) {
 
 function Clear-LiveBox {
     try {
-        if ($script:LiveTop -ge 0) {
+        $n = [int]$script:LiveCount
+        if ($script:LiveTop -ge 0 -and $n -gt 0) {
             $bw = Get-LiveWidth
-            $blank = ' ' * $bw
-            for ($y = 0; $y -lt $script:LiveCount; $y++) {
-                [Console]::SetCursorPosition(0, $script:LiveTop + $y)
-                Write-Host $blank -NoNewline
-            }
-            [Console]::SetCursorPosition(0, $script:LiveTop)
+            $cur = [int][Console]::CursorTop
+            $top = 0
+            if ($cur -ge $n) { $top = $cur - $n }
+            [Console]::SetCursorPosition(0, $top)
+            $blank = ' ' * [math]::Max(1, $bw - 1)
+            for ($i = 0; $i -lt $n; $i++) { Write-Host $blank }
+            [Console]::SetCursorPosition(0, $top)
         }
     } catch { }
     $script:LiveTop = -1
@@ -759,7 +757,7 @@ function Show-Help {
     Write-Host '    -Recipe <name>   直接指定配方（不交互）'
     Write-Host '    -ModelIndex <n>  直接指定第 n 个模型（从 1 开始；列表最后一项是 solved\ 目录）'
     Write-Host '    -DryRun          只打印计划，不写队列、不启动计算'
-    Write-Host '    -Mode <solve|export|watch>  求解并导出 / 只导出已有解的模型 / 只监视在跑的任务'
+    Write-Host '    -Mode <solve|export|watch>  求解并导出 / 导出模式 / 监视模式'
     Write-Host '    -ProgressStyle 1|2|3  进度样式：1 单行 / 2 方框仪表 / 3 阶段链'
     Write-Host '    -Cores <n>       求解用几个核（默认交给 COMSOL 自己定）'
     Write-Host '    -Heap <6g>       Java 堆（默认按物理内存 70%）'
@@ -2346,7 +2344,7 @@ if ($Mode -eq 'export') { $doSolve = $false }
 elseif ($Mode -eq 'solve') { $doSolve = $true }
 elseif ($Mode -eq 'watch') { $doWatch = $true }
 elseif ([string]::IsNullOrWhiteSpace($ModelIndex)) {
-    $items = @('求解并导出', '只导出', '监视正在跑的任务')
+    $items = @('求解并导出', '导出模式', '监视模式')
     $mv = Read-Menu '选择模式' $items 1
     if ($mv -le 0) { Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow; exit 0 }
     if ($mv -eq 2) { $doSolve = $false }
@@ -2400,7 +2398,7 @@ while ($idxs.Count -eq 0) {
         $colors += $color
     }
     if ($solvedNo -gt 0) {
-        $items += ('从 solved 目录里选（已算过的，共 {0} 个）' -f $solvedFiles.Count)
+        $items += ('从 \solved 中选择（共 {0} 个）' -f $solvedFiles.Count)
         $colors += 'Gray'
     }
     $title = '选择模型'

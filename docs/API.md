@@ -387,6 +387,7 @@ static void exportFoo(Job j, int i) throws Exception {
 | v1.7.20 | 2026-11-21 | 只改 `cli.ps1`：开场加 6 行 ANSI 阴影字标 `COMSOL`（`Write-Banner`），对角渐变逐字符上色（白→亮青→深青，`Get-ArtColor` 5 色标插值）；颜色走 24 位 ANSI，靠 `Enable-VtColor` 打开 VT，重定向或拿不到 VT 时退化成单色 `DarkCyan`；字距统一，C 与第一个 O 之间不留额外空隙；标题框文字由「COMSOL 远程自动导出 CLI」改为「会话配置」（产品名已在字标里） |
 | v1.7.21 | 2026-11-21 | 只改 `cli.ps1`：① 启动不再打印「模型目录/配方目录/模式」方框与 `COMSOL : <路径>` 一行，开头只有字标；② 字标前留一个空行；③ `Initialize-ConsoleWindow` 提前到函数定义后立刻调用（原来在解析完配置之后、字标之前才调，结果先出字再改窗口），现在窗口尺寸在任何输出之前就定好 |
 | v1.8.0 | 2026-11-21 | 只改 `cli.ps1`（驱动仍 v1.7.16）：① 开跑前不再打印「日志 / 输出」两行路径；② `[入队]` 行只打模型名，不再接 `→ 输出.csv`；③ 新增第三种模式「监视」（`-Mode watch`）：不选模型、不建作业、不改队列，直接盯队列里在跑的作业（顺便把上次遗留的 pending 接着跑），窗口关掉后重开一个选它即可；④ 模式菜单去掉括号解释（`求解并导出` / `只导出` / `监视正在跑的任务`）；⑤ 进度框里 `按键 Q 退出监视（计算不受影响）` 去掉括号；⑥ 字标下新增版本行 `v1.8.0 远程批量求解与导出`（`$script:CliVersion`） |
+| v1.8.1 | 2026-11-21 | 只改 `cli.ps1`：① 版本号并到字标末行右侧（`COMSOL …… v1.8.1`），不再单独占一行，也不再跟副标题；② 活动框渲染改成「相对锚定 + 整块重画」：`Show-LiveBox` 不再记绝对行号、不再按行做文字差量，改为每帧从 `CursorTop - LiveCount` 回退到框顶整块重写，`Clear-LiveBox` 同样按 `CursorTop - LiveCount` 擦除。修公共电脑（控制台滚屏/窗口较小/CPU 满载）上出现「框只剩顶边 + 第二三行被第一行内容覆盖」的错位 |
 | v1.7.8 | 2026-11-20 | 修 image 块多解节点报 `Unknown feature`：`Solution` 数据集的 `solution` 只能绑单个解节点，改成按全局 `SolNum` 定位节点后取节点内序号；堆上限加 64GB 封顶（公共电脑几百 GB 内存时不会给到 300GB+） |
 | v1.7.9 | 2026-11-20 | 诊断补强：驱动每次启动打 `驱动版本=` 与 class 路径/修改时间（缺这行就是旧 class）、块失败打 FlException 全文与自己的栈帧、场图每步打阶段日志；`cli.ps1` 比对 class 里的版本串（`ExpectedDriverVersion`），不一致时启动前警告并写进 launch.txt；`update.ps1` 新增 `Repair-Driver`：版本不一致时用 COMSOL 自带 javac 自动重编 |
 
