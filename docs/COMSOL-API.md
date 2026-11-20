@@ -239,6 +239,9 @@ sol1 1-28, sol2 29-56, sol3 57-167, …   (按 model.sol().tags() 顺序，getSi
 - **二维轴范围**：`view="auto"` 时 COMSOL 把轴范围正好框到数据；手工 `viewscaletype=manual` + 显式 `xmin/xmax` 虽然读回值正确，但导出时仍按 1:1 等比例把轴撑大（画布窄、色标又占宽时尤其明显），数据会缩成中间一条。
 - **色标位置**：`legendpos` 是绘图组属性，`right` 为竖直贴右；两张竖图左右拼接时，左图留色标、右图 `colorlegend=off`，拼完色标正好落在中间。
 - **拼接与裁边**：COMSOL 一次导出只能指定一个 plot group，多面板只能导出后自己拼（驱动里 `stitchH` 用 `Graphics2D` 白底横拼；`cropWhite` 逐像素找非白 bbox 裁边）。拼接用 300 dpi 原图，别先缩放。
+- **栅格（v1.7.11）**：导出节点的 `grid` 就是三维那个坐标框 —— 设 `off` 时框线、刻度、数字一起消失（图很干净但没有比例信息）；`showgrid` 单独关不掉框线。所以驱动把 `grid` 做成 `image` 块的 `Grid` 字段（默认 `off`，要刻度就写 `Grid='on'`）。
+- **色标长度（v1.7.11）**：`legendpos=right` 时长条会跟画布等高，细长样品的色标自然比模型长一截；设 `legendpos=bottom` 后色标是横条、长度只跟画布宽有关，3D 图现在用它。
+- **域边界与网格线**：`PlotGroup3D/2D.edges="on"` 画的是单元边（网格）；`Grid` 关掉坐标框不影响它，所以三维可以「有结构轮廓、没有坐标框」。
 
 ## 8. 版本记录
 

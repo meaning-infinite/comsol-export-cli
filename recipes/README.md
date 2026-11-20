@@ -128,22 +128,22 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 
 `Params` 三种写法：`all`（默认，全部参数）/ `none` / `sim_xy,r`（指定名）。
 
-### image — 场图（一张三维 + 三张二维）
+### image — 场图（三维 1 张 + 二维 2 张）
 
 ```powershell
-@{ Type='image'; Name='field'; Expr='ewfd.normE'; Width='1200'; Edges='off' }
+@{ Type='image'; Name='field'; Expr='ewfd.Ex,ewfd.Ey'; Width='1200'; Edges='on'; Grid='off' }
 ```
 
-一次出三个文件（300 dpi，都带图题、色标、坐标轴刻度，默认画域边界线）：
+`Expr` 默认 `ewfd.Ex,ewfd.Ey`：**逗号分隔就逐分量各出一套图**（文件名带 `_Ex` / `_Ey`），一个 Expr 出一套三张：
 
 | 文件 | 内容 |
 |---|---|
-| `<名>_field_3d.png` | 三维默认视角（与 GUI 一致），三张互相垂直的切片（过几何中心），只留一条色标 |
-| `<名>_field_xy.png` | 正对 xy 面，横 x 纵 y |
-| `<名>_field_xz_zy.png` | 左 x-z、右 z-y 左右拼一张，顶部各带切面名，竖直色标在中间 |
+| `<名>_field_Ex_3d.png` | 三维默认视角，三张互相垂直切片（过几何中心），色标在下方、默认不画坐标框 |
+| `<名>_field_Ex_xy.png` | 正对 xy 面，横 x 纵 y |
+| `<名>_field_Ex_xz_zy.png` | 左 x-z、右 z-y 左右拼一张，顶部各带切面名，竖直色标在中间 |
 
 二维图按切面真实长宽比出图（`Height` 不写就自动算），不做拉伸。
-`Width` 是长边像素（上限 4096）；`Edges`（默认 `on`）画每个域的边界线；`Title` 空 = 「平面 + COMSOL 自动量名」。
+`Width` 是长边像素（上限 4096）；`Edges`（默认 `on`）画域边界线；`Grid`（默认 `off`）画三维坐标框；`Title` 空 = 「平面 + COMSOL 自动量名」。
 `SolNum`（默认 `1`）= 取第几个解：做「逐共振点各出一组场图」时，每个块填该共振点的解号即可。
 
 也可以走模块写法（推荐）：

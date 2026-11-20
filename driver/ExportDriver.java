@@ -97,7 +97,7 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.7.10";
+    static final String DRIVER_VERSION = "v1.7.11";
 
     static Path CURRENT_JOB_DIR = null;
     static Path LOG_FILE = null;
@@ -643,17 +643,38 @@ public class ExportDriver {
     }
 
     static void exportImage(Job j, int i) throws Exception {
+        // 场量用分量（Ex / Ey），不再用 normE 模值；逗号分隔则逐分量各出一套图
+        String exprs = j.block(i, "expr", "ewfd.Ex,ewfd.Ey").trim();
+        String[] list = exprs.split(",");
+        int n = 0;
+        for (String s : list) if (!s.trim().isEmpty()) n++;
+        int k = 0;
+        for (String s : list) {
+            String e = s.trim();
+            if (e.isEmpty()) continue;
+            String fileSfx = "", tagSfx = "";
+            if (n > 1) {
+                String shortName = e.substring(e.lastIndexOf('.') + 1);
+                fileSfx = "_" + shortName;
+                tagSfx = "_" + k;
+            }
+            exportImageOne(j, i, e, tagSfx, fileSfx);
+            k++;
+        }
+    }
+
+    static void exportImageOne(Job j, int i, String expr, String tagSfx, String fileSfx) throws Exception {
         String name = j.block(i, "name", "image");
-        String expr = j.block(i, "expr", "ewfd.normE").trim();
         String solnum = j.block(i, "solnum", "1").trim();
         String at = j.block(i, "at", "auto").trim();
         String edges = j.block(i, "edges", "on").trim();   // 默认画边：保留每个域的边界线
         String title = j.block(i, "title", "").trim();
+        GRID_ON = "on".equalsIgnoreCase(j.block(i, "grid", "off").trim());   // 默认不画栅格
 
         // 用切面自己的数据集（CutPlane）：解落在哪个数据集由它决定。
         // 之前把绘图组钉在 firstDataset（模型里第一个 Solution 数据集）上，周期结构模型里
         // 第一个数据集常常不是「研究1//解 1」，解号对不上就从窗口外裁剪，图全白。
-        String dsData = "ds_img_" + i;
+        String dsData = "ds_img_" + i + tagSfx;
         String[] pick = pickSol(j, solnum);
         String localSol = pick[1];
         log("[driver] 场图解 " + solnum + " → 解节点 " + pick[0] + " 第 " + localSol + " 个");
@@ -679,7 +700,7 @@ public class ExportDriver {
         }
 
         // 1) 三维默认视图：三个互相垂直的切片，一次看全
-        String tag3 = "pg_img3_" + i;
+        String tag3 = "pg_img3_" + i + tagSfx;
         if (!hasResult(j, tag3)) j.model.result().create(tag3, "PlotGroup3D");
         // 三维组必须给显式视图：新建的 PlotGroup3D 若沿用当前视图（常是二维视图），
         // 三维切片会被裁剪在可视范围外，导出成空白白图
@@ -696,6 +717,9 @@ public class ExportDriver {
             trySet(j.model.result(tag3).feature(c[0]), c[2], c[3]);
             j.model.result(tag3).feature(c[0]).set("expr", expr);
         }
+        // 色标放下方：竖排在右侧会拉得比模型长得多
+        trySet(j.model.result(tag3), "legendpos", "bottom");
+        // 坐标框（栅格）由 Grid 字段单独控制，这里受 Edges 控制的是域/单元边界线
         decorate(j.model.result(tag3), edges, "三维视图（三正交切片）", title, "");
         j.model.result(tag3).run();
         // 三个切片取对数范围不同会各画一条色标；统一到共同范围，只留一条
@@ -728,7 +752,7 @@ public class ExportDriver {
         int h3, ww3;
         if (asp3 >= 1) { h3 = (int) Math.round(Math.min(2400, Math.max(800, 900 * asp3))); ww3 = Math.max(700, (int) Math.round(h3 / asp3)); }
         else { ww3 = (int) Math.round(Math.min(2400, Math.max(800, 900 / Math.max(asp3, 0.05)))); h3 = Math.max(700, (int) Math.round(ww3 * asp3)); }
-        Path png3 = j.outdir.resolve(j.outname + "_" + name + "_3d.png");
+        Path png3 = j.outdir.resolve(j.outname + "_" + name + fileSfx + "_3d.png");
         exportPng(j, i, tag3, png3, ww3, h3);
         cropWhite(png3, 12);   // 画布按内容裁掉四周白边，不再被 4:3 硬比例撑出大片空白
         System.out.println("[driver] 写出 " + png3);
@@ -746,13 +770,13 @@ public class ExportDriver {
         for (String[] pl : planes) {
             String plane = pl[0], suffix = pl[1], caption = pl[2];
             double pos = "xy".equals(plane) ? zc : ("xz".equals(plane) ? yc : xc);
-            String dtag = "dsp2d_" + i + "_" + plane;
+            String dtag = "dsp2d_" + i + tagSfx + "_" + plane;
             if (!hasDataset(j, dtag)) j.model.result().dataset().create(dtag, "CutPlane");
             j.model.result().dataset(dtag).set("data", dsData);
             j.model.result().dataset(dtag).set("quickplane", plane);
             trySet(j.model.result().dataset(dtag), offsetKey(plane), Double.toString(pos));
 
-            String pg = "pg2d_" + i + "_" + plane;
+            String pg = "pg2d_" + i + tagSfx + "_" + plane;
             if (!hasResult(j, pg)) j.model.result().create(pg, "PlotGroup2D");
             j.model.result(pg).set("data", dtag);
             trySet(j.model.result(pg), "solnum", localSol);
@@ -772,7 +796,7 @@ public class ExportDriver {
             // 竖图太窄，标题带量名会折成三行，只用平面名
             applyTitle(j.model.result(pg), caption + " 切面",
                     px[1] > px[0] ? caption + " 切面" : title, "");
-            Path png2 = j.outdir.resolve(j.outname + "_" + name + suffix + ".png");
+            Path png2 = j.outdir.resolve(j.outname + "_" + name + fileSfx + suffix + ".png");
             // 竖图（xz/zy）右侧留一条竖直色标：两张拼起来后色标正好落在中间；
             // 画布宽度按实测绘图框自适应（色标会吃掉宽度，窄了纵轴会被 1:1 撑大）
             boolean wantLegend = !"yz".equals(plane);
@@ -793,7 +817,7 @@ public class ExportDriver {
         }
         // 把 x-z 与 z-y 两张竖图横拼成一张（左图带色标，色标落在两图中间）
         if (xzPng != null && zyPng != null) {
-            Path merged = j.outdir.resolve(j.outname + "_" + name + "_xz_zy.png");
+            Path merged = j.outdir.resolve(j.outname + "_" + name + fileSfx + "_xz_zy.png");
             stitchH(xzPng, zyPng, merged, 24);
             Files.deleteIfExists(xzPng);
             Files.deleteIfExists(zyPng);
@@ -1460,6 +1484,9 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         if (!title.isEmpty()) { try { j.model.result(tag).set("title", title); } catch (Exception ignore) { } }
     }
 
+    /** 三维是否画坐标框（栅格）；由 image 块的 Grid 字段控制，默认关 */
+    static boolean GRID_ON = false;
+
     static void exportPng(Job j, int i, String plotGroup, Path target) throws Exception {
         exportPng(j, i, plotGroup, target, 0, 0);
     }
@@ -1503,6 +1530,8 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         trySet(ex, "logo2d", "off");
         trySet(ex, "logo3d", "off");
         trySet(ex, "axisorientation", "off");
+        trySet(ex, "grid", GRID_ON ? "on" : "off");   // 三维坐标框/栅格，默认关
+        trySet(ex, "showgrid", "off");
         Path part = Paths.get(target.toString() + ".part.png");
         j.model.result().export(tag).set("pngfilename", part.toString().replace("\\", "/"));
         Files.createDirectories(target.getParent());
