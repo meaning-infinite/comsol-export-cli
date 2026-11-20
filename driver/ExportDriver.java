@@ -97,7 +97,7 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.7.12";
+    static final String DRIVER_VERSION = "v1.7.13";
 
     static Path CURRENT_JOB_DIR = null;
     static Path LOG_FILE = null;
@@ -650,6 +650,7 @@ public class ExportDriver {
         for (String s : list) if (!s.trim().isEmpty()) n++;
         int k = 0;
         java.util.List<Path[]> perComp = new java.util.ArrayList<>();
+        java.util.List<String> sfxList = new java.util.ArrayList<>();
         for (String s : list) {
             String e = s.trim();
             if (e.isEmpty()) continue;
@@ -660,22 +661,171 @@ public class ExportDriver {
                 tagSfx = "_" + k;
             }
             perComp.add(exportImageOne(j, i, e, tagSfx, fileSfx));
+            sfxList.add(tagSfx);
             k++;
         }
-        // 六张（或三张）拼成一张总图：列 = 分量，行 = 三维 / xy / xz+zy
-        if (perComp.size() >= 1) {
-            int rowN = 3;
-            java.util.List<Path[]> rows = new java.util.ArrayList<>();
-            for (int r = 0; r < rowN; r++) {
-                Path[] line = new Path[perComp.size()];
-                for (int c = 0; c < perComp.size(); c++) line[c] = perComp.get(c)[r];
-                rows.add(line);
-            }
+        // 拼版：每个分量一块 —— 左边三维，右边上 xy、下 xz 与 zy 均分（用户指定）
+        if (!perComp.isEmpty()) {
+            java.util.List<String> labels = new java.util.ArrayList<>();
+            for (String s : list) { String e = s.trim(); if (!e.isEmpty()) labels.add(e); }
             String name0 = j.block(i, "name", "image");
             Path all = j.outdir.resolve(j.outname + "_" + name0 + "_all.png");
-            stitchGrid(rows, all, 30);
-            System.out.println("[driver] 写出 " + all + "（" + perComp.size() + " 列 × " + rowN + " 行拼图）");
+            composeFieldSheet(perComp, labels, sfxList, i, all);
+            System.out.println("[driver] 写出 " + all + "（" + perComp.size() + " 个分量并排）");
         }
+    }
+
+    /** 场图总表：每个分量一块 —— 左边三维，右边上 xy、下 xz 与 zy 均分；
+     *  二维只取场本身，坐标轴与色标由这里自己画（COMSOL 的框去不掉）。 */
+    static void composeFieldSheet(java.util.List<Path[]> comps, java.util.List<String> labels,
+                                  java.util.List<String> sfx, int i, Path out) throws Exception {
+        final int H3 = 1500, HXY = 900, HSD = 2400, GAP = 90, PAD = 110, TITLE = 80;
+        final int AXM = 90, CBM = 130;
+        java.util.List<java.awt.image.BufferedImage[]> imgs = new java.util.ArrayList<>();
+        int w3 = 0;
+        for (Path[] c : comps) {
+            java.awt.image.BufferedImage a = scaledTo(c[0], H3);
+            java.awt.image.BufferedImage b = scaledTo(c[1], HXY);
+            java.awt.image.BufferedImage d = scaledTo(c[2], HSD);
+            java.awt.image.BufferedImage e = scaledTo(c[3], HSD);
+            imgs.add(new java.awt.image.BufferedImage[] { a, b, d, e });
+            w3 = Math.max(w3, a.getWidth());
+        }
+        int xyCell = AXM + HXY + CBM;
+        int sdCell = 0;
+        for (java.awt.image.BufferedImage[] im : imgs) sdCell = Math.max(sdCell, AXM + im[2].getWidth() + CBM);
+        int rightW = Math.max(xyCell, sdCell * 2 + GAP);
+        int blockW = w3 + GAP + rightW;
+        int blockH = TITLE + HXY + GAP * 2 + HSD;
+        int W = PAD * 2 + comps.size() * blockW + Math.max(0, comps.size() - 1) * GAP * 2;
+        int H = PAD * 2 + blockH;
+        java.awt.image.BufferedImage sheet = new java.awt.image.BufferedImage(W, H, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = sheet.createGraphics();
+        g.setRenderingHint(java.awt.RenderingHints.KEY_TEXT_ANTIALIASING, java.awt.RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setColor(java.awt.Color.WHITE);
+        g.fillRect(0, 0, W, H);
+        java.awt.Font fTitle = new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, 46);
+        java.awt.Font fNum = new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, 26);
+        int[] ramp = sampleRamp(imgs.get(0)[0]);
+        for (int idx = 0; idx < comps.size(); idx++) {
+            int x0 = PAD + idx * (blockW + GAP * 2);
+            java.awt.image.BufferedImage[] im = imgs.get(idx);
+            String sf = sfx.get(idx);
+            g.setColor(new java.awt.Color(25, 25, 25));
+            g.setFont(fTitle);
+            g.drawString(labels.size() > idx ? labels.get(idx) : "", x0, PAD + 36);
+            int y = PAD + TITLE + 46;
+            g.setFont(fNum);
+            g.setColor(new java.awt.Color(60, 60, 60));
+            g.drawString("三维", x0, y - 16);
+            g.drawImage(im[0], x0, y, null);                    // 三维（自带色标，在下方）
+            int px = x0 + w3 + GAP + AXM;
+            g.drawString("x-y", px, y - 16);
+            drawPanel(g, im[1], px, y, YAX.get(i + "|" + sf + "|xy"), RNG.get(i + "|" + sf + "|xy"), ramp, fNum);
+            int y2 = y + HXY + GAP * 2;
+            int cell2 = sdCell * 2 + GAP;
+            int sideX = x0 + w3 + GAP + AXM + Math.max(0, (HXY + CBM - cell2) / 2);
+            g.drawString("x-z", sideX + AXM, y2 - 16);
+            drawPanel(g, im[2], sideX + AXM, y2, YAX.get(i + "|" + sf + "|xz"), RNG.get(i + "|" + sf + "|xz"), ramp, fNum);
+            g.drawString("z-y", sideX + sdCell + GAP + AXM, y2 - 16);
+            drawPanel(g, im[3], sideX + sdCell + GAP + AXM, y2, YAX.get(i + "|" + sf + "|yz"), RNG.get(i + "|" + sf + "|yz"), ramp, fNum);
+        }
+        g.dispose();
+        javax.imageio.ImageIO.write(sheet, "png", out.toFile());
+    }
+
+    /** 一个二维面板：贴场 + 左边一条竖轴（刻度与数字）+ 右侧竖色标 */
+    static void drawPanel(java.awt.Graphics2D g, java.awt.image.BufferedImage im, int x, int y,
+                          double[] yax, double[] rng, int[] ramp, java.awt.Font f) {
+        int w = im.getWidth(), h = im.getHeight();
+        g.drawImage(im, x, y, null);
+        int axisX = x - 14;
+        g.setColor(new java.awt.Color(70, 70, 70));
+        g.drawLine(axisX, y, axisX, y + h - 1);
+        if (yax != null) {
+            for (int k = 0; k <= 4; k++) {
+                double val = yax[1] - (yax[1] - yax[0]) * k / 4.0;
+                int ty = y + (int) Math.round(h * k / 4.0);
+                if (ty > y + h - 1) ty = y + h - 1;
+                g.drawLine(axisX - 8, ty, axisX, ty);
+                String s = fmt(val);
+                int sw = g.getFontMetrics(f).stringWidth(s);
+                g.setColor(new java.awt.Color(35, 35, 35));
+                g.setFont(f);
+                g.drawString(s, axisX - 12 - sw, ty + 9);
+                g.setColor(new java.awt.Color(70, 70, 70));
+            }
+        }
+        if (rng != null && ramp != null) {
+            int bw = 20, bh = (int) (h * 0.62), bx = x + w + 34, by = y + (h - bh) / 2;
+            for (int k = 0; k < bh; k++) {
+                int ci = (int) Math.round((bh - 1 - k) * (ramp.length - 1) / (double) (bh - 1));
+                g.setColor(new java.awt.Color(ramp[ci] | 0xFF000000, true));
+                g.fillRect(bx, by + k, bw, 1);
+            }
+            g.setColor(new java.awt.Color(70, 70, 70));
+            g.drawRect(bx, by, bw, bh);
+            double span = Math.abs(rng[1] - rng[0]);
+            int e = rng[1] == 0 || span == 0 ? 0 : (int) Math.floor(Math.log10(Math.max(Math.abs(rng[0]), Math.abs(rng[1]))));
+            double sc = Math.pow(10, e);
+            g.setFont(f);
+            String hi = fmt(rng[1] / sc), lo = fmt(rng[0] / sc);
+            g.drawString(hi, bx + bw + 10, by + 10);
+            g.drawString(lo, bx + bw + 10, by + bh);
+            g.drawString("×10^" + e, bx, by - 14);
+        }
+    }
+
+    static String fmt(double v) {
+        double a = Math.abs(v);
+        if (a != 0 && (a < 0.001 || a >= 10000)) return String.format(java.util.Locale.ROOT, "%.2e", v);
+        if (Math.abs(v - Math.rint(v)) < 1e-6) return String.format(java.util.Locale.ROOT, "%.0f", v);
+        return String.format(java.util.Locale.ROOT, "%.2f", v);
+    }
+
+    /** 从三维图里那条横向色标采样颜色，得到 0..1 的色带（COMSOL 自己的配色） */
+    static int[] sampleRamp(java.awt.image.BufferedImage im) {
+        int[] def = new int[] { 0x3b4cc0, 0x2fa8e0, 0x59d3c0, 0xa8e05f, 0xf6d743, 0xf08a3e, 0xc62828 };
+        try {
+            int w = im.getWidth(), h = im.getHeight();
+            int bestY = -1, bestRun = 0, bestX = -1;
+            for (int y = h - 1; y >= Math.max(0, h - 260); y--) {
+                int run = 0, x0 = -1, bestLocal = 0, localX = -1;
+                for (int x = 0; x < w; x++) {
+                    int rgb = im.getRGB(x, y);
+                    int r = (rgb >> 16) & 255, gg = (rgb >> 8) & 255, b = rgb & 255;
+                    int mx = Math.max(r, Math.max(gg, b)), mn = Math.min(r, Math.min(gg, b));
+                    boolean sat = mx > 60 && (mx - mn) > 40;
+                    if (sat) { if (run == 0) x0 = x; run++; if (run > bestLocal) { bestLocal = run; localX = x0; } }
+                    else run = 0;
+                }
+                if (bestLocal > bestRun) { bestRun = bestLocal; bestY = y; bestX = localX; }
+            }
+            if (bestY < 0 || bestRun < 40) return def;
+            int[] ramp = new int[64];
+            for (int k = 0; k < 64; k++) {
+                int x = bestX + (int) Math.round(k * (bestRun - 1) / 63.0);
+                ramp[k] = im.getRGB(x, bestY) & 0xFFFFFF;
+            }
+            return ramp;
+        } catch (Exception e) {
+            return def;
+        }
+    }
+
+    /** 按目标高度等比缩放（保持宽高比） */
+    static java.awt.image.BufferedImage scaledTo(Path p, int h) throws Exception {
+        java.awt.image.BufferedImage im = javax.imageio.ImageIO.read(p.toFile());
+        if (im == null) return new java.awt.image.BufferedImage(1, h, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        int w = Math.max(1, (int) Math.round(im.getWidth() * (double) h / im.getHeight()));
+        java.awt.image.BufferedImage o = new java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = o.createGraphics();
+        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.drawImage(im, 0, 0, w, h, null);
+        g.dispose();
+        return o;
     }
 
     static Path[] exportImageOne(Job j, int i, String expr, String tagSfx, String fileSfx) throws Exception {
@@ -826,23 +976,26 @@ public class ExportDriver {
             int hPx = px[1];
             int wPx = (int) Math.round(hPx * (spX / spY)) + (wantLegend ? 380 : 150);
             wPx = Math.max(200, Math.min(4096, wPx));
-            exportPng(j, i, pg, png2, wPx, hPx, wantLegend);
+            exportPng(j, i, pg, png2, wPx, hPx, false, true);   // 二维只导场，装饰由拼版时自己画
+            // 记下该面的数值范围与纵轴范围，拼版时用来画色标与刻度
+            String rk = i + "|" + tagSfx + "|" + plane;
+            String rr = tryGetString(j.model.result(pg).feature("surf1"), "rangeactualminmax");
+            if (rr != null && rr.indexOf(',') > 0) {
+                try {
+                    RNG.put(rk, new double[] { Double.parseDouble(rr.substring(0, rr.indexOf(',')).trim()),
+                            Double.parseDouble(rr.substring(rr.indexOf(',') + 1).trim()) });
+                } catch (NumberFormatException ignore) { }
+            }
+            if ("xy".equals(plane)) YAX.put(rk, new double[] { bb[2], bb[3] });
+            else if ("xz".equals(plane)) YAX.put(rk, new double[] { bb[4], bb[5] });
+            else YAX.put(rk, new double[] { bb[4], bb[5] });
             cropWhite(png2, 10);
-            trimFrame(png2, 10);
+            stripBox(png2);   // 去掉 COMSOL 那个包住模型的框线，保留左侧刻度数字与右侧色标
             if ("xz".equals(plane)) xzPng = png2;
             else if ("yz".equals(plane)) zyPng = png2;
             else { xyPng = png2; System.out.println("[driver] 写出 " + png2); }
         }
-        // 把 x-z 与 z-y 两张竖图横拼成一张（左图带色标，色标落在两图中间）
-        if (xzPng != null && zyPng != null) {
-            Path merged = j.outdir.resolve(j.outname + "_" + name + fileSfx + "_xz_zy.png");
-            stitchH(xzPng, zyPng, merged, 24);
-            Files.deleteIfExists(xzPng);
-            Files.deleteIfExists(zyPng);
-            System.out.println("[driver] 写出 " + merged + "（x-z + z-y 合并）");
-            return new Path[] { png3, xyPng, merged };
-        }
-        return new Path[] { png3, xyPng, null };
+        return new Path[] { png3, xyPng, xzPng, zyPng };
     }
 
     // 二维正投影用哪个视图：二维绘图组必须挂一个 ResultView2D。
@@ -1507,6 +1660,10 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
     /** 三维是否画坐标框（栅格）；由 image 块的 Grid 字段控制，默认关 */
     static boolean GRID_ON = false;
 
+    /** 二维面数值范围与纵轴范围：key = 块号|分量后缀|平面 */
+    static final java.util.Map<String, double[]> RNG = new java.util.HashMap<>();
+    static final java.util.Map<String, double[]> YAX = new java.util.HashMap<>();
+
     static void exportPng(Job j, int i, String plotGroup, Path target) throws Exception {
         exportPng(j, i, plotGroup, target, 0, 0);
     }
@@ -1516,6 +1673,10 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
     }
 
     static void exportPng(Job j, int i, String plotGroup, Path target, int w, int h, boolean legend) throws Exception {
+        exportPng(j, i, plotGroup, target, w, h, legend, false);
+    }
+
+    static void exportPng(Job j, int i, String plotGroup, Path target, int w, int h, boolean legend, boolean plain) throws Exception {
         String tag = "img_" + i + "_" + Math.abs((plotGroup + target.toString()).hashCode() % 1000000);
         if (!Arrays.asList(j.model.result().export().tags()).contains(tag)) {
             j.model.result().export().create(tag, "Image");
@@ -1537,11 +1698,11 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         // 图题/色标/坐标轴的总闸在导出节点上；绘图组里那些开关不参与导出渲染
         Object ex = j.model.result().export(tag);
         trySet(ex, "options1d", "on");
-        trySet(ex, "options2d", "on");
+        trySet(ex, "options2d", plain ? "off" : "on");   // plain = 只要场，COMSOL 的框/刻度/色标/标题一概不画
         trySet(ex, "options3d", "on");
         trySet(ex, "title1d", "on");
         trySet(ex, "title2d", "on");
-        trySet(ex, "title3d", "on");
+        trySet(ex, "title3d", "off");   // 三维的标题由拼版自己写
         trySet(ex, "legend1d", "on");
         trySet(ex, "legend2d", legend ? "on" : "off");
         trySet(ex, "legend3d", legend ? "on" : "off");
@@ -1559,17 +1720,49 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         Files.move(part, target, StandardCopyOption.REPLACE_EXISTING);
     }
 
-    /** 去掉 COMSOL 那个把模型包起来的方框：只裁上/右/下三边（连刻度一起），保留左边那条轴 */
-    static void trimFrame(Path png, int pad) {
+    /** 把 COMSOL 二维图里那个包住模型的方框拆掉：左右保留（左侧刻度数字、右侧色标），
+     *  只把框线本身和框内侧的刻度桩去掉，再重新拼成一张无框的图。 */
+    static void stripBox(Path png) {
         try {
             java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(png.toFile());
             if (img == null) return;
             int w = img.getWidth(), h = img.getHeight();
-            if (w < 4 * pad || h < 4 * pad) return;
-            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(
-                    w - pad, h - 2 * pad, java.awt.image.BufferedImage.TYPE_INT_RGB);
+            boolean[] darkRow = new boolean[h], darkCol = new boolean[w];
+            int[] rowCnt = new int[h], colCnt = new int[w];
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+                int rgb = img.getRGB(x, y);
+                int r = (rgb >> 16) & 255, gg = (rgb >> 8) & 255, b = rgb & 255;
+                if (r < 140 && gg < 140 && b < 140) { rowCnt[y]++; colCnt[x]++; }
+            }
+            for (int y = 0; y < h; y++) darkRow[y] = rowCnt[y] > w * 0.45;
+            for (int x = 0; x < w; x++) darkCol[x] = colCnt[x] > h * 0.45;
+            int top = -1, bottom = -1, left = -1, right = -1;
+            for (int y = 0; y < h; y++) if (darkRow[y]) { if (top < 0) top = y; bottom = y; }
+            // 只取最主要的一对竖线（最左、色标左侧那根）：右侧色标也会形成长竖线，取比它靠左的最后一根
+            int leftLine = -1, rightLine = -1;
+            for (int x = 0; x < w; x++) if (darkCol[x]) { if (leftLine < 0) leftLine = x; else rightLine = x; }
+            if (top < 0 || leftLine < 0 || rightLine <= leftLine) return;
+            int inset = 8;
+            int x0 = leftLine + inset, x1 = rightLine - inset, y0 = top + inset, y1 = bottom - inset;
+            if (x1 - x0 < 20 || y1 - y0 < 20) return;
+            java.awt.image.BufferedImage title = img.getSubimage(0, 0, w, Math.max(1, top));
+            java.awt.image.BufferedImage leftBand = img.getSubimage(0, top, Math.max(1, leftLine), bottom - top + 1);
+            java.awt.image.BufferedImage field = img.getSubimage(x0, y0, x1 - x0, y1 - y0);
+            java.awt.image.BufferedImage rightBand = img.getSubimage(rightLine + 1, top, Math.max(1, w - rightLine - 1), bottom - top + 1);
+            java.awt.image.BufferedImage foot = bottom + 1 < h
+                    ? img.getSubimage(0, bottom + 1, w, h - bottom - 1) : null;
+            int outW = leftBand.getWidth() + field.getWidth() + rightBand.getWidth();
+            int outH = title.getHeight() + field.getHeight() + (foot == null ? 0 : foot.getHeight());
+            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(outW, outH, java.awt.image.BufferedImage.TYPE_INT_RGB);
             java.awt.Graphics2D g = out.createGraphics();
-            g.drawImage(img, 0, 0, w - pad, h - 2 * pad, 0, pad, w - pad, h - pad, null);
+            g.setColor(java.awt.Color.WHITE);
+            g.fillRect(0, 0, outW, outH);
+            g.drawImage(title, (outW - title.getWidth()) / 2, 0, null);
+            int y = title.getHeight();
+            g.drawImage(leftBand, 0, y, null);
+            g.drawImage(field, leftBand.getWidth(), y, null);
+            g.drawImage(rightBand, leftBand.getWidth() + field.getWidth(), y, null);
+            if (foot != null) g.drawImage(foot, leftBand.getWidth(), y + field.getHeight(), null);
             g.dispose();
             javax.imageio.ImageIO.write(out, "png", png.toFile());
         } catch (Exception ignore) { }

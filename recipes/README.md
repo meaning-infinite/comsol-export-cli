@@ -138,10 +138,11 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 
 | 文件 | 内容 |
 |---|---|
-| `<名>_field_Ex_3d.png` | 三维默认视角，三张互相垂直切片（过几何中心），色标在下方、默认不画坐标框 |
+| `<名>_field_Ex_3d.png` | 三维默认视角，三张互相垂直切片，色标在下方、不画坐标框 |
 | `<名>_field_Ex_xy.png` | 正对 xy 面，横 x 纵 y |
-| `<名>_field_Ex_xz_zy.png` | 左 x-z、右 z-y 左右拼一张，顶部各带切面名，竖直色标在中间 |
-| `<名>_field_all.png` | 各分量的上述三张拼成一张总图（列 = 分量，行 = 三维/xy/xz+zy），原分辨率 |
+| `<名>_field_Ex_xz.png` / `_zy.png` | x-z / z-y 竖切面各一张 |
+| `<名>_field_all.png` | 总表：每分量一块（三维｜x-y 上、x-z/z-y 下），二维自己画竖轴与竖色标 |
+
 
 二维图按切面真实长宽比出图（`Height` 不写就自动算），不做拉伸。
 `Width` 是长边像素（上限 4096）；`Edges`（默认 `on`）画域边界线；`Grid`（默认 `off`）画三维坐标框；`Title` 空 = 「平面 + COMSOL 自动量名」。
