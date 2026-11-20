@@ -25,7 +25,7 @@ public class ExportDriver {
     static class Job {
         Map<String, String> p;
         Path jobDir, outdir, modelsDir;
-        String outname, dataset, study;
+        String outname, dataset, datasetTag, study;
         int blocks;
         Model model;
         String[] pnames = new String[0];
@@ -211,7 +211,11 @@ public class ExportDriver {
             }
             Files.write(mkExporting, "ok".getBytes(StandardCharsets.UTF_8));
 
-            j.dataset = firstDataset(model);
+            j.datasetTag = j.p.getOrDefault("solution", "").trim();
+            if (j.datasetTag.isEmpty() || !hasDataset(j, j.datasetTag)) j.datasetTag = resolveDataset(model, j.study);
+            j.dataset = j.datasetTag;
+            System.out.println("[driver] 数据集: " + j.datasetTag
+                    + "（" + model.result().dataset(j.datasetTag).getType() + "）");
             j.pnames = studyParamNames(model, j.study);
             if (j.pnames.length > 0) {
                 System.out.println("[driver] 参数化扫描变量: " + String.join(", ", j.pnames));
@@ -564,6 +568,38 @@ public class ExportDriver {
     // expr（默认 ewfd.normE）、solnum（默认 1）、at（切面位置，默认 auto=几何中心）、
     // plane（at 作用在哪个面上，兼容旧配方，默认 xy）、edges（on|off，默认 off）、
     // width/height（像素，默认 800x600）、title（图题后缀）
+    // image 块的 SolNum 是「全部解里的第几个」（与 CSV 的行序一致），
+    // 但 Solution 数据集的 solution 属性一次只能绑一个解节点（合法值就是 sol1…solN），
+    // 解号只能在该节点内数。所以这里把全局解号翻成 (解节点, 节点内序号)。
+    static String[] pickSol(Job j, String solnum) throws Exception {
+        int want;
+        try {
+            want = Integer.parseInt(solnum.trim());
+        } catch (NumberFormatException e) {
+            throw new Exception("SolNum 不是整数: " + solnum);
+        }
+        if (want <= 0) throw new Exception("SolNum 必须从 1 开始，收到 " + want);
+        List<SolUse> sols = j.sols;
+        if (sols.isEmpty()) {
+            sols = new ArrayList<SolUse>();
+            for (String tag : j.model.sol().tags()) {
+                SolUse s = new SolUse();
+                s.tag = tag;
+                try { s.n = j.model.sol(tag).getSize()[1]; } catch (Exception ignore) { }
+                sols.add(s);
+            }
+        }
+        int acc = 0;
+        StringBuilder ranges = new StringBuilder();
+        for (SolUse s : sols) {
+            if (s.n <= 0) continue;
+            if (want > acc && want <= acc + s.n) return new String[] { s.tag, Integer.toString(want - acc) };
+            acc += s.n;
+            ranges.append(ranges.length() == 0 ? "" : "，").append(s.tag).append(" 1-").append(acc);
+        }
+        throw new Exception("SolNum " + want + " 超出范围（共 " + acc + " 个解；" + ranges + "）");
+    }
+
     static void exportImage(Job j, int i) throws Exception {
         String name = j.block(i, "name", "image");
         String expr = j.block(i, "expr", "ewfd.normE").trim();
@@ -571,6 +607,17 @@ public class ExportDriver {
         String at = j.block(i, "at", "auto").trim();
         String edges = j.block(i, "edges", "off").trim();
         String title = j.block(i, "title", "").trim();
+
+        // 用切面自己的数据集（CutPlane）：解落在哪个数据集由它决定。
+        // 之前把绘图组钉在 firstDataset（模型里第一个 Solution 数据集）上，周期结构模型里
+        // 第一个数据集常常不是「研究1//解 1」，解号对不上就从窗口外裁剪，图全白。
+        String dsData = "ds_img_" + i;
+        String[] pick = pickSol(j, solnum);
+        String localSol = pick[1];
+        if (hasDataset(j, dsData)) j.model.result().dataset().remove(dsData);
+        j.model.result().dataset().create(dsData, "Solution");
+        j.model.result().dataset(dsData).set("solution", pick[0]);
+        System.out.println("[driver] 场图解 " + solnum + " → 解节点 " + pick[0] + " 第 " + localSol + " 个");
 
         double[] bb = bbox6(j);
         double zc = (bb[4] + bb[5]) / 2, yc = (bb[2] + bb[3]) / 2, xc = (bb[0] + bb[1]) / 2;
@@ -587,8 +634,12 @@ public class ExportDriver {
         // 1) 三维默认视图：三个互相垂直的切片，一次看全
         String tag3 = "pg_img3_" + i;
         if (!hasResult(j, tag3)) j.model.result().create(tag3, "PlotGroup3D");
-        j.model.result(tag3).set("data", j.dataset);
-        trySet(j.model.result(tag3), "solnum", solnum);
+        // 三维组必须给显式视图：新建的 PlotGroup3D 若沿用当前视图（常是二维视图），
+        // 三维切片会被裁剪在可视范围外，导出成空白白图
+        String v3 = view3d(j);
+        if (!v3.isEmpty()) trySet(j.model.result(tag3), "view", v3);
+        j.model.result(tag3).set("data", dsData);
+        trySet(j.model.result(tag3), "solnum", localSol);
         String[][] cuts = {
                 { "sli1", "xy", "quickz", Double.toString(zc) },
                 { "sli2", "zx", "quicky", Double.toString(yc) },
@@ -626,10 +677,12 @@ public class ExportDriver {
         exportPng(j, i, tag3, png3);
         System.out.println("[driver] 写出 " + png3);
 
+        String v2 = "";   // 第一次 run 之后按绘图组挑现成的二维视图
         // 2) 三个二维正投影：CutPlane 数据集 + 2D 绘图组，正对着看
-        String v2 = "";   // 第一次循环里按绘图组挑现成的二维视图
         int pxW = Integer.parseInt(j.block(i, "width", "1200").trim());
         int pxH = Integer.parseInt(j.block(i, "height", "0").trim());   // 0 = 按切面真实长宽比算高度
+        if (pxW <= 0) pxW = 1200;
+        if (pxH < 0) pxH = 0;
         // 真实比例出图：不做任何拉伸（二维视图保持 1:1）
         String[][] planes = {
                 { "xy", "_xy", "XY" }, { "xz", "_xz", "XZ" }, { "yz", "_zy", "ZY" } };
@@ -638,21 +691,24 @@ public class ExportDriver {
             double pos = "xy".equals(plane) ? zc : ("xz".equals(plane) ? yc : xc);
             String dtag = "dsp2d_" + i + "_" + plane;
             if (!hasDataset(j, dtag)) j.model.result().dataset().create(dtag, "CutPlane");
-            j.model.result().dataset(dtag).set("data", j.dataset);
+            j.model.result().dataset(dtag).set("data", dsData);
             j.model.result().dataset(dtag).set("quickplane", plane);
             trySet(j.model.result().dataset(dtag), offsetKey(plane), Double.toString(pos));
 
             String pg = "pg2d_" + i + "_" + plane;
             if (!hasResult(j, pg)) j.model.result().create(pg, "PlotGroup2D");
             j.model.result(pg).set("data", dtag);
-            trySet(j.model.result(pg), "solnum", solnum);
+            trySet(j.model.result(pg), "solnum", localSol);
             int[] px = canvasSize(pxW, pxH, plane, bb);
             // 竖图（细长截面）把色标挪到下方：右侧色标会吃掉本就只有几百像素的宽度，
             // COMSOL 为保 1:1 会把纵轴撑大，数据只剩中间一条
             if (px[1] > px[0]) trySet(j.model.result(pg), "legendpos", "bottom");
             if (!hasResultFeature(j, pg, "surf1")) j.model.result(pg).create("surf1", "Surface");
             j.model.result(pg).feature("surf1").set("expr", expr);
+            // 二维视图必须在 run() 之后才出现在 view 合法值里；先 run 再挑视图、设轴范围、再 run
+            j.model.result(pg).run();
             if (v2.isEmpty()) v2 = pick2dView(j, pg);
+            if (v2.isEmpty()) v2 = view2d(j);
             if (!v2.isEmpty()) {
                 trySet(j.model.result(pg), "view", v2);
                 setViewLimits(j, v2, plane, bb);
@@ -668,7 +724,38 @@ public class ExportDriver {
         }
     }
 
-    // 挑一个现成的二维结果视图：从绘图组 view 的合法值里拿（auto/new 之外的那个）
+    // 二维正投影用哪个视图：二维绘图组必须挂一个 ResultView2D。
+    // 直接 set("view","auto") 不行——导出时 auto 会退回到三维视图，切开的三维视图在二维组里
+    // 只剩一条无限细的线（实测导出的图整张空白）。所以模型里没有就自己建一个。
+    static String view2d(Job j) {
+        try {
+            for (String v : j.model.view().tags()) {
+                String t = j.model.view(v).getType();
+                if (t != null && t.contains("ResultView2D")) return v;
+            }
+            String tag = "view2d_export";
+            if (!Arrays.asList(j.model.view().tags()).contains(tag)) j.model.view().create(tag, "View2D");
+            return tag;
+        } catch (Exception e) {
+            System.out.println("[driver] 警告: 建二维视图失败（" + e.getMessage() + "），用 auto");
+            return "";
+        }
+    }
+
+    // 三维切片图用哪个视图：优先现成的三维视图，没有就建一个
+    static String view3d(Job j) {
+        try {
+            for (String v : j.model.view().tags()) {
+                String t = j.model.view(v).getType();
+                if (t != null && t.contains("ModelView3D")) return v;
+            }
+            String tag = "view3d_export";
+            if (!Arrays.asList(j.model.view().tags()).contains(tag)) j.model.view().create(tag, "ModelView3D");
+            return tag;
+        } catch (Exception ignore) { }
+        return "";
+    }
+
     static String pick2dView(Job j, String group) {
         try {
             Object grp = j.model.result(group);
@@ -1273,8 +1360,8 @@ public class ExportDriver {
             trySet(j.model.result().export(tag), "fontsize",
                     Integer.toString(Math.max(3, Math.min(9, fs))));
         }
-        j.model.result().export(tag).set("width", w > 0 ? Integer.toString(w) : j.block(i, "width", "1200").trim());
-        j.model.result().export(tag).set("height", h > 0 ? Integer.toString(h) : j.block(i, "height", "900").trim());
+        j.model.result().export(tag).set("width", w > 0 ? Integer.toString(w) : Integer.toString(Math.max(1, pxOf(j, i, "width", 1200))));
+        j.model.result().export(tag).set("height", h > 0 ? Integer.toString(h) : Integer.toString(Math.max(1, pxOf(j, i, "height", 900))));
         // 图题/色标/坐标轴的总闸在导出节点上；绘图组里那些开关不参与导出渲染
         Object ex = j.model.result().export(tag);
         trySet(ex, "options1d", "on");
@@ -1291,6 +1378,17 @@ public class ExportDriver {
         Files.createDirectories(target.getParent());
         j.model.result().export(tag).run();
         Files.move(part, target, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    // 导出尺寸：height=0 在配方里是「按切面长宽比自动算」，但导出节点要求宽高都 > 0
+    // （COMSOL 6.4 直接报 属性值无效 - 高度 x > 0），所以 0 一律换回一个正数
+    static int pxOf(Job j, int i, String key, int def) {
+        try {
+            int v = Integer.parseInt(j.block(i, key, Integer.toString(def)).trim());
+            return v > 0 ? v : def;
+        } catch (Exception e) {
+            return def;
+        }
     }
 
     static Path csvTarget(Job j, int i, String name) {
@@ -1339,10 +1437,33 @@ public class ExportDriver {
         return tags[0];
     }
 
+    // 取「第一个可用数据集」并写回 tag：光有 tag 不够用。
+    // 模型的第一个数据集往往不是「<研究>//解 1」（也可能是 CutPlane / 已失效的 Solution），
+    // 直接拿来建二维切面数据集就是「数据集类型无效」，图整张空白。
+    // 优先：该研究的解数据集 → Solution 型 → 第一个；都没有就自己建一个 Solution 绑到 sol1。
     static String firstDataset(Model model) {
+        return resolveDataset(model, null);
+    }
+
+    static String resolveDataset(Model model, String study) {
         String[] ds = model.result().dataset().tags();
-        if (ds.length == 0) { System.err.println("模型里没有数据集（研究可能没有求解）"); finish(CURRENT_JOB_DIR, 4); }
-        return ds[0];
+        List<String> cand = new ArrayList<>();
+        if (study != null && !study.isEmpty()) {
+            for (String t : ds) {
+                try {
+                    String on = model.result().dataset(t).getString("solution");
+                    if (on != null && !on.isEmpty()) cand.add(t);
+                } catch (Exception ignore) { }
+            }
+        }
+        List<String> src = cand.isEmpty() ? Arrays.asList(ds) : cand;
+        for (String t : src) {
+            if ("Solution".equalsIgnoreCase(model.result().dataset(t).getType())) return t;
+        }
+        if (!src.isEmpty()) return src.get(0);
+        String tag = "dset_export";
+        if (!Arrays.asList(ds).contains(tag)) model.result().dataset().create(tag, "Solution");
+        return tag;
     }
 
     static String[] split(String s) {

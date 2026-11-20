@@ -202,6 +202,25 @@ com.comsol.util.exceptions.UnknownEntityException: 未知解。
 - **`quickplane` 六个值**：`xy, yz, zx, yx, zy, xz`。`zx` 是横 z 纵 x（横图），`xz` 是横 x 纵 z（竖图），`yz` 是横 y 纵 z（竖图）。
 - **色标位置**：`PlotGroup2D.legendpos` 合法值 `alternating | bottom | left | leftdouble | right | rightdouble`。细长竖图用 `bottom`：右侧色标会吃掉本就只有几百像素的宽度，COMSOL 为保 1:1 把纵轴撑大，数据只剩中间一条。
 
+### 11.5 多解节点下的「解号」（2026-11-20 实测，v1.7.8）
+
+`Solution` 数据集的 `solution` 属性**一次只能绑一个解节点**：`getAllowedPropertyValues("solution")` 返回的就是 `none, sol1, sol2, …`。
+
+| 写法 | 结果 |
+|---|---|
+| `set("solution", "all")` | `FlException: 未知特征。- 标记: all` |
+| `set("solution", "dset1")` | `FlException: 未知特征。- 标记: dset1`（把数据集 tag 当解 tag 用） |
+| `set("solution", "sol1, sol2")` | 同上，不接受列表 |
+| `set("solution", "sol2")` | 成功，`getString` 读回 `sol2` |
+
+因此「全部解里的第 N 个」必须先定位到解节点，再在该节点内数序号：
+
+```
+sol1 1-28, sol2 29-56, sol3 57-167, …   (按 model.sol().tags() 顺序，getSize()[1] 为各节点解数)
+```
+
+驱动里对应 `pickSol(job, solnum)`：按 `j.sols` 累加找节点，返回 `{节点 tag, 节点内序号}`；绘图组的 `solnum` 用**节点内序号**，日志打 `场图解 N → 解节点 solX 第 M 个`。若直接拿全局 N 去设 `solnum`，超出该节点解数就报解号无效或图空白。
+
 ## 10. 版本记录（续）
 
 | 日期 | 版本 | 内容 |
@@ -209,6 +228,7 @@ com.comsol.util.exceptions.UnknownEntityException: 未知解。
 | 2026-11-19 | — | 补第 9 节：`createAutoSequences` 报 `未知解。- 标记: all` 的复现矩阵与修法 |
 | 2026-11-20 | v1.7.5 | 补第 11 节：场图装饰总闸（`optionsNd`）、CutPlane 偏移单位、二维坐标映射、等比例/拉伸、色标合并 |
 | 2026-11-20 | v1.7.7 | 补 11.4：`resolution`/`fontsize`/4096 上限、`quickplane` 六个值、`legendpos=bottom` |
+| 2026-11-20 | v1.7.8 | 补 11.5：`Solution` 数据集的 `solution` 只能绑一个解节点（`all` 报 `未知特征`）；全局解号需先翻成「节点 + 节点内序号」 |
 
 ## 8. 版本记录
 

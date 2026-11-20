@@ -424,7 +424,7 @@ function Show-Help {
     Write-Host '  参数:'
     Write-Host '    -Models <dir>    模型目录'
     Write-Host '    -Recipe <name>   直接指定配方（不交互）'
-    Write-Host '    -ModelIndex <n>  直接指定第 n 个模型（从 1 开始）'
+    Write-Host '    -ModelIndex <n>  直接指定第 n 个模型（从 1 开始；列表最后一项是 solved\ 目录）'
     Write-Host '    -DryRun          只打印计划，不写队列、不启动计算'
     Write-Host '    -Mode <solve|export>  求解并导出 / 只导出已有解的模型'
     Write-Host '    -ProgressStyle 1|2|3  进度样式：1 单行 / 2 方框仪表 / 3 阶段链'
@@ -440,29 +440,54 @@ function Show-Help {
     Write-Host ''
 }
 
+function Get-ShortcutTarget {
+    # 解快捷方式指向的路径：WScript（.lnk/.link/.url 都能读）→ Arguments 兜底 → 读文本内容里的绝对路径
+    param([string]$Path)
+    $cand = @()
+    try {
+        $ws = New-Object -ComObject WScript.Shell
+        $s = $ws.CreateShortcut($Path)
+        foreach ($v in @($s.TargetPath, $s.Arguments)) {
+            if (-not [string]::IsNullOrWhiteSpace($v)) { $cand += $v.Trim().Trim('"') }
+        }
+    } catch { }
+    if ($cand.Count -eq 0) {
+        try {
+            $len = (Get-Item -LiteralPath $Path).Length
+            if ($len -gt 0 -and $len -lt 8192) {
+                $txt = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+                foreach ($m in [regex]::Matches($txt, '[A-Za-z]:\\[^"''<>\r\n|*?]*\.mph')) { $cand += $m.Value }
+            }
+        } catch { }
+    }
+    foreach ($c in $cand) { if ($c -match '\.mph$') { return $c } }
+    if ($cand.Count -gt 0) { return $cand[0] }
+    return ''
+}
+
 function Get-ModelFiles {
-    # 支持 .mph 与指向 .mph 的快捷方式（.lnk）；快捷方式只取目标路径，显示仍用 .lnk 的名字
+    # 支持 .mph，以及指向 .mph 的快捷方式（.lnk / .link / .url）；
+    # 快捷方式的显示名用链接自己的名字，实际路径用目标。
+    # 目标不存在也照样列出来并标 Missing——静默丢弃会看起来像“模型列表少了文件”。
     param([string]$Dir)
     if (-not (Test-Path -LiteralPath $Dir)) { throw "模型目录不存在: $Dir" }
     $items = @()
     foreach ($f in (Get-ChildItem -LiteralPath $Dir | Where-Object { -not $_.PSIsContainer } | Sort-Object Name)) {
-        if ($f.Extension -eq '.mph') {
+        $ext = $f.Extension.ToLowerInvariant()
+        if ($ext -eq '.mph') {
             $items += [pscustomobject]@{
                 Name = $f.Name; FullName = $f.FullName
-                BaseName = $f.BaseName; IsLink = $false
+                BaseName = $f.BaseName; IsLink = $false; Missing = $false
             }
         }
-        elseif ($f.Extension -eq '.lnk') {
-            $target = ''
-            try {
-                $ws = New-Object -ComObject WScript.Shell
-                $target = $ws.CreateShortcut($f.FullName).TargetPath
-            } catch { $target = '' }
-            if ($target -and (Test-Path -LiteralPath $target) -and ([System.IO.Path]::GetExtension($target) -eq '.mph')) {
-                $base = $f.BaseName -replace '\s*-\s*快捷方式$', ''
-                $items += [pscustomobject]@{
-                    Name = $f.Name; FullName = $target; BaseName = $base; IsLink = $true
-                }
+        elseif ($ext -eq '.lnk' -or $ext -eq '.link' -or $ext -eq '.url') {
+            $target = Get-ShortcutTarget $f.FullName
+            if (-not $target) { continue }
+            if ([System.IO.Path]::GetExtension($target).ToLowerInvariant() -ne '.mph') { continue }
+            $base = $f.BaseName -replace '\s*-\s*快捷方式$', ''
+            $items += [pscustomobject]@{
+                Name = $f.Name; FullName = $target; BaseName = $base; IsLink = $true
+                Missing = -not (Test-Path -LiteralPath $target)
             }
         }
     }
@@ -926,6 +951,9 @@ function Get-HeapArg {
     try {
         $total = [int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
         $want = [int]($total * 0.7)
+        # 上限 64GB：公共电脑动辄几百 GB 内存，按 70% 会给到 300GB+，
+        # 几十万个解的模型也用不到那么多，堆太大反而可能起不来
+        if ($want -gt 65536) { $want = 65536 }
         if ($want -gt $mb) {
             $mb = [int]([math]::Floor($want / 1024) * 1024)
         }
@@ -1982,10 +2010,18 @@ elseif ([string]::IsNullOrWhiteSpace($ModelIndex)) {
 }
 
 $modelFiles = @(Get-ModelFiles $Models)
-if ($modelFiles.Count -eq 0) { throw "目录里没有 .mph 或指向 .mph 的快捷方式: $Models" }
+$solvedDir = Join-Path $Models 'solved'
+$solvedFiles = @()
+if (Test-Path -LiteralPath $solvedDir) { $solvedFiles = @(Get-ModelFiles $solvedDir) }
+$fromSolved = $false
+# solved\ 作为“额外一项”挂在模型列表最后：序号 = 当前条数 + 1
+$solvedNo = 0
+if ($solvedFiles.Count -gt 0) { $solvedNo = $modelFiles.Count + 1 }
+if ($modelFiles.Count -eq 0 -and $solvedNo -eq 0) { throw "目录里没有 .mph 或指向 .mph 的快捷方式: $Models" }
 
 $miRaw = [string]$ModelIndex
 $shown = $false
+$pickAll = $false
 $idxs = @()
 while ($true) {
     if (-not $shown) {
@@ -1993,9 +2029,16 @@ while ($true) {
         for ($i = 0; $i -lt $modelFiles.Count; $i++) {
             $label = $modelFiles[$i].Name
             if ($modelFiles[$i].IsLink) { $label = $label + '  →  ' + [System.IO.Path]::GetFileName($modelFiles[$i].FullName) }
-            $rows += [pscustomobject]@{ Text = ('[{0}] {1}' -f ($i + 1), $label); Color = 'Gray' }
+            $color = 'Gray'
+            if ($modelFiles[$i].Missing) { $label = $label + '  （快捷方式目标不存在）'; $color = 'DarkYellow' }
+            $rows += [pscustomobject]@{ Text = ('[{0}] {1}' -f ($i + 1), $label); Color = $color }
         }
-        Write-BoxRows '选择模型' $rows
+        if ($solvedNo -gt 0) {
+            $rows += [pscustomobject]@{ Text = ('[{0}] 从 solved\ 里选（已算过的模型，共 {1} 个，默认只导出）' -f $solvedNo, $solvedFiles.Count); Color = 'Cyan' }
+        }
+        $title = '选择模型'
+        if ($fromSolved) { $title = '选择模型（solved\）' }
+        Write-BoxRows $title $rows
         $shown = $true
     }
     if ([string]::IsNullOrWhiteSpace($miRaw)) {
@@ -2003,7 +2046,17 @@ while ($true) {
         if ([string]::IsNullOrWhiteSpace($miRaw)) { $miRaw = '1' }
     }
     $idxs = @()
-    if ($miRaw -match '^\s*a\s*$') { $idxs = @(1..$modelFiles.Count) }
+    if ($miRaw -match '^\s*a\s*$') { $idxs = @(1..$modelFiles.Count); $pickAll = $true }
+    elseif ($solvedNo -gt 0 -and $miRaw -match ('^\s*' + $solvedNo + '\s*$')) {
+        # 切到 solved\ 列表重选一次；切过去以后这一项就不再出现，避免套娃
+        $modelFiles = $solvedFiles
+        $solvedNo = 0
+        $fromSolved = $true
+        $shown = $false
+        $miRaw = ''
+        Write-Host ('  已切到 ' + $solvedDir) -ForegroundColor Cyan
+        continue
+    }
     else {
         foreach ($piece in ($miRaw -split ',')) {
             $n = 0
@@ -2012,10 +2065,43 @@ while ($true) {
     }
     if ($idxs.Count -gt 0) { break }
     if (-not [string]::IsNullOrWhiteSpace($ModelIndex)) { throw ('模型序号无效: ' + $ModelIndex) }
-    Write-Host ('  序号无效：“' + $miRaw + '”，请输入 1-' + $modelFiles.Count + '，多个用逗号，a=全部') -ForegroundColor Yellow
+    $hint = '  序号无效：“' + $miRaw + '”，请输入 1-' + $modelFiles.Count
+    if ($solvedNo -gt 0) { $hint = $hint + ' 或 ' + $solvedNo + '（solved\）' }
+    Write-Host ($hint + '，多个用逗号，a=全部') -ForegroundColor Yellow
     $miRaw = ''
 }
+# solved\ 里的是算过的模型：默认只导出。这里强制不重算——输出路径就是
+# <models>\solved\<outname>.mph，重算时输入和输出可能同名，等于边读边覆盖自己。
+if ($fromSolved -and $doSolve) {
+    $doSolve = $false
+    if ($Mode -eq 'solve') {
+        throw ('solved\ 里的模型是按「只导出」使用的：重算会把它自己覆盖掉。要重算请选 models\ 里的裸模型: ' + $modelFiles[0].FullName)
+    }
+    Write-Host '  solved\ 里的模型：只导出（要重算请选 models\ 里的裸模型）' -ForegroundColor Cyan
+}
 $modelList = @($idxs | ForEach-Object { $modelFiles[$_-1] })
+# a=全部：失效的快捷方式直接跳过并提示，不让整个队列被一条坏链接卡死
+if ($pickAll) {
+    $skipped = @($modelList | Where-Object { $_.Missing })
+    foreach ($s in $skipped) { Write-Host ('  跳过（快捷方式目标不存在）: ' + $s.Name) -ForegroundColor DarkYellow }
+    $modelList = @($modelList | Where-Object { -not $_.Missing })
+    if ($modelList.Count -eq 0) { throw '选中的模型都不可用（快捷方式都指向不存在的文件）' }
+}
+$bad = @($modelList | Where-Object { $_.Missing })
+if ($bad.Count -gt 0) {
+    $msg = @('这些快捷方式的目标模型不存在（快捷方式可能过期了，重建或者改指向新文件）：')
+    foreach ($b in $bad) {
+        $msg += ('  ' + $b.Name + '  →  ' + $b.FullName)
+        # 目标被改过名（常见：多加了 _npim 之类后缀）就给个提示，不自动改，免得指错文件
+        $d = Split-Path -Parent $b.FullName
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($b.FullName)
+        if ((Test-Path -LiteralPath $d) -and $stem) {
+            $near = @(Get-ChildItem -LiteralPath $d -Filter ($stem + '*.mph') -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer })
+            if ($near.Count -eq 1) { $msg += ('      疑似同名新文件: ' + $near[0].Name) }
+        }
+    }
+    throw ($msg -join [Environment]::NewLine)
+}
 $model = $modelList[0]
 
 $recipes = @(Get-Recipes)
