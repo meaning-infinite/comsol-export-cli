@@ -97,7 +97,7 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.7.13";
+    static final String DRIVER_VERSION = "v1.7.14";
 
     static Path CURRENT_JOB_DIR = null;
     static Path LOG_FILE = null;
@@ -675,61 +675,60 @@ public class ExportDriver {
         }
     }
 
-    /** 场图总表：每个分量一块 —— 左边三维，右边上 xy、下 xz 与 zy 均分；
+    /** 场图总表：每个分量一块 —— 左三维（占满整块高度），
+     *  右边上 x-y（方形，宽度 = 两张侧面 + 间隔），下 x-z 与 z-y 并排铺满其余高度；
      *  二维只取场本身，坐标轴与色标由这里自己画（COMSOL 的框去不掉）。 */
     static void composeFieldSheet(java.util.List<Path[]> comps, java.util.List<String> labels,
                                   java.util.List<String> sfx, int i, Path out) throws Exception {
-        final int H3 = 1500, HXY = 900, HSD = 2400, GAP = 90, PAD = 110, TITLE = 80;
-        final int AXM = 90, CBM = 130;
-        java.util.List<java.awt.image.BufferedImage[]> imgs = new java.util.ArrayList<>();
-        int w3 = 0;
-        for (Path[] c : comps) {
-            java.awt.image.BufferedImage a = scaledTo(c[0], H3);
-            java.awt.image.BufferedImage b = scaledTo(c[1], HXY);
-            java.awt.image.BufferedImage d = scaledTo(c[2], HSD);
-            java.awt.image.BufferedImage e = scaledTo(c[3], HSD);
-            imgs.add(new java.awt.image.BufferedImage[] { a, b, d, e });
-            w3 = Math.max(w3, a.getWidth());
-        }
-        int xyCell = AXM + HXY + CBM;
-        int sdCell = 0;
-        for (java.awt.image.BufferedImage[] im : imgs) sdCell = Math.max(sdCell, AXM + im[2].getWidth() + CBM);
-        int rightW = Math.max(xyCell, sdCell * 2 + GAP);
-        int blockW = w3 + GAP + rightW;
-        int blockH = TITLE + HXY + GAP * 2 + HSD;
-        int W = PAD * 2 + comps.size() * blockW + Math.max(0, comps.size() - 1) * GAP * 2;
-        int H = PAD * 2 + blockH;
+        final int BLOCK_H = 2400, GAP = 90, PAD = 110, TITLE = 90;
+        final int AXM = 96, CBM = 150;
+        java.awt.Font fTitle = new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, 48);
+        java.awt.Font fNum = new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, 26);
+        // 先按第一块量出各图的宽高比，再算几何：块高固定，侧面两张并排撑满 x-y 的宽度
+        java.awt.image.BufferedImage[] probe = new java.awt.image.BufferedImage[4];
+        Path[] c0 = comps.get(0);
+        for (int k = 0; k < 4; k++) probe[k] = javax.imageio.ImageIO.read(c0[k].toFile());
+        double ax3 = probe[0].getWidth() / (double) probe[0].getHeight();
+        double axS = probe[2].getWidth() / (double) probe[2].getHeight();
+        // 每张二维图占一个格：左轴留白 AXM + 场宽 + 右色标 CBM；侧面两格正好铺满 x-y 那一格
+        // BLOCK_H = sXY + GAP + hSd，且 wSd = (sXY - AXM - CBM) / 2、hSd = wSd / axS
+        double k = 1.0 / (2.0 * axS);
+        int sXY = (int) Math.round((BLOCK_H - GAP + (AXM + CBM) * k) / (1 + k));
+        int wSd = Math.max(40, (sXY - AXM - CBM) / 2);
+        int hSd = (int) Math.round(wSd / axS);
+        int w3 = (int) Math.round(ax3 * BLOCK_H);
+        int blockW = w3 + GAP + AXM + sXY + CBM;
+        int W = PAD * 2 + comps.size() * blockW + Math.max(0, comps.size() - 1) * GAP * 3;
+        int H = PAD * 2 + TITLE + BLOCK_H;
         java.awt.image.BufferedImage sheet = new java.awt.image.BufferedImage(W, H, java.awt.image.BufferedImage.TYPE_INT_RGB);
         java.awt.Graphics2D g = sheet.createGraphics();
         g.setRenderingHint(java.awt.RenderingHints.KEY_TEXT_ANTIALIASING, java.awt.RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
         g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
         g.setColor(java.awt.Color.WHITE);
         g.fillRect(0, 0, W, H);
-        java.awt.Font fTitle = new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, 46);
-        java.awt.Font fNum = new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, 26);
-        int[] ramp = sampleRamp(imgs.get(0)[0]);
+        int[] ramp = sampleRamp(probe[0]);
         for (int idx = 0; idx < comps.size(); idx++) {
-            int x0 = PAD + idx * (blockW + GAP * 2);
-            java.awt.image.BufferedImage[] im = imgs.get(idx);
+            Path[] cp = comps.get(idx);
             String sf = sfx.get(idx);
+            int x0 = PAD + idx * (blockW + GAP * 3);
+            int y0 = PAD + TITLE;
             g.setColor(new java.awt.Color(25, 25, 25));
             g.setFont(fTitle);
-            g.drawString(labels.size() > idx ? labels.get(idx) : "", x0, PAD + 36);
-            int y = PAD + TITLE + 46;
+            g.drawString(labels.size() > idx ? labels.get(idx) : "", x0, PAD + 40);
             g.setFont(fNum);
             g.setColor(new java.awt.Color(60, 60, 60));
-            g.drawString("三维", x0, y - 16);
-            g.drawImage(im[0], x0, y, null);                    // 三维（自带色标，在下方）
+            g.drawString("三维", x0, y0 - 18);
+            g.drawImage(scaledTo(cp[0], BLOCK_H), x0, y0, null);      // 三维：占满整块高（自带色标在下方）
             int px = x0 + w3 + GAP + AXM;
-            g.drawString("x-y", px, y - 16);
-            drawPanel(g, im[1], px, y, YAX.get(i + "|" + sf + "|xy"), RNG.get(i + "|" + sf + "|xy"), ramp, fNum);
-            int y2 = y + HXY + GAP * 2;
-            int cell2 = sdCell * 2 + GAP;
-            int sideX = x0 + w3 + GAP + AXM + Math.max(0, (HXY + CBM - cell2) / 2);
-            g.drawString("x-z", sideX + AXM, y2 - 16);
-            drawPanel(g, im[2], sideX + AXM, y2, YAX.get(i + "|" + sf + "|xz"), RNG.get(i + "|" + sf + "|xz"), ramp, fNum);
-            g.drawString("z-y", sideX + sdCell + GAP + AXM, y2 - 16);
-            drawPanel(g, im[3], sideX + sdCell + GAP + AXM, y2, YAX.get(i + "|" + sf + "|yz"), RNG.get(i + "|" + sf + "|yz"), ramp, fNum);
+            g.drawString("x-y", px, y0 - 18);
+            drawPanel(g, scaledTo(cp[1], sXY), px, y0, YAX.get(i + "|" + sf + "|xy"), RNG.get(i + "|" + sf + "|xy"), ramp, fNum);
+            int yb = y0 + sXY + GAP;
+            int xz = x0 + w3 + GAP + AXM;
+            int zy = xz + wSd + AXM + CBM;
+            g.drawString("x-z", xz, yb - 18);
+            drawPanel(g, scaledTo(cp[2], hSd), xz, yb, YAX.get(i + "|" + sf + "|xz"), RNG.get(i + "|" + sf + "|xz"), ramp, fNum);
+            g.drawString("z-y", zy, yb - 18);
+            drawPanel(g, scaledTo(cp[3], hSd), zy, yb, YAX.get(i + "|" + sf + "|yz"), RNG.get(i + "|" + sf + "|yz"), ramp, fNum);
         }
         g.dispose();
         javax.imageio.ImageIO.write(sheet, "png", out.toFile());

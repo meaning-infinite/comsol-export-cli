@@ -946,7 +946,7 @@ function Get-JobStates {
 # 可用参数 -Heap 8g 或环境变量 COMSOL_EXPORT_XMX 覆盖。
 # 驱动 class 里的版本串（DRIVER_VERSION 常量），用来发现「只更新了脚本、没更新 driver」的情况：
 # 远程出现过 cli.ps1 是新的、driver 还是旧 class，于是同样的 bug 反复报。
-$script:ExpectedDriverVersion = 'v1.7.13'
+$script:ExpectedDriverVersion = 'v1.7.14'
 
 function Get-DriverClassVersion([string]$dir) {
     $p = Join-Path $dir 'ExportDriver.class'
