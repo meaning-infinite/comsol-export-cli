@@ -20,7 +20,7 @@
             Plot  = 'true'
         }
 
-        # ③ 场图：一次出 4 张 —— 三维默认视角 1 张 + xy/xz/zy 二维各 1 张
+        # ③ 场图：只出 1 张组合总表（三维 + xy/xz/zy 拼好，300 dpi）
         @{
             Type    = 'image'
             Name    = 'field'

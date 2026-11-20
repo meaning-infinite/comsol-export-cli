@@ -128,24 +128,23 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 
 `Params` 三种写法：`all`（默认，全部参数）/ `none` / `sim_xy,r`（指定名）。
 
-### image — 场图（三维 1 张 + 二维 2 张 + 一张总图）
+### image — 场图（只出 1 张组合总表）
 
 ```powershell
 @{ Type='image'; Name='field'; Expr='ewfd.Ex,ewfd.Ey'; Width='1200'; Edges='on'; Grid='off' }
 ```
 
-`Expr` 默认 `ewfd.Ex,ewfd.Ey`：**逗号分隔就逐分量各出一套图**（文件名带 `_Ex` / `_Ey`），一个 Expr 出一套三张：
+`Expr` 默认 `ewfd.Ex,ewfd.Ey`：**逗号分隔就逐分量各占一块**，拼进同一张总表（不再每分量各出一套分面图），300 dpi：
 
 | 文件 | 内容 |
 |---|---|
-| `<名>_field_Ex_3d.png` | 三维默认视角，三张互相垂直切片，色标在下方、不画坐标框 |
-| `<名>_field_Ex_xy.png` | 正对 xy 面，横 x 纵 y |
-| `<名>_field_Ex_xz.png` / `_zy.png` | x-z / z-y 竖切面各一张 |
-| `<名>_field_all.png` | 总表：每分量一块（三维｜x-y 上、x-z/z-y 下），二维自己画竖轴与竖色标 |
+| `<名>_field_all.png` | 组合总表（唯一产物）：每分量一块（三维｜x-y 上、x-z/z-y 下），二维自己画竖轴与竖色标 |
+
+分面图只在作业临时目录里存在（`%TEMP%\comsol-export-*\`），拼完即删，不会再散落到 `results`。
 
 
-二维图按切面真实长宽比出图（`Height` 不写就自动算），不做拉伸。
-`Width` 是长边像素（上限 4096）；`Edges`（默认 `on`）画域边界线；`Grid`（默认 `off`）画三维坐标框；`Title` 空 = 「平面 + COMSOL 自动量名」。
+二维图按切面真实长宽比出图（`Height` 不写就自动算），不做拉伸；分辨率按 300 dpi 的像素密度给足（总表约 5200×4000）。
+`Edges`（默认 `on`）画域边界线；`Grid`（默认 `off`）画三维坐标框；`Title` 空 = 「平面 + COMSOL 自动量名」。
 `SolNum`（默认 `1`）= 取第几个解：做「逐共振点各出一组场图」时，每个块填该共振点的解号即可。
 
 也可以走模块写法（推荐）：

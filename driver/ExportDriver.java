@@ -24,7 +24,7 @@ public class ExportDriver {
     // ---------- 作业上下文 ----------
     static class Job {
         Map<String, String> p;
-        Path jobDir, outdir, modelsDir;
+        Path jobDir, outdir, modelsDir, tmpdir;
         String outname, dataset, datasetTag, study;
         int blocks;
         Model model;
@@ -97,7 +97,7 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.7.14";
+    static final String DRIVER_VERSION = "v1.7.15";
 
     static Path CURRENT_JOB_DIR = null;
     static Path LOG_FILE = null;
@@ -191,6 +191,7 @@ public class ExportDriver {
         Path tmp = null;
         try {
             tmp = Files.createTempDirectory("comsol-export-");
+            j.tmpdir = tmp;
             Path copy = tmp.resolve("model.mph");
             Files.copy(Paths.get(modelPath), copy, StandardCopyOption.REPLACE_EXISTING);
             log("[driver] 已拷模型到临时目录");
@@ -651,27 +652,33 @@ public class ExportDriver {
         int k = 0;
         java.util.List<Path[]> perComp = new java.util.ArrayList<>();
         java.util.List<String> sfxList = new java.util.ArrayList<>();
-        for (String s : list) {
-            String e = s.trim();
-            if (e.isEmpty()) continue;
-            String fileSfx = "", tagSfx = "";
-            if (n > 1) {
-                String shortName = e.substring(e.lastIndexOf('.') + 1);
-                fileSfx = "_" + shortName;
-                tagSfx = "_" + k;
+        // 分面图只是拼总表用的中间件：写到作业临时目录，拼完即删，outdir 里只留组合图
+        Path work = (j.tmpdir != null ? j.tmpdir : j.outdir).resolve("img_" + i);
+        try {
+            Files.createDirectories(work);
+            for (String s : list) {
+                String e = s.trim();
+                if (e.isEmpty()) continue;
+                String fileSfx = "", tagSfx = "";
+                if (n > 1) {
+                    String shortName = e.substring(e.lastIndexOf('.') + 1);
+                    fileSfx = "_" + shortName;
+                    tagSfx = "_" + k;
+                }
+                perComp.add(exportImageOne(j, i, e, tagSfx, fileSfx, work));
+                sfxList.add(tagSfx);
+                k++;
             }
-            perComp.add(exportImageOne(j, i, e, tagSfx, fileSfx));
-            sfxList.add(tagSfx);
-            k++;
-        }
-        // 拼版：每个分量一块 —— 左边三维，右边上 xy、下 xz 与 zy 均分（用户指定）
-        if (!perComp.isEmpty()) {
-            java.util.List<String> labels = new java.util.ArrayList<>();
-            for (String s : list) { String e = s.trim(); if (!e.isEmpty()) labels.add(e); }
-            String name0 = j.block(i, "name", "image");
-            Path all = j.outdir.resolve(j.outname + "_" + name0 + "_all.png");
-            composeFieldSheet(perComp, labels, sfxList, i, all);
-            System.out.println("[driver] 写出 " + all + "（" + perComp.size() + " 个分量并排）");
+            // 拼版：每个分量一块 —— 左边三维，右边上 xy、下 xz 与 zy 均分（用户指定）
+            if (!perComp.isEmpty()) {
+                java.util.List<String> labels = new java.util.ArrayList<>();
+                for (String s : list) { String e = s.trim(); if (!e.isEmpty()) labels.add(e); }
+                String name0 = j.block(i, "name", "image");
+                Path all = j.outdir.resolve(j.outname + "_" + name0 + "_all.png");
+                composeFieldSheet(perComp, labels, sfxList, i, all);
+            }
+        } finally {
+            try { deleteTree(work); } catch (Exception ignore) { }
         }
     }
 
@@ -680,10 +687,10 @@ public class ExportDriver {
      *  二维只取场本身，坐标轴与色标由这里自己画（COMSOL 的框去不掉）。 */
     static void composeFieldSheet(java.util.List<Path[]> comps, java.util.List<String> labels,
                                   java.util.List<String> sfx, int i, Path out) throws Exception {
-        final int BLOCK_H = 2400, GAP = 90, PAD = 110, TITLE = 90;
-        final int AXM = 96, CBM = 150;
-        java.awt.Font fTitle = new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, 48);
-        java.awt.Font fNum = new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, 26);
+        final int BLOCK_H = S(2400), GAP = S(90), PAD = S(110), TITLE = S(90);
+        final int AXM = S(96), CBM = S(150);
+        java.awt.Font fTitle = new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, S(48));
+        java.awt.Font fNum = new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, S(26));
         // 先按第一块量出各图的宽高比，再算几何：块高固定，侧面两张并排撑满 x-y 的宽度
         java.awt.image.BufferedImage[] probe = new java.awt.image.BufferedImage[4];
         Path[] c0 = comps.get(0);
@@ -714,24 +721,26 @@ public class ExportDriver {
             int y0 = PAD + TITLE;
             g.setColor(new java.awt.Color(25, 25, 25));
             g.setFont(fTitle);
-            g.drawString(labels.size() > idx ? labels.get(idx) : "", x0, PAD + 40);
+            g.drawString(labels.size() > idx ? labels.get(idx) : "", x0, PAD + S(40));
             g.setFont(fNum);
             g.setColor(new java.awt.Color(60, 60, 60));
-            g.drawString("三维", x0, y0 - 18);
+            g.drawString("三维", x0, y0 - S(18));
             g.drawImage(scaledTo(cp[0], BLOCK_H), x0, y0, null);      // 三维：占满整块高（自带色标在下方）
             int px = x0 + w3 + GAP + AXM;
-            g.drawString("x-y", px, y0 - 18);
+            g.drawString("x-y", px, y0 - S(18));
             drawPanel(g, scaledTo(cp[1], sXY), px, y0, YAX.get(i + "|" + sf + "|xy"), RNG.get(i + "|" + sf + "|xy"), ramp, fNum);
             int yb = y0 + sXY + GAP;
             int xz = x0 + w3 + GAP + AXM;
             int zy = xz + wSd + AXM + CBM;
-            g.drawString("x-z", xz, yb - 18);
+            g.drawString("x-z", xz, yb - S(18));
             drawPanel(g, scaledTo(cp[2], hSd), xz, yb, YAX.get(i + "|" + sf + "|xz"), RNG.get(i + "|" + sf + "|xz"), ramp, fNum);
-            g.drawString("z-y", zy, yb - 18);
+            g.drawString("z-y", zy, yb - S(18));
             drawPanel(g, scaledTo(cp[3], hSd), zy, yb, YAX.get(i + "|" + sf + "|yz"), RNG.get(i + "|" + sf + "|yz"), ramp, fNum);
         }
         g.dispose();
-        javax.imageio.ImageIO.write(sheet, "png", out.toFile());
+        writePng(sheet, out);
+        System.out.println("[driver] 写出 " + out + "（" + W + "×" + H + " px @" + DPI + " dpi，"
+                + comps.size() + " 个分量）");
     }
 
     /** 一个二维面板：贴场 + 左边一条竖轴（刻度与数字）+ 右侧竖色标 */
@@ -739,7 +748,7 @@ public class ExportDriver {
                           double[] yax, double[] rng, int[] ramp, java.awt.Font f) {
         int w = im.getWidth(), h = im.getHeight();
         g.drawImage(im, x, y, null);
-        int axisX = x - 14;
+        int axisX = x - S(14);
         g.setColor(new java.awt.Color(70, 70, 70));
         g.drawLine(axisX, y, axisX, y + h - 1);
         if (yax != null) {
@@ -747,17 +756,17 @@ public class ExportDriver {
                 double val = yax[1] - (yax[1] - yax[0]) * k / 4.0;
                 int ty = y + (int) Math.round(h * k / 4.0);
                 if (ty > y + h - 1) ty = y + h - 1;
-                g.drawLine(axisX - 8, ty, axisX, ty);
+                g.drawLine(axisX - S(8), ty, axisX, ty);
                 String s = fmt(val);
                 int sw = g.getFontMetrics(f).stringWidth(s);
                 g.setColor(new java.awt.Color(35, 35, 35));
                 g.setFont(f);
-                g.drawString(s, axisX - 12 - sw, ty + 9);
+                g.drawString(s, axisX - S(12) - sw, ty + S(9));
                 g.setColor(new java.awt.Color(70, 70, 70));
             }
         }
         if (rng != null && ramp != null) {
-            int bw = 20, bh = (int) (h * 0.62), bx = x + w + 34, by = y + (h - bh) / 2;
+            int bw = S(20), bh = (int) (h * 0.62), bx = x + w + S(34), by = y + (h - bh) / 2;
             for (int k = 0; k < bh; k++) {
                 int ci = (int) Math.round((bh - 1 - k) * (ramp.length - 1) / (double) (bh - 1));
                 g.setColor(new java.awt.Color(ramp[ci] | 0xFF000000, true));
@@ -770,9 +779,9 @@ public class ExportDriver {
             double sc = Math.pow(10, e);
             g.setFont(f);
             String hi = fmt(rng[1] / sc), lo = fmt(rng[0] / sc);
-            g.drawString(hi, bx + bw + 10, by + 10);
-            g.drawString(lo, bx + bw + 10, by + bh);
-            g.drawString("×10^" + e, bx, by - 14);
+            g.drawString(hi, bx + bw + S(10), by + S(10));
+            g.drawString(lo, bx + bw + S(10), by + bh);
+            g.drawString("×10^" + e, bx, by - S(14));
         }
     }
 
@@ -827,7 +836,7 @@ public class ExportDriver {
         return o;
     }
 
-    static Path[] exportImageOne(Job j, int i, String expr, String tagSfx, String fileSfx) throws Exception {
+    static Path[] exportImageOne(Job j, int i, String expr, String tagSfx, String fileSfx, Path dir) throws Exception {
         String name = j.block(i, "name", "image");
         String solnum = j.block(i, "solnum", "1").trim();
         String at = j.block(i, "at", "auto").trim();
@@ -913,10 +922,13 @@ public class ExportDriver {
         double spanXY = Math.max(bb[1] - bb[0], bb[3] - bb[2]);
         double spanZ = bb[5] - bb[4];
         double asp3 = spanXY > 0 ? spanZ / spanXY : 1;
+        // 画布随拼版一起放大 SCALE 倍：拼版把三维图拉到 BLOCK_H 高，源图小了会被拉伸糊掉
+        final int BASE = (int) Math.round(900 * SCALE), CAP = (int) Math.round(2400 * SCALE),
+                MINW = (int) Math.round(700 * SCALE);
         int h3, ww3;
-        if (asp3 >= 1) { h3 = (int) Math.round(Math.min(2400, Math.max(800, 900 * asp3))); ww3 = Math.max(700, (int) Math.round(h3 / asp3)); }
-        else { ww3 = (int) Math.round(Math.min(2400, Math.max(800, 900 / Math.max(asp3, 0.05)))); h3 = Math.max(700, (int) Math.round(ww3 * asp3)); }
-        Path png3 = j.outdir.resolve(j.outname + "_" + name + fileSfx + "_3d.png");
+        if (asp3 >= 1) { h3 = Math.min(CAP, Math.max(BASE, (int) Math.round(BASE * asp3))); ww3 = Math.max(MINW, (int) Math.round(h3 / asp3)); }
+        else { ww3 = Math.min(CAP, Math.max(BASE, (int) Math.round(BASE / Math.max(asp3, 0.05)))); h3 = Math.max(MINW, (int) Math.round(ww3 * asp3)); }
+        Path png3 = dir.resolve(j.outname + "_" + name + fileSfx + "_3d.png");
         exportPng(j, i, tag3, png3, ww3, h3);
         cropWhite(png3, 12);   // 画布按内容裁掉四周白边，不再被 4:3 硬比例撑出大片空白
         System.out.println("[driver] 写出 " + png3);
@@ -962,7 +974,7 @@ public class ExportDriver {
             // 竖图太窄，标题带量名会折成三行，只用平面名
             applyTitle(j.model.result(pg), caption + " 切面",
                     px[1] > px[0] ? caption + " 切面" : title, "");
-            Path png2 = j.outdir.resolve(j.outname + "_" + name + fileSfx + suffix + ".png");
+            Path png2 = dir.resolve(j.outname + "_" + name + fileSfx + suffix + ".png");
             // 竖图（xz/zy）右侧留一条竖直色标：两张拼起来后色标正好落在中间；
             // 画布宽度按实测绘图框自适应（色标会吃掉宽度，窄了纵轴会被 1:1 撑大）
             boolean wantLegend = !"yz".equals(plane);
@@ -1116,7 +1128,8 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         else { spanX = bb[3] - bb[2]; spanY = bb[5] - bb[4]; }
         if (spanX <= 0 || spanY <= 0) return new int[] { w, 900 };
         double aspect = spanX / spanY;                 // 横向 / 纵向
-        int shortSide = 800, longSide = 2400, maxSide = 4096;   // 300 dpi 下短边约 2.7 in
+        // 分面图要供 300 dpi 的拼版使用，故留足像素：短边 ≥1200，长边 ≥3600（单边上限 4096）
+        int shortSide = (int) Math.round(800 * SCALE), longSide = (int) Math.round(2400 * SCALE), maxSide = 4096;
         int px, py;
         if (aspect >= 1) {
             py = shortSide;
@@ -1659,6 +1672,16 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
     /** 三维是否画坐标框（栅格）；由 image 块的 Grid 字段控制，默认关 */
     static boolean GRID_ON = false;
 
+    /** 场图总表的分辨率倍率：以 300 dpi 出图，像素密度在旧版基础上 ×1.5。
+     *  拼版尺寸、字号、分面导出画布、装饰线宽都按它缩放，改一处即可整体提高/降低分辨率。 */
+    static final double SCALE = 1.5;
+
+    /** PNG 里写入的 dpi（COMSOL 导出节点本身也用 300） */
+    static final int DPI = 300;
+
+    /** 按 SCALE 缩放一个像素尺寸 */
+    static int S(double v) { return (int) Math.round(v * SCALE); }
+
     /** 二维面数值范围与纵轴范围：key = 块号|分量后缀|平面 */
     static final java.util.Map<String, double[]> RNG = new java.util.HashMap<>();
     static final java.util.Map<String, double[]> YAX = new java.util.HashMap<>();
@@ -1763,8 +1786,39 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
             g.drawImage(rightBand, leftBand.getWidth() + field.getWidth(), y, null);
             if (foot != null) g.drawImage(foot, leftBand.getWidth(), y + field.getHeight(), null);
             g.dispose();
-            javax.imageio.ImageIO.write(out, "png", png.toFile());
+            writePng(out, png);
         } catch (Exception ignore) { }
+    }
+
+    // ---------- PNG 写出（带 dpi） ----------
+    // ImageIO 写 PNG 不带 pHYs，dpi 就丢了（看图软件按 72 dpi 换算物理尺寸，图会显得很大很糊）。
+    // 这里在 IHDR 之后插一个 pHYs 块：X=Y=DPI 的每米像素数，单位米。
+    static void writePng(java.awt.image.BufferedImage img, Path target) throws IOException {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(img, "png", bos);
+        byte[] png = bos.toByteArray();
+        try {
+            int ppm = (int) Math.round(DPI / 0.0254);       // 300 dpi = 11811 px/m
+            byte[] type = { 'p', 'H', 'Y', 's' };
+            byte[] data = new byte[9];
+            data[0] = (byte) (ppm >>> 24); data[1] = (byte) (ppm >>> 16);
+            data[2] = (byte) (ppm >>> 8); data[3] = (byte) ppm;
+            System.arraycopy(data, 0, data, 4, 4);          // Y 方向同值
+            data[8] = 1;                                    // 单位：米
+            java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+            crc.update(type);
+            crc.update(data);
+            int c = (int) crc.getValue();
+            java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream(png.length + 25);
+            o.write(png, 0, 33);                            // 8 字节签名 + IHDR(25)
+            o.write(new byte[] { 0, 0, 0, 9 });             // pHYs 长度
+            o.write(type);
+            o.write(data);
+            o.write(new byte[] { (byte) (c >>> 24), (byte) (c >>> 16), (byte) (c >>> 8), (byte) c });
+            o.write(png, 33, png.length - 33);
+            png = o.toByteArray();
+        } catch (Exception ignore) { }
+        Files.write(target, png);
     }
 
     /** 多行拼图：每行内各图等高对齐、整行居中；行与行之间留 gap。不缩放，保持原始像素 */
@@ -1805,9 +1859,8 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
             y += rowH[r] + gap;
         }
         g.dispose();
-        javax.imageio.ImageIO.write(canvas, "png", out.toFile());
+        writePng(canvas, out);
     }
-
     // 裁掉四周纯白边（COMSOL 导出的画布按字符比例给，二维细长切面会留大片空白）
     static void cropWhite(Path png, int pad) {
         try {
@@ -1838,7 +1891,7 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
             g2.fillRect(0, 0, out.getWidth(), out.getHeight());
             g2.drawImage(sub, 0, 0, null);
             g2.dispose();
-            javax.imageio.ImageIO.write(out, "png", png.toFile());
+            writePng(out, png);
         } catch (Exception e) {
             System.out.println("[driver] 警告: 裁白边失败 " + e.getMessage());
         }
@@ -1859,7 +1912,7 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
             g2.drawImage(a, 0, 0, null);
             g2.drawImage(b, a.getWidth() + gap, 0, null);
             g2.dispose();
-            javax.imageio.ImageIO.write(img, "png", out.toFile());
+            writePng(img, out);
         } catch (Exception e) {
             throw new IllegalStateException("拼图失败: " + e.getMessage(), e);
         }
