@@ -70,6 +70,18 @@ function Pad-Text([string]$s, [int]$w) {
     if ($n -lt 0) { $n = 0 }
     return $s + (' ' * $n)
 }
+# 按显示宽度截断（中文算两格），超长补省略号；日志/菜单里都靠它防撑爆
+function Cut-Text([string]$s, [int]$maxW) {
+    if ($maxW -le 1) { return '' }
+    if ((Get-TextWidth $s) -le $maxW) { return $s }
+    $cut = ''
+    foreach ($ch in $s.ToCharArray()) {
+        if ((Get-TextWidth ($cut + $ch)) -gt ($maxW - 1)) { break }
+        $cut = $cut + $ch
+    }
+    return $cut + '…'
+}
+
 function Get-BoxLines([string]$title, [string[]]$lines) {
     $w = 0
     foreach ($l in $lines) { if ($null -ne $l) { $w = [math]::Max($w, (Get-TextWidth $l) + 2) } }
@@ -283,48 +295,45 @@ function ConvertTo-IndexList([string]$text, [int]$max) {
     return $out
 }
 
-# 菜单的显示行：当前行反色，多选打 [x]，末行给按键提示
+# 菜单的显示行：游标行整条反色；多选在左边用 ● / ○ 标状态（不再用 [x]，也不和序号混在一起）
 function New-MenuRows {
     param($Items, $Colors, [int]$Cur, $Marked, [bool]$Multi, [string]$Hint)
     # 框最宽只能到窗口右边界，否则整行折行会把原地重绘算乱
     $avail = 0
     try { $avail = [math]::Max(24, [Console]::BufferWidth - 8) } catch { }
+    $nw = ([string]$Items.Count).Length
     $rows = @()
     for ($k = 1; $k -le $Items.Count; $k++) {
         $isCur = ($k -eq $Cur)
+        $isOn = ($Multi -and ($Marked -contains $k))
+        $lead = '  '
+        if ($isCur) { $lead = '❯ ' }
         $mark = ''
         if ($Multi) {
-            if ($Marked -contains $k) { $mark = '[x] ' } else { $mark = '[ ] ' }
+            if ($isOn) { $mark = '● ' } else { $mark = '○ ' }
         }
-        $lead = '  '
-        if ($isCur) { $lead = '▸ ' }
-        $prefix = $lead + $mark + ('[{0}] ' -f $k)
+        $prefix = $lead + $mark + ([string]$k).PadLeft($nw) + ' '
         $label = [string]$Items[$k - 1]
         if ($avail -gt 0) {
             $room = $avail - (Get-TextWidth $prefix)
-            if ($room -gt 6 -and (Get-TextWidth $label) -gt $room) {
-                $cut = ''
-                foreach ($chr in $label.ToCharArray()) {
-                    if ((Get-TextWidth ($cut + $chr)) -gt ($room - 1)) { break }
-                    $cut = $cut + $chr
-                }
-                $label = $cut + '…'
-            }
+            if ($room -gt 6) { $label = Cut-Text $label $room }
         }
-        $text = $prefix + $label
+        $text = $prefix + $label + ' '
         $fg = 'Gray'
+        if ($Multi) { $fg = 'DarkGray' }
         if ($Colors -and $Colors.Count -ge $k -and $Colors[$k - 1]) { $fg = [string]$Colors[$k - 1] }
+        if ($isOn) { $fg = 'White' }
         $seg = @{ Text = $text; Color = $fg; Bg = $null }
         if ($isCur) { $seg.Color = 'Black'; $seg.Bg = 'DarkCyan' }
         $rows += , @($seg)
     }
-    if ($Hint) { $rows += , @(@{ Text = $Hint; Color = 'DarkGray'; Bg = $null }) }
+    if ($Hint) { $rows += , @(@{ Text = ('  ' + $Hint); Color = 'DarkGray'; Bg = $null }) }
     return , $rows
 }
 
-# 上下键菜单：方框与 [n] 标号保持原样，↑↓ 移动、Enter 确认；
-# 直接敲数字再回车仍然能选（多个用逗号），Esc 取消。
+# 上下键菜单：↑↓ 移动、Enter 确定、Esc 取消；序号还在，敲 n 回车照样能直选（多个用逗号）。
 # -Multi：空格勾选、a 全选/全不选，返回 int[]。
+# -Quiet：不打印「已选」那一行（确认类菜单用）。
 # 输出被重定向（无人值守）时退回「方框 + 输入序号」，脚本化调用行为不变。
 function Read-Menu {
     param(
@@ -332,7 +341,8 @@ function Read-Menu {
         [string[]]$Items,
         [int]$Default = 1,
         [switch]$Multi,
-        [string[]]$ItemColors = $null
+        [string[]]$ItemColors = $null,
+        [switch]$Quiet
     )
     $n = @($Items).Count
     if ($n -le 0) {
@@ -346,11 +356,11 @@ function Read-Menu {
     if ($noKeys) {
         $rows = @()
         for ($k = 1; $k -le $n; $k++) {
-            $rows += [pscustomobject]@{ Text = ('[{0}] {1}' -f $k, [string]$Items[$k - 1]); Color = 'Gray' }
+            $rows += [pscustomobject]@{ Text = ('{0}. {1}' -f $k, [string]$Items[$k - 1]); Color = 'Gray' }
         }
         Write-BoxRows $Title $rows
         while ($true) {
-            $s = Read-Host '  序号（回车=1，多个用逗号，a=全部）'
+            $s = Read-Host '  序号（回车=默认，多个用逗号，a=全部）'
             if ([string]::IsNullOrWhiteSpace($s)) { $s = [string]$Default }
             $idx = @(ConvertTo-IndexList $s $n)
             if ($Multi -and $s -match '^\s*a\s*$') { $idx = @(1..$n) }
@@ -367,9 +377,9 @@ function Read-Menu {
     $buf = ''
     $kaFail = 0
     while ($true) {
-        $hint = '  ↑↓ 选择  Enter 确认  数字+Enter 直选  Esc 取消'
-        if ($Multi) { $hint = '  ↑↓ 移动  空格 勾选  a 全选  Enter 确认  Esc 取消' }
-        if ($buf) { $hint = $hint + '  ← 输入 ' + $buf }
+        $hint = '↑↓ 移动   Enter 确定   数字 直选   Esc 取消'
+        if ($Multi) { $hint = '↑↓ 移动   空格 勾选   A 全部   Enter 确定   Esc 取消' }
+        if ($buf) { $hint = $hint + '   输入 ' + $buf }
         $rows = New-MenuRows $Items $ItemColors $cur $marked ([bool]$Multi) $hint
         Show-LiveBox $Title $rows 'Cyan'
 
@@ -426,15 +436,34 @@ function Read-Menu {
             } else {
                 $picks = @($cur)
             }
-            $label = @($picks | ForEach-Object { '{0} {1}' -f $_, [string]$Items[$_ - 1] }) -join '、'
-            Write-Host ('  已选: ' + $label) -ForegroundColor Green
-            $script:LiveTop = -1
-            $script:LiveCount = 0
-            $script:LiveText = @()
+            Clear-LiveBox
+            if (-not $Quiet) {
+                $names = @($picks | ForEach-Object { '{0}. {1}' -f $_, [string]$Items[$_ - 1] })
+                $bwMax = 0
+                try { $bwMax = [math]::Max(40, [Console]::BufferWidth - 2) } catch { }
+                $line = '  ✓ ' + $Title + ': ' + ($names -join '、')
+                if ($bwMax -gt 0 -and (Get-TextWidth $line) -gt $bwMax) {
+                    Write-Host ('  ✓ ' + $Title + ': 共 ' + $picks.Count + ' 个') -ForegroundColor DarkCyan
+                    foreach ($nm in $names) { Write-Host ('     · ' + (Cut-Text $nm ($bwMax - 7))) -ForegroundColor DarkCyan }
+                } else {
+                    Write-Host $line -ForegroundColor DarkCyan
+                }
+            }
             if ($Multi) { return $picks }
             return $picks[0]
         }
     }
+}
+
+# 是/否：同样走菜单（← 选中即确认），不再手打 Y/N。
+# -NoDefault 表示默认落在「否」上，回车就是不做。
+function Read-Confirm {
+    param([string]$Title, [switch]$NoDefault)
+    $def = 1
+    if ($NoDefault) { $def = 2 }
+    $r = Read-Menu $Title @('是', '否') $def -Quiet
+    if ($r -le 0) { return $false }
+    return ($r -eq 1)
 }
 
 # 开窗即设好尺寸：宽度按列数算（默认 88 列，够放 74 字方框），高度占满屏幕可用高度。
@@ -1856,8 +1885,7 @@ function Invoke-KillMenu {
     $n = Read-Menu '终止哪个作业（Esc=取消）' $items 1
     if ($n -le 0) { Write-Host '  已取消。'; return }
     $job = $run[$n - 1]
-    $yn = Read-Host ('  确认终止 ' + (Split-Path -Leaf $job.jobDir) + ' ?（只终止这一个，Y/N）')
-    if ($yn -notmatch '^(y|Y)') { Write-Host '  已取消。'; return }
+    if (-not (Read-Confirm ('终止 ' + (Split-Path -Leaf $job.jobDir) + '？只终止这一个') -NoDefault)) { Write-Host '  已取消。' -ForegroundColor Yellow; return }
     $msg = Stop-OneJob $job
     $qq = @(Get-Queue)
     foreach ($x in $qq) { if ($x.jobDir -eq $job.jobDir) { $x.status = $job.status } }
@@ -2109,8 +2137,7 @@ function Invoke-Scheduler {
         try { $Host.UI.RawUI.WindowTitle = 'COMSOL 导出 CLI' } catch { }
         if (-not $quitMonitor) { break }
         Write-Host ''
-        $again = Read-Host '  按 M 重新进入监视，直接回车退出（后台计算不受影响）'
-        if ($again -notmatch '^[mM]$') { break }
+        if (-not (Read-Confirm '再看一轮进度？（后台计算不受影响）' -NoDefault)) { break }
         Write-Host ''
     }
 }
@@ -2239,16 +2266,16 @@ while ($idxs.Count -eq 0) {
     $items = @()
     $colors = @()
     for ($i = 0; $i -lt $modelFiles.Count; $i++) {
-        $label = $modelFiles[$i].Name
-        if ($modelFiles[$i].IsLink) { $label = $label + '  →  ' + [System.IO.Path]::GetFileName($modelFiles[$i].FullName) }
+        # 快捷方式直接显示它指向的模型名（不再显示「链接名 → 目标」，也不做特殊标色）
+        $label = [System.IO.Path]::GetFileName($modelFiles[$i].FullName)
         $color = 'Gray'
-        if ($modelFiles[$i].Missing) { $label = $label + '  （快捷方式目标不存在）'; $color = 'DarkYellow' }
+        if ($modelFiles[$i].Missing) { $label = $label + '  （目标不存在）'; $color = 'DarkYellow' }
         $items += $label
         $colors += $color
     }
     if ($solvedNo -gt 0) {
-        $items += ('从 solved\ 里选（已算过的模型，共 {0} 个，默认只导出）' -f $solvedFiles.Count)
-        $colors += 'Cyan'
+        $items += ('从 solved 目录里选（已算过的，共 {0} 个）' -f $solvedFiles.Count)
+        $colors += 'Gray'
     }
     $title = '选择模型'
     if ($fromSolved) { $title = '选择模型（solved\）' }
@@ -2387,8 +2414,8 @@ if ($DryRun) {
     exit 0
 }
 
-$ans = Read-Host ('  开始导出? 共 ' + $jobs.Count + ' 个作业 (Y/N)')
-if ($ans -notmatch '^(y|Y)') {
+$ans = Read-Confirm ('开始导出？共 ' + $jobs.Count + ' 个作业')
+if (-not $ans) {
     foreach ($j in $jobs) { Remove-Item -LiteralPath $j.jobDir -Recurse -Force -ErrorAction SilentlyContinue }
     Write-Host '  已取消。' -ForegroundColor Yellow
     Remove-Item -LiteralPath $instFile -Force -ErrorAction SilentlyContinue
