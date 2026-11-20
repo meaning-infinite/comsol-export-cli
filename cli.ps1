@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.8.1'
+$script:CliVersion = 'v1.8.2'
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
     '██╔════╝ ██╔═══██╗  ████╗ ████║  ██╔════╝  ██╔═══██╗  ██║     ',
@@ -1517,8 +1517,6 @@ function Get-ProgressInfo($job) {
         $st.Eta = $eta
     }
     $st.Pct = $pct
-    $finish = $null
-    if ($eta -ge 0) { $finish = $now.AddSeconds($eta) }
 
     $phaseNo = 1; $phaseAll = 1
     if ([string]$job.mode -ne 'export') { $phaseAll = 2; if ($phase -eq 'export') { $phaseNo = 2 } }
@@ -1539,7 +1537,6 @@ function Get-ProgressInfo($job) {
         TotalElapsed = $totalElapsed
         Eta = $eta
         HasEta = ($eta -ge 0)
-        Finish = $finish
         SolDone = $solDone
         SolTotal = $solTotal
         Fg = $fg
@@ -1547,12 +1544,9 @@ function Get-ProgressInfo($job) {
     }
 }
 
-function Format-TimeLine($info, [string]$sep = ' · ') {
-    $s = '剩 ' + (Format-Eta $info.Eta)
-    if ($info.HasEta -and $info.Eta -ge 30) {
-        $s = $s + $sep + '预计 ' + (Format-Finish $info.Finish) + ' 完成'
-    }
-    return $s
+function Format-TimeLine($info) {
+    # 只留剩余时间：已用/总时长由调用方各写一次，不再重复
+    return ('剩 ' + (Format-Eta $info.Eta))
 }
 
 function Get-BarSeg([int]$pct, [int]$width) {
@@ -1585,11 +1579,6 @@ function Format-Eta($sec) {
     return ('约 ' + $h + ' 小时 ' + ($m % 60) + ' min')
 }
 
-function Format-Finish($t) {
-    if ($null -eq $t) { return '——' }
-    return $t.ToString('HH:mm')
-}
-
 function Get-PhaseTag($info) {
     if ($info.PhaseAll -gt 1) { return ($info.PhaseLabel + ' ' + $info.PhaseNo + '/' + $info.PhaseAll) }
     return $info.PhaseLabel
@@ -1604,10 +1593,9 @@ function Get-PctText($info) {
 function Render-Progress1($info, [string]$jobName, $ord, $total) {
     $bar = '[' + (Get-Bar $info.Pct 18) + ']'
     $etaTxt = '剩 ' + (Format-Eta $info.Eta)
-    if ($info.HasEta -and $info.Eta -ge 30) { $etaTxt = $etaTxt + ' → ' + (Format-Finish $info.Finish) }
     $tail = 'Q退出 K终止'
     if ([int]$total -gt 1) { $tail = ('作业 ' + $ord + '/' + $total + ' · ' + $tail) }
-    $txt = '▌【' + (Get-PhaseTag $info) + '】' + $bar + ' ' + (Get-PctText $info) + ' 已用 ' + (Format-Elapsed $info.Elapsed) + ' · ' + $etaTxt + ' · ' + $info.Detail + ' · ' + $tail
+    $txt = '▌【' + (Get-PhaseTag $info) + '】' + $bar + ' ' + (Get-PctText $info) + ' ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + $etaTxt + ' · ' + $info.Detail + ' · ' + $tail
     Show-StatusLine $txt $info.Fg $info.Bg
 }
 
@@ -1623,7 +1611,7 @@ function Render-Progress2($info, [string]$jobName, $ord, $total) {
                 @{ Text = ('   ' + (Get-PctText $info)); Color = $info.Bg }
             ) ($script:BoxW - 2)),
         (Pad-Row @(@{ Text = ('阶段   ' + (Get-PhaseTag $info) + ' · ' + $info.Detail); Color = $info.Bg }) ($script:BoxW - 2)),
-        (Pad-Row @(@{ Text = ('时间   已用 ' + (Format-Elapsed $info.Elapsed) + '（合计 ' + (Format-Elapsed $info.TotalElapsed) + '） · ' + (Format-TimeLine $info)); Color = $info.Bg }) ($script:BoxW - 2)),
+        (Pad-Row @(@{ Text = ('时间   ' + (Format-Elapsed $info.TotalElapsed) + '   ·   ' + (Format-TimeLine $info)); Color = $info.Bg }) ($script:BoxW - 2)),
         (Pad-Row @(@{ Text = '按键   Q 退出监视   K 终止作业'; Color = $info.Bg }) ($script:BoxW - 2))
     )
     Show-LiveBox 'COMSOL 计算进度' $rows $info.Bg
@@ -1652,7 +1640,7 @@ function Render-Progress3($info, [string]$jobName, $ord, $total) {
             ) ($script:BoxW - 2)),
         (Pad-Row @(@{ Text = $chain; Color = $info.Bg }) ($script:BoxW - 2)),
         (Pad-Row @(@{ Text = $info.Detail; Color = $info.Bg }) ($script:BoxW - 2)),
-        (Pad-Row @(@{ Text = ('已用 ' + (Format-Elapsed $info.Elapsed) + ' · ' + (Format-TimeLine $info) + ' · Q 退出监视  K 终止'); Color = $info.Bg }) ($script:BoxW - 2))
+        (Pad-Row @(@{ Text = ((Format-Elapsed $info.TotalElapsed) + '   ·   ' + (Format-TimeLine $info) + '   ·   Q 退出监视  K 终止'); Color = $info.Bg }) ($script:BoxW - 2))
     )
     Show-LiveBox $jobName $rows $info.Bg
 }
