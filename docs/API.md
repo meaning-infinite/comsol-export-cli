@@ -196,6 +196,20 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 配方 `Use = @(@{ Module='slice2d'; Name='field'; Planes=@('xy') })` 由 `Expand-Blocks`（cli.ps1）解析：
 1. 取模块 `Defaults`；2. 用调用里的键覆盖（`Name` 单独处理，其余必须在 `Keys` 里，否则报错）；3. 补 `Type=Kind`；4. 与老写法 `Export` 块合并。
 
+现有模块：
+
+| 模块 | Kind | 说明 |
+|---|---|---|
+| `bigtable` | bigtable | 通用原始大表（参数 + 谱线 + 各域吸收） |
+| `integral` | integral | 线/面积分 |
+| `modes` | modes | 模态数值表 |
+| `slice2d` | slice2d | 多切面二维正投影 |
+| `spectrum` | spectrum | 常规谱线 |
+| `table` | table | 任意表达式表 |
+| `image` | image | 单点场图：三维 1 张 + xy/xz/zy 二维 3 张，300 dpi |
+
+`image` 模块的关键字段：`SolNum`（取第几个解 —— 做"逐共振点各出一组场图"时就是各共振点的解号）、`Expr`、`Width`（长边像素，默认 1200，上限 4096）、`Height`（0 = 二维按切面长宽比自动）、`Title`（空 = 自动）、`Edges`。
+
 新增模块 = 加一个 psd1；新增能力 = `HANDLERS` 一行 + 一个 psd1。
 
 ## 5. 扩展指南

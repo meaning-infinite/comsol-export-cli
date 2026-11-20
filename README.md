@@ -63,12 +63,13 @@
 | `modes` | 每个模态一行数值 CSV（特征频率等） | `Expr` `Cols` `MaxModes` |
 | `integral` | 线/面积分数值 CSV | `Dim`(surface/line) `Ents`(all 或 `3,4,17`) `Expr` `Cols` |
 | `bigtable` | 通用原始大表：全局参数 + 谱线 + 各域吸收，一文件全给（表头全英文） | `Params`(all/none/名单) `AbsDomains`(auto/编号:名字) `AbsExpr` |
+| `image` | 单点场图：三维 1 张 + xy/xz/zy 三张二维，300 dpi | `SolNum`(第几个解) `Expr` `Width` `Height` `Title` `Edges` |
 
 - 参数没写在模块 `Keys` 里会直接报错，避免拼错字段悄悄失效。
 - 老的 `Export = @(@{Type=...})` 写法仍然可用，两种可以混写。
 - 加新模块 = 加一个 psd1（复制现有文件改 `Id`/`Kind`/`Defaults`）；加新能力 = 在 `ExportDriver.java` 的 `HANDLERS` 里加一行。
 
-固定口径：取数用 `abs(ewfd.S21)^2` / `abs(ewfd.S11)^2`（模型里没有 `ewfd.T`/`ewfd.R`）；平面名是 `xy` `zx` `yz`（COMSOL 用 `zx` 不用 `xz`）。
+固定口径：取数用 `abs(ewfd.S21)^2` / `abs(ewfd.S11)^2`（模型里没有 `ewfd.T`/`ewfd.R`）；`slice2d` 的平面名是 `xy` `zx` `yz`（COMSOL 的 `zx` = 横 z 纵 x），`image` 用 `xy` `xz` `zy`（`xz` = 横 x 纵 z，竖图）。
 
 场图（`Type = 'image'`，或写进配方的 `Export`）一次出四张，**300 dpi**，都带图题、色标、坐标轴刻度：
 

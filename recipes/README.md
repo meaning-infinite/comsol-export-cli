@@ -25,6 +25,7 @@
         @{ Module = 'spectrum'; Name = 'spectrum' }
         @{ Module = 'slice2d';  Name = 'field'; Planes = @('xy','zx','yz') }
         @{ Module = 'integral'; Name = 'flux'; Dim = 'surface'; Ents = 'all' }
+        @{ Module = 'image';    Name = 'field'; SolNum = '1' }
     )
 }
 ```
@@ -133,17 +134,24 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 @{ Type='image'; Name='field'; Expr='ewfd.normE'; Width='1200'; Edges='off' }
 ```
 
-一次出四个文件，都带图题、色标、坐标轴刻度：
+一次出四个文件（300 dpi，都带图题、色标、坐标轴刻度）：
 
 | 文件 | 内容 |
 |---|---|
 | `<名>_field_3d.png` | 三维默认视角，三张互相垂直的切片（过几何中心） |
-| `<名>_field_xy.png` | 正对 xy 面，横 x 纵 y |
-| `<名>_field_xz.png` | 正对 zx 面，横 z 纵 x |
-| `<名>_field_zy.png` | 正对 yz 面，横 y 纵 z |
+| `<名>_field_xy.png` | 正对 xy 面，横 x 纵 y（方图） |
+| `<名>_field_xz.png` | 正对 xz 面，横 x 纵 z（**竖图**，色标在下方） |
+| `<名>_field_zy.png` | 正对 zy 面，横 y 纵 z（**竖图**，色标在下方） |
 
 二维图按切面真实长宽比出图（`Height` 不写就自动算），不做拉伸。
 `Width` 是长边像素（上限 4096）；`Edges`（默认 `off`）画网格边；`Title` 空 = 「平面 + COMSOL 自动量名」。
+`SolNum`（默认 `1`）= 取第几个解：做「逐共振点各出一组场图」时，每个块填该共振点的解号即可。
+
+也可以走模块写法（推荐）：
+
+```powershell
+Use = @( @{ Module='image'; Name='res739'; SolNum='88' } )
+```
 
 ### eigenslice — 每个特征频率三张切面图
 
@@ -161,3 +169,4 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 - `ITO-LN-ITO.psd1`：只导透射/反射谱。
 - `示例-全导出.psd1`：四种类型各一个块，抄字段用。
 - `示例-模块.psd1`：只用模块调用的写法（推荐从这里抄）。
+- `20261119_候选共振细扫_共振场图导出.psd1`：7 个共振点各调用一次 `image` 模块，一次出 7 组场图（`SolNum` 就是各点在解序列里的序号）。
