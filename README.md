@@ -1,52 +1,55 @@
-﻿# COMSOL 导出 CLI
+﻿<p align="center"><img src="assets/banner.png" alt="COMSOL" width="640"></p>
 
-在远程/公共电脑上批量跑 COMSOL 模型、自动导出数据，只把结果回传。不用把 `.mph` 搬来搬去，也不用在 GUI 里手点导出。
+<p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
-## 干什么
+<p align="center">
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.8.2-2AA0B0"></a>
+  <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
+  <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
+  <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.x-368CCB">
+</p>
 
-1. 把裸模型放进 `models/`（参数、波长窗口都在模型里设好）；也可以放**指向 .mph 的快捷方式**（`.lnk`，或内容就是目标路径的 `.link` 文本文件、`.url`），CLI 会显示快捷方式名字、按快捷方式名字命名产物。快捷方式目标不存在时**照样列出来并标「（快捷方式目标不存在）」**（选它会直接报错并给出疑似同名的新文件），不再静默消失；
-2. 运行 `run.bat`，选模型、选配方。**模型列表最后多一项**（序号 = 条数 + 1）「从 solved\ 里选」：切到 `<models>\solved\` 再挑已算过的模型；从那里选中的模型默认只导出、不重算（要重算用 `-Mode solve`）；
-3. 后台求解 → 按配方的 Export 块导出 CSV/PNG → 写进 `output/<模型文件名>/`（每个模型一个同名子文件夹），文件名自动带模型名和时间戳
-4. 关掉窗口不影响计算；重开会自动接着等、或补做导出
+<p align="center"><img src="assets/screenshot.jpg" alt="计算进度" width="780"></p>
 
-菜单用上下键：`↑` `↓` 移动、`Enter` 确定、`Esc` 取消。不想按键也可以敲序号，`n` + `Enter` 直选（多个用逗号）。选模型是多选：`●` 已勾选、`○` 未选，空格切换、`A` 全选/全不选；确认后框会被清掉，只留一行 `✓ 已选: …`。确认类提示（开始导出 / 终止作业 / 再看一轮进度）也是同一套菜单，`是` / `否`，默认项带反色。
+## 特性
 
-## 目录
+- **不用守着**：选完模型和配方就交给后台，求解、导出、命名一路做完
+- **窗口关了也不丢**：重开后接着等、或补做导出，计算进程不受影响
+- **产物归拢**：结果写进 `output/<模型名>/`，文件名带模型名与时间戳，整目录回传即可
+- **换导出内容不改代码**：配方声明用哪些模块、覆盖哪些参数
+- **看得见进度**：单行、方框、阶段链三种样式，原地刷新不滚屏
+- **多解不出错**：按块显式取数并逐块核对列数，几百个波长也不会悄悄少列
 
+## 快速开始
+
+```powershell
+git clone https://github.com/meaning-infinite/comsol-export-cli.git
 ```
-<根>/
-  models/           裸模型（人工上传）
-  script/           ← 本仓库
-    run.bat         双击入口
-    cli.ps1         全部逻辑
-    driver/         ExportDriver.java（求解 + 导出 + 写文件）
-    recipes/        导出配方，见 recipes/README.md
-    modules/        预制模块，配方用 Use 调用，见下文
-    logs/           每个作业一个目录（作业文件 + 日志 + 标记）
-  output/           导出的 CSV / PNG，只回传这个目录
-    <模型文件名>/    每个模型一个同名子文件夹（如 output/ITO_LN_ITO_202611121701_sim_xy&r/），该模型的全部产物都放这里
-```
 
-## 常用命令
+1. 把 `.mph` 放进 `models/`
+2. 双击 `run.bat`，选择模型与配方
+3. 结束后从 `output/` 取结果
+
+需要 COMSOL 6.x 与 Windows 10/11。首次运行会扫描本机 COMSOL 安装，路径记在本地配置里，不进仓库。
+
+## 命令行
 
 | 命令 | 作用 |
 |---|---|
-| `run.bat` | 正常启动：选模型 → 选配方 → 确认 |
-| `run.bat -Mode export` | 只导出：模型里已经有解，跳过求解（交互时在选模型之前会先问模式） |
-| `run.bat -Mode watch` | 只监视：不看模型、不建作业，盯着队列里在跑/排队中的作业（窗口关了也不影响后台，重开一个用这个看进度） |
-| `run.bat -Mode solve` | 求解并导出（默认） |
-| `run.bat -Resume` | 不选东西，直接接着跑队列里没完成的作业 |
-| `run.bat -KillJob 2` | 终止第 2 个作业（只杀本 CLI 启动的） |
-| `run.bat -Setup` | 改 COMSOL 路径 / 并发数 / 模型目录 |
-| `run.bat -DryRun` | 只打印作业与导出块，不写队列、不启动计算 |
-| `run.bat -Modules` | 列出所有预制模块与可覆盖参数 |
-| `run.bat -ProgressStyle 3` | 换进度样式：`1` 单行 / `2` 方框（默认）/ `3` 阶段链 |
-| `run.bat -Cores 8` | 求解给 8 个核（默认交给 COMSOL 自己定） |
-| `run.bat -Heap 8g` | 手动指定 Java 堆（默认按物理内存 70%） |
+| `run.bat` | 交互启动：选模式、选模型、选配方 |
+| `run.bat -Mode export` | 只导出，跳过求解 |
+| `run.bat -Mode watch` | 监视在跑的任务 |
+| `run.bat -Resume` | 接着跑队列里没完成的作业 |
+| `run.bat -KillJob 2` | 终止第 2 个作业 |
+| `run.bat -Setup` | 修改 COMSOL 路径、并发数、模型目录 |
+| `run.bat -DryRun` | 只打印作业计划，不写队列、不计算 |
+| `run.bat -Cores 8` | 指定核数 |
+| `run.bat -Heap 8g` | 指定 Java 堆 |
+| `run.bat -Modules` | 列出预制模块与可覆盖参数 |
 
-## 预制模块（推荐写法）
+## 配方
 
-导出能力做成模块放在 `script/modules/*.psd1`，配方只写「用哪个模块、覆盖哪些参数、叫什么」：
+导出内容全在 `recipes/*.psd1`。配方声明用哪些模块、覆盖哪些参数：
 
 ```powershell
 @{
@@ -59,97 +62,30 @@
 }
 ```
 
-| 模块 | 产出 | 可覆盖 |
-|---|---|---|
-| `table` | 数据 CSV（任意表达式，每解一行） | `Expr` `Cols` |
-| `spectrum` | 透射/反射谱 CSV（λ,T,R）+ 可选曲线 PNG | `Plot` |
-| `slice2d` | 每个平面一张**二维正投影** PNG（xy→俯视、zx→侧视、yz→正视） | `Expr` `Planes` `At` `Width` `Height` `Title` |
-| `modes` | 每个模态一行数值 CSV（特征频率等） | `Expr` `Cols` `MaxModes` |
-| `integral` | 线/面积分数值 CSV | `Dim`(surface/line) `Ents`(all 或 `3,4,17`) `Expr` `Cols` |
-| `bigtable` | 通用原始大表：全局参数 + 谱线 + 各域吸收，一文件全给（表头全英文） | `Params`(all/none/名单) `AbsDomains`(auto/编号:名字) `AbsExpr` |
-| `image` | 单点场图：**只出 1 张组合总表**（三维 + xy/xz/zy 拼好），300 dpi | `SolNum`(全部解里的第几个) `Expr` `Width` `Height` `Title` `Edges` |
-
-- 参数没写在模块 `Keys` 里会直接报错，避免拼错字段悄悄失效。
-- 老的 `Export = @(@{Type=...})` 写法仍然可用，两种可以混写。
-- 加新模块 = 加一个 psd1（复制现有文件改 `Id`/`Kind`/`Defaults`）；加新能力 = 在 `ExportDriver.java` 的 `HANDLERS` 里加一行。
-
-固定口径：取数用 `abs(ewfd.S21)^2` / `abs(ewfd.S11)^2`（模型里没有 `ewfd.T`/`ewfd.R`）；`slice2d` 的平面名是 `xy` `zx` `yz`（COMSOL 的 `zx` = 横 z 纵 x），`image` 用 `xy` `xz` `zy`（`xz` = 横 x 纵 z，竖图）。
-
-场图（`Type = 'image'`，或写进配方的 `Export`）**只产出 1 张组合图**，`<名>_field_all.png`：三维在左、右边上 x-y 下 x-z/z-y 拼成一张；分面图只在作业临时目录里存在，拼完即删。总表 **300 dpi**（PNG 里写 pHYs=11811 px/m），带图题、色标、坐标轴刻度，默认画每个域的边界线，去掉了 COMSOL 徽标和三轴方向图标：
-
-| 文件 | 内容 |
+| 模块 | 产出 |
 |---|---|
-| `<名>_field_all.png` | **组合总表**（唯一产物）：每分量一块，三维在左、右边上 x-y 下 x-z/z-y；二维自己画竖轴与竖色标，没有 COMSOL 那圈框 |
+| `table` | 任意表达式的数据表，每解一行 |
+| `spectrum` | 透射/反射谱，附曲线图 |
+| `slice2d` | 指定平面的二维场图 |
+| `image` | 单点场图总表，三维加三切面拼成一张 |
+| `modes` | 特征频率等模态数据 |
+| `integral` | 线、面积分 |
+| `bigtable` | 全局参数、谱线、分域吸收合成一张大表 |
 
+模块位于 `script/modules/`，新增能力只需在 `driver/ExportDriver.java` 的 `HANDLERS` 中注册。
 
-`Expr` 默认 `ewfd.Ex,ewfd.Ey`（老师要求用分量，不用 `normE` 模值）；写多个表达式时逐分量各占一块、拼进同一张总表（仍然只有一个 PNG）。
+## 输出
 
-画布比例不再固定 4:3：三维按几何长宽比、二维按切面长宽比给，导出后按内容裁白边。分辨率按 300 dpi 的像素密度给足：二维短边约 1200、长边约 3600，三维长边约 3600，单边上限 4096；总表在旧版基础上整体 ×1.5（约 5200×4000）。`Height = 0`（默认）时二维像素由切面长宽比自动算，此时 `Width` 不参与（想钉死像素就同时写 `Width` 和 `Height`）；`Edges='off'` 可关域边界线，`Grid='on'` 才画三维坐标框（默认不画）。
+```
+output/
+  ITO_LN_ITO_202611121701_sim_xy&r/     ← 每个模型一个同名目录
+    ITO-LN-ITO_..._spectrum.csv
+    ITO-LN-ITO_..._field_all.png         ← 300 dpi
+```
 
-- `Height = 0`（默认）表示自动算，驱动会把 0 换成落地的像素值再导出。**别手动写 0 之外还要指望它当像素用**：COMSOL 导出节点本身不接受 `height = 0`，直接 `属性值无效…x > 0`，退出码 4。
-- 场图用的数据集固定是「该研究的解」新开的 Solution 数据集（`ds_img_N`），不沿用模型里第一个数据集——模型第一个数据集常是 CutPlane/视图类，挂上去导出一片白。
-- 二维绘图组的视图用 `view = auto`：轴范围正好框到数据，和 GUI 里看到的一致；手工设 `view2` 轴范围反而会被 1:1 撑大、留一圈白。
+## 开发
 
-## 解很多的时候（651 个波长这种）
-
-- 驱动先清点：对每个解节点读 `model.sol(tag).getSize()[1]`，日志打 `解节点 solX: N 个解` 与 `待导出解数`。
-- 再按块显式取：配方字段 `Chunk`（默认 200）控制每块多少个解，用 `innerinput=manualindices` + `solnumindices="1 2 …N"` 精确请求。**不再靠「取全部解」一次取完**——解多时 COMSOL 会静默少给列（远程曾出现 651 个解只写出 400 行）。
-- 每块校验「请求解数 = 返回列数」，不等就报错中止；解不出数的点（NaN/Inf）默认也报错，不写半截表（确认这些点本来无定义时在该块加 `Allownan=1`）。
-- 堆按物理内存自动给（默认 70%，最少 4GB）：`run.bat -Heap 8g` 或环境变量 `COMSOL_EXPORT_XMX=8g` 覆盖。解数据总量 ≈ 解数 × 单解大小（本仓约 8.25MB/解）。
-- 对账就看日志三行：`解节点 solX: 期望 N 个解，取到 M 列`、`合计 …`、`写出 …（N 行 × M 列）`。
-
-## 进度显示
-
-求解和导出是两个进程，CLI 负责交接：`comsolbatch` 先 headless 跑研究（不弹窗口、不占原模型），算完自动接着导出，中间不用管。
-
-| 看什么 | 从哪来 | 长什么样 |
-|---|---|---|
-| 求解进度 | `logs/<作业>/solve.log` 里的 `当前进度: NN % - 阶段` | 整项研究的百分比，扫参时不会每个点归零 |
-| 导出进度 | `logs/<作业>/progress.txt`（驱动逐块写） | `已取 120/651 个解 · 导出块 1/2` |
-| 总时长 | 作业启动时刻 | `00:07:12`，定态到秒——数字在走就说明进程还活着 |
-| 剩余时间 | 本次作业实测速率外推 | `剩 约 10 min`（不到 30 s 显示"即将完成"） |
-
-三套样式（`-ProgressStyle`，也可以设环境变量 `COMSOL_EXPORT_STYLE`；默认取配置 `ProgressStyle`，再不行用 `2`）：
-
-| 样式 | 形态 | 适合 |
-|---|---|---|
-| `1` | 单行：`▌【求解 1/2】[██████    ] 42% 00:07:12 · 剩 约 10 min · 矩阵分解 · sim_xy=501.0 · Q退出 K终止` | 长时间挂着，不滚屏 |
-| `2` | 方框五行：作业 / 进度 / 阶段 / 时间 / 按键 | 信息最全（默认） |
-| `3` | 八段链 `√准备 √网格 √编译 √求解器 √组装 √分解 √解方程 ·收尾` | 一眼看出卡在哪一步 |
-
-窗口标题也带进度：`【求解 42%】<模型名> - COMSOL 导出`。
-
-状态框是**原地差量刷新**：只重写变化的那几行（进度、阶段、时间），其余行不动，所以不会整屏重画、不会滚屏。第一次画出来之后就一直停在原处。
-
-窗口一启动就定好尺寸，之后不再改动：宽度 88 列（方框 74 字 + 边距），高度一直占满屏幕可用高度，并挪到左上角。
-想改宽度用 `-WinWidth 100`；不想让它动窗口就设环境变量 `COMSOL_EXPORT_NORESIZE=1`；想知道到底设上没有，加 `-WinDebug`，会多打一行 `[窗口] 目标 88 列，实得 …（px）· 每列 …px，每行 …px，可用高 …px`。
-（口径：像素尺寸是量出来的，不是按字体磅值算的——125% 缩放下字体报 16px、实际每行 20.5px，按磅值算必然偏矮。）
-
-按 `K` 终止是真杀进程：求解阶段的 `comsolbatch` 和导出阶段的 `java` 都按命令行识别（含作业目录或模型路径），连派生子进程一起 `taskkill /T /F`；最多重试 12 轮，杀完人工复核残留。作业一旦按过终止，就不会再被当成正常结束接手。
-把输出重定向到日志/管道时，自动降级成"阶段变了才打一行"，不刷屏。
-
-注意：进度条用的是**本次作业自己测出来的速率**，不看历史记录，所以刚开始的几分钟显示"未知"或跳动是正常的，跑过 3% 之后才稳定。
-
-## 状态与续跑
-
-每个作业一个目录 `script/logs/<时间戳>_<模型名>/`，里面放作业文件、日志和标记：
-
-| 标记 | 含义 | 重开 CLI 时 |
-|---|---|---|
-| 无标记 | 还没开始或中途断了 | 报"断开"，可手动重跑导出 |
-| `solved` | 模型已算完（`models/solved/` 里有解场） | 只补导出，不重新求解 |
-| `exporting` | 正在写文件 | 等待 |
-| `exported` | 全部写完 | 视为完成，顺手清自己的 `.lock` |
-
-监视时：`Q` 退出监视（不杀计算），`K` 终止本 CLI 启动的作业。
-
-## 锁
-
-只处理本作业自己那个模型的 `.lock`，且要同时满足：文件名对得上、没有别的进程在用这个模型、锁文件比作业启动晚、改名成功。任一条不满足就保留不动，避免误删别人的锁。
-
-## 改驱动后要重新编译
-
-带内部类的源码用 `comsolcompile` 只会生成主类文件，必须用 COMSOL 自带的 `javac`：
+改 `driver/ExportDriver.java` 后须重新编译，内部类才能一并生成：
 
 ```bat
 set COMSOL=D:\COMSOL\COMSOL64\Multiphysics
@@ -157,26 +93,10 @@ set COMSOL=D:\COMSOL\COMSOL64\Multiphysics
     -cp "%COMSOL%\plugins\*" -d driver driver\ExportDriver.java
 ```
 
-## 环境
-
-- Windows + PowerShell 5.1
-- COMSOL 6.x（`comsolbatch.exe` 所在版本必须 ≥ 保存模型用的版本）
-- 首次运行会扫 COMSOL 安装并记在本机配置里，不写进仓库
-
-## 配方
-
-导出什么、叫什么，全在 `recipes/*.psd1` 里，见 [recipes/README.md](recipes/README.md)。
-
-
-## 编码（别踩的坑）
-
-`cli.ps1`、`update.ps1`、`pack.ps1`、`modules\*.psd1`、`recipes\*.psd1` **必须存成 UTF-8 带 BOM**。PowerShell 5.1 会把无 BOM 的 UTF-8 按 GBK 解码，中文串被吃坏后整份脚本直接解析失败，报一串 `Missing closing '}'` / `意外的标记"}"`（实测：去掉 BOM 后 132 处报错，加上就 `PARSE_OK`）。
-
-`update.ps1` 与 `pack.ps1` 现在每次运行都会自动扫一遍并补 BOM；自己改脚本或从别处拷脚本进来，也要保持 BOM。
+脚本与模块文件须存为 UTF-8 带 BOM，否则 PowerShell 5.1 按 GBK 解码导致整份脚本无法解析。`update.ps1` 每次运行会自动补。
 
 ## 文档
 
-
-- 项目接口与扩展指南：[docs/API.md](docs/API.md)
-- COMSOL Java API 笔记：[docs/COMSOL-API.md](docs/COMSOL-API.md)
+- 接口与扩展：[docs/API.md](docs/API.md)
 - 配方字段：[recipes/README.md](recipes/README.md)
+- COMSOL Java API 笔记：[docs/COMSOL-API.md](docs/COMSOL-API.md)
