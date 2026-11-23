@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.8.2'
+$script:CliVersion = 'v1.8.3'
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
     '██╔════╝ ██╔═══██╗  ████╗ ████║  ██╔════╝  ██╔═══██╗  ██║     ',
@@ -504,16 +504,18 @@ function Read-Menu {
         $rows = New-MenuRows $Items $ItemColors $cur $marked ([bool]$Multi) $hint
         Show-LiveBox $Title $rows 'Cyan'
 
-        $ka = $false
-        try { $ka = [Console]::KeyAvailable } catch { $kaFail = $kaFail + 1 }
-        if ($kaFail -ge 20) {
-            # 没有真正的键盘句柄（被宿主接管等）：别死等，按默认值继续
-            Write-Host '  （键盘不可用，用默认值继续）' -ForegroundColor Yellow
-            $script:LiveTop = -1
-            if ($Multi) { return @($cur) }
-            return $cur
-        }
-        if (-not $ka) { Start-Sleep -Milliseconds 40; continue }
+        do {
+            $ka = $false
+            try { $ka = [Console]::KeyAvailable } catch { $kaFail = $kaFail + 1 }
+            if ($kaFail -ge 20) {
+                # 没有真正的键盘句柄（被宿主接管等）：别死等，按默认值继续
+                Write-Host '  （键盘不可用，用默认值继续）' -ForegroundColor Yellow
+                $script:LiveTop = -1
+                if ($Multi) { return @($cur) }
+                return $cur
+            }
+            if (-not $ka) { Start-Sleep -Milliseconds 40 }
+        } until ($ka)
         $key = [Console]::ReadKey($true)
         $kaFail = 0
         $name = $key.Key.ToString()

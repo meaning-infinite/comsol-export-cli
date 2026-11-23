@@ -1,0 +1,18 @@
+# AGENTS.md — COMSOL 自动计算与导出程序
+
+适用于本仓库。用户操作见 `README.md`，命令、配方和版本记录见 `docs/API.md`。在 COMSOL 工作区内维护时，同时遵守上层 AGENTS.md 的模型与求解红线。
+
+## 更新与 GitHub 交付
+
+- 从含 `run.bat`、`cli.ps1` 和 `.git` 的目录操作。公共电脑运行 `run.bat`，通过 `update.bat` 获取 GitHub 的 `master`。修复合入正式入口，避免单独维护远程版脚本。
+- 程序更新完成后，默认验证、提交并推送到 `meaning-infinite/comsol-export-cli` 的 `master`。用户要求仅本地修改或指定分支时按当次要求执行。
+- 提交前看差异，按文件暂存本次改动。用户自行调整的配方、机器配置、队列、日志、模型和导出结果留在本机。
+- 用户可见的程序更新同步维护 `cli.ps1` 的 `CliVersion`、README 版本徽章和 API 版本记录。推送后用 `git ls-remote origin refs/heads/master` 核对提交，交付时给出版本、提交链接和实测范围。
+- 涉及新增运行文件时，检查 `update.ps1`、`pack.ps1` 的文件清单，验证公共电脑更新后能从正常入口加载。
+
+## 开发与验证
+
+- 兼容 Windows PowerShell 5.1。`.ps1`、`.psd1` 使用 UTF-8 BOM；批处理启动器保持 ASCII、无 BOM、CRLF。
+- 菜单等待输入时只轮询键盘。修改控制台绘制后检查空闲时的输出、按键响应和重定向输入；远程显示效果注明在哪种终端验过。
+- 改配方先看 `recipes/`，改导出模块看 `modules/` 与 `driver/ExportDriver.java`。驱动修改按 README 用 COMSOL 自带 JDK 编译，随源码提交对应的主类和内部类。
+- 用 PowerShell 5.1 解析改动脚本，优先用 `-Modules`、`-DryRun` 或隔离的菜单测试验证。实跑求解、扫参、重划网格遵循工作区授权要求。队列与监视逻辑改动要覆盖重开窗口后接续已有作业的场景。
