@@ -114,7 +114,7 @@ function Get-BoxWidth([int]$contentW) {
     $w = $script:BoxW
     $lim = 0
     try { $lim = [Console]::BufferWidth - 6 } catch { }
-    if ($lim -gt 40 -and $w -gt $lim) { $w = $lim }
+    if ($lim -gt 0) { $w = [math]::Min($w, $lim) }
     return $w
 }
 function Get-BoxLines([string]$title, [string[]]$lines) {
@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.8.3'
+$script:CliVersion = 'v1.8.4'
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
     '██╔════╝ ██╔═══██╗  ████╗ ████║  ██╔════╝  ██╔═══██╗  ██║     ',
@@ -232,11 +232,8 @@ function Write-Banner {
     Write-Host ''
 }
 
-# 原地刷新的活动框：LiveTop=-1 表示还没画过
-# 刷新策略：逐行比对，只重写"内容变了"的那一行（差量），绝不整框重画
-$script:LiveTop = -1
+# LiveCount 记录光标上方为活动框预留的屏幕行数。
 $script:LiveCount = 0
-$script:LiveText = @()
 $script:LiveSig = ''
 $script:IsRedirected = $false
 try { $script:IsRedirected = [Console]::IsOutputRedirected } catch { }
@@ -285,24 +282,11 @@ function New-BoxDisplay([string]$title, $rows, [string]$border) {
     return , @($disp.ToArray())
 }
 
-# 写一行（段着色），右侧补空格到 $padTo 列，用于擦掉上一帧的残留
-function Write-LineSegs($segs, [int]$padTo) {
-    $used = 0
-    foreach ($s in $segs) {
-        $tx = [string]$s.Text
-        if ($tx) {
-            if ($s.Bg) { Write-Host $tx -NoNewline -ForegroundColor $s.Color -BackgroundColor $s.Bg }
-            else { Write-Host $tx -NoNewline -ForegroundColor $s.Color }
-            $used = $used + (Get-TextWidth $tx)
-        }
-    }
-    if ($padTo -gt $used) { Write-Host (' ' * ($padTo - $used)) -NoNewline }
-}
-
-function Get-LiveWidth {
-    $bw = 80
-    try { $bw = [math]::Max(40, [Console]::BufferWidth - 1) } catch { }
-    return $bw
+function Clear-ConsoleRows([int]$top, [int]$count) {
+    $raw = $Host.UI.RawUI
+    $rect = [Management.Automation.Host.Rectangle]::new(0, $top, $raw.BufferSize.Width - 1, $top + $count - 1)
+    $blank = [Management.Automation.Host.BufferCell]::new(' ', $raw.ForegroundColor, $raw.BackgroundColor, 'Complete')
+    $raw.SetBufferContents($rect, $blank)
 }
 
 function Show-LiveBox([string]$title, $rows, [string]$color) {
@@ -322,29 +306,28 @@ function Show-LiveBox([string]$title, $rows, [string]$color) {
     }
     try {
         $disp = New-BoxDisplay $title $norm $color
-        $count = @($disp).Count
-        $bw = Get-LiveWidth
-        # 定位方式：不用绝对行号，靠"上一帧刚好写完 $prev 行"这个事实相对回退。
-        # 绝对行号在控制台滚屏/改窗口后会整体错位，公共电脑上就表现为错行、旧内容残留。
-        $prev = [int]$script:LiveCount
-        $cur = -1
-        try { $cur = [int][Console]::CursorTop } catch { }
-        $anchored = ($prev -gt 0 -and $cur -ge $prev)
-        if ($anchored) { [Console]::SetCursorPosition(0, $cur - $prev) } else { Write-Host '' }
-        # 整块重画（不做按行差量：差量依赖绝对行号，一旦错位就会把第一行内容糊到第二三行）
+        $raw = $Host.UI.RawUI
+        $size = $raw.BufferSize
+        $count = [math]::Min($disp.Count, $size.Height - 1)
+        $prev = [math]::Min($script:LiveCount, [Console]::CursorTop)
+        if ($prev -eq 0 -and [Console]::CursorLeft -ne 0) { Write-Host '' }
+        # 先预留屏幕行，让必要的滚屏发生在定位之前。
+        for ($i = $prev; $i -lt $count; $i++) { Write-Host '' }
+        $height = [math]::Max($count, $prev)
+        $top = [Console]::CursorTop - $height
+        if ($prev -gt 0) { Clear-ConsoleRows $top $prev }
         for ($i = 0; $i -lt $count; $i++) {
-            Write-LineSegs $disp[$i].Segs $bw
-            Write-Host ''
+            [Console]::SetCursorPosition(0, $top + $i)
+            foreach ($seg in $disp[$i].Segs) {
+                if ($seg.Bg) {
+                    Write-Host $seg.Text -NoNewline -ForegroundColor $seg.Color -BackgroundColor $seg.Bg
+                } else {
+                    Write-Host $seg.Text -NoNewline -ForegroundColor $seg.Color
+                }
+            }
         }
-        if ($anchored -and $count -lt $prev) {
-            # 这一帧比上一帧矮：把多出来的旧行擦干净，再退回到框外第一行
-            $blank = ' ' * [math]::Max(1, $bw - 1)
-            for ($i = $count; $i -lt $prev; $i++) { Write-Host $blank }
-            try { [Console]::SetCursorPosition(0, $cur - $prev + $count) } catch { }
-        }
+        [Console]::SetCursorPosition(0, $top + $count)
         $script:LiveCount = $count
-        $script:LiveText = @($disp | ForEach-Object { [string]$_.Text })
-        $script:LiveTop = 0
     } catch {
         if ($title -ne $script:LiveSig) {
             $script:LiveSig = $title
@@ -388,21 +371,14 @@ function Show-StatusLine([string]$text, [string]$fg, [string]$bg) {
 
 function Clear-LiveBox {
     try {
-        $n = [int]$script:LiveCount
-        if ($script:LiveTop -ge 0 -and $n -gt 0) {
-            $bw = Get-LiveWidth
-            $cur = [int][Console]::CursorTop
-            $top = 0
-            if ($cur -ge $n) { $top = $cur - $n }
-            [Console]::SetCursorPosition(0, $top)
-            $blank = ' ' * [math]::Max(1, $bw - 1)
-            for ($i = 0; $i -lt $n; $i++) { Write-Host $blank }
+        $n = [math]::Min($script:LiveCount, [Console]::CursorTop)
+        if ($n -gt 0) {
+            $top = [Console]::CursorTop - $n
+            Clear-ConsoleRows $top $n
             [Console]::SetCursorPosition(0, $top)
         }
     } catch { }
-    $script:LiveTop = -1
     $script:LiveCount = 0
-    $script:LiveText = @()
 }
 
 # 数字输入解析：'1,3' → @(1,3)，只保留 1..$max 内的序号
@@ -474,6 +450,8 @@ function Read-Menu {
     # 输出被重定向（无人值守）或标准输入不是键盘时退回「方框 + 输入序号」
     $noKeys = [bool]$script:IsRedirected
     if (-not $noKeys) { try { $noKeys = [bool][Console]::IsInputRedirected } catch { $noKeys = $false } }
+    # 屏幕缓冲区装不下整个菜单时，用完整的编号列表，保留所有选项。
+    if (-not $noKeys) { $noKeys = ($n + 3 -ge [Console]::BufferHeight) }
     if ($noKeys) {
         $rows = @()
         for ($k = 1; $k -le $n; $k++) {
@@ -509,8 +487,8 @@ function Read-Menu {
             try { $ka = [Console]::KeyAvailable } catch { $kaFail = $kaFail + 1 }
             if ($kaFail -ge 20) {
                 # 没有真正的键盘句柄（被宿主接管等）：别死等，按默认值继续
+                Clear-LiveBox
                 Write-Host '  （键盘不可用，用默认值继续）' -ForegroundColor Yellow
-                $script:LiveTop = -1
                 if ($Multi) { return @($cur) }
                 return $cur
             }
@@ -2046,7 +2024,7 @@ function Format-Elapsed($ts) {
 
 function Invoke-Scheduler {
     $script:LiveSig = ''
-    $script:LiveTop = -1
+    $script:LiveCount = 0
     $spin = '|/-\'
     $i = 0
     $t0 = Get-Date
