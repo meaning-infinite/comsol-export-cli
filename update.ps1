@@ -4,7 +4,8 @@ param(
     [string]$Repo = 'meaning-infinite/comsol-export-cli',
     [string]$Branch = 'master',
     [string]$Offline = '',        # 离线包：本地 zip 路径（U 盘/微信传过来的）
-    [string]$Source = ''          # 指定一个 zip 直链（内网镜像）
+    [string]$Source = '',         # 指定一个 zip 直链（内网镜像）
+    [string]$InstallDir = ''      # 从新包更新旧安装时使用
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -14,6 +15,11 @@ function Fail([string]$msg, [int]$code) {
     exit $code
 }
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+if ($Offline) { $Offline = (Resolve-Path -LiteralPath $Offline).Path }
+if ($InstallDir) {
+    if (-not $Offline) { Fail 'InstallDir 仅适用于离线安装' 2 }
+    $ScriptDir = (Resolve-Path -LiteralPath $InstallDir).Path
+}
 Set-Location $ScriptDir
 
 # 脚本文件必须是 UTF-8 带 BOM：PowerShell 5.1 会把无 BOM 的 UTF-8 当 GBK 解码，
@@ -67,7 +73,7 @@ function Repair-Driver {
         $cfgFile = Join-Path $StateDir 'config.psd1'
         if (Test-Path -LiteralPath $cfgFile) {
             $cfg = Import-PowerShellDataFile -LiteralPath $cfgFile
-            $cb = [string]$cfg.ComsolPath
+            $cb = [string]$cfg.ComsolBatch
             if ($cb) { $root = Split-Path (Split-Path (Split-Path $cb -Parent) -Parent) -Parent }
         }
     } catch { }
@@ -83,7 +89,7 @@ function Repair-Driver {
     if ($root) { $javac = Join-Path $root 'java\win64\jre\bin\javac.exe' }
     if ($root -and (Test-Path -LiteralPath $javac)) {
         $cp = Join-Path $root 'plugins\*'
-        & $javac -encoding UTF-8 -nowarn -cp $cp -d $drv (Join-Path $drv 'ExportDriver.java') 2>&1 |
+        & $javac -encoding UTF-8 -proc:none -source 11 -target 11 -nowarn -cp $cp -d $drv (Join-Path $drv 'ExportDriver.java') 2>&1 |
             ForEach-Object { Write-Host ('    ' + $_) }
         $after = Get-DriverVer (Join-Path $drv 'ExportDriver.class')
         if ($after -eq $want) { Write-Host ('  已重新编译，driver 版本 ' + $after) -ForegroundColor Green }
@@ -97,7 +103,7 @@ function Repair-Driver {
 # ---------- 路线 A：已是 git 仓库 ----------
 $git = Get-Command git -ErrorAction SilentlyContinue
 $isGit = Test-Path -LiteralPath (Join-Path $ScriptDir '.git')
-if ($isGit -and $git) {
+if ($isGit -and $git -and -not $Offline -and -not $Source) {
     Write-Host '[1/2] 连接 GitHub 并拉取 ...' -ForegroundColor Cyan
     $ErrorActionPreference = 'Continue'
     & git -C $ScriptDir -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 fetch --depth 1 origin $Branch 2>&1 |
@@ -174,53 +180,76 @@ if ($res -eq 'AUTH') {
 if ($res -like 'ERR:*') { Fail ('下载失败（多半是连不上 GitHub）：' + $res.Substring(4)) 8 }
 $zip = $res
 
-Write-Host '[2/3] 解压并备份旧文件 ...' -ForegroundColor Cyan
-$stamp = Get-Date -Format 'yyyyMMddHHmmss'
-$tmp = Join-Path $env:TEMP ('comsol-export-unz-' + $stamp)
-Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
-$pkg = Get-ChildItem -LiteralPath $tmp -Directory | Select-Object -First 1
-if (-not $pkg) { Fail '压缩包结构不对（没有顶层目录）。' 10 }
-$verName = $pkg.Name
-
-$bak = Join-Path $ScriptDir ('_backup\' + $stamp)
-New-Item -ItemType Directory -Path $bak -Force | Out-Null
-$files = @('cli.ps1','run.bat','update.bat','update.ps1','README.md')
-$dirs  = @('driver','recipes','lib','docs')
-foreach ($f in $files) { $p = Join-Path $ScriptDir $f; if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $bak -Force } }
-foreach ($d in $dirs)  { $p = Join-Path $ScriptDir $d; if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $bak -Recurse -Force } }
-
-Write-Host '[3/3] 覆盖程序文件（logs / output / models 不动）...' -ForegroundColor Cyan
-# 注意：不能覆盖正在运行的 update.bat（cmd 会按字节偏移续读，导致执行乱码），改名为 .new
-$newLauncher = $false
-foreach ($f in $files) {
-    $src = Join-Path $pkg.FullName $f
-    if (-not (Test-Path -LiteralPath $src)) { continue }
-    if ($f -eq 'update.bat') {
-        $dst = Join-Path $ScriptDir 'update.bat'
-        if (-not (Test-Path -LiteralPath $dst) -or ((Get-FileHash -LiteralPath $src).Hash -ne (Get-FileHash -LiteralPath $dst).Hash)) {
-            Copy-Item -LiteralPath $src -Destination (Join-Path $ScriptDir 'update.bat.new') -Force
-            $newLauncher = $true
+Write-Host '[2/3] 核对发布清单 ...' -ForegroundColor Cyan
+$key = (Get-Date -Format 'yyyyMMddHHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0,8)
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("TEMP_comsol_update_$key")
+$bak = Join-Path $ScriptDir ("_backup\$key")
+$applied = [Collections.Generic.List[string]]::new()
+try {
+    Expand-Archive -LiteralPath $zip -DestinationPath $tmp
+    $roots = @(Get-ChildItem -LiteralPath $tmp -Directory)
+    if ($roots.Count -ne 1) { throw '离线包需要一个顶层目录' }
+    $pkg = $roots[0].FullName
+    $layoutFile = Join-Path $PSScriptRoot 'release.psd1'
+    if (-not [IO.File]::Exists($layoutFile)) { $layoutFile = Join-Path $pkg 'release.psd1' }
+    $layout = Import-PowerShellDataFile -LiteralPath $layoutFile
+    $files = @($layout.Files)
+    foreach ($rel in @($layout.Files) + @($layout.Directories) + @($layout.Required)) {
+        if ([IO.Path]::IsPathRooted($rel) -or $rel -match '(^|[\\/])\.\.([\\/]|$)' -or [string]::IsNullOrWhiteSpace($rel)) {
+            throw "发布清单路径无效 $rel"
         }
-        continue
     }
-    Copy-Item -LiteralPath $src -Destination (Join-Path $ScriptDir $f) -Force
-}
-foreach ($d in $dirs) {
-    $src = Join-Path $pkg.FullName $d
-    if (-not (Test-Path -LiteralPath $src)) { continue }
-    $dst = Join-Path $ScriptDir $d
-    if (-not (Test-Path -LiteralPath $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }
-    Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force
-}
-Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($dir in $layout.Directories) {
+        $parent = Join-Path $pkg $dir
+        if (-not [IO.Directory]::Exists($parent)) { throw "安装包缺少目录 $dir" }
+        $files += @(Get-ChildItem -LiteralPath $parent -Recurse -File | ForEach-Object { $_.FullName.Substring($pkg.Length+1).Replace('\','/') })
+    }
+    foreach ($rel in @($files) + @($layout.Required)) {
+        if (-not [IO.File]::Exists((Join-Path $pkg $rel))) { throw "安装包缺少 $rel" }
+    }
+    $inventory = Join-Path $pkg 'PACKAGE_FILES.json'
+    if ([IO.File]::Exists($inventory)) {
+        $expected = @{}
+        foreach ($entry in (Get-Content -LiteralPath $inventory -Raw -Encoding UTF8 | ConvertFrom-Json)) {
+            if ($expected.ContainsKey($entry.path)) { throw "清单中重复的路径 $($entry.path)" }
+            $expected[$entry.path] = $entry.sha256
+        }
+        if ($files.Count -ne $expected.Count) { throw '安装包文件数与清单不符' }
+        foreach ($rel in $files) {
+            if ((Get-FileHash -LiteralPath (Join-Path $pkg $rel)).Hash -ne $expected[$rel]) { throw "文件校验失败 $rel" }
+        }
+    } elseif ($Offline) { throw '离线包缺少 PACKAGE_FILES.json，请使用当前 pack.ps1 重新打包' }
 
-Repair-Bom $ScriptDir
-Repair-Driver $ScriptDir
-
-Write-Host ''
-Write-Host ('[完成] 已更新（' + $verName + '）') -ForegroundColor Green
-Write-Host ('        旧文件备份在 ' + $bak) -ForegroundColor DarkGray
-if ($newLauncher) { Write-Host '        启动器有新版：update.bat.new（把老的 update.bat 删掉、把 .new 改名去掉后缀即可）' -ForegroundColor Yellow }
-Write-Host '        机器配置、logs、output、models 都没有动。' -ForegroundColor DarkGray
-exit 0
+    Write-Host '[3/3] 备份并安装 ...' -ForegroundColor Cyan
+    foreach ($rel in $files) {
+        $src = Join-Path $pkg $rel
+        $dst = Join-Path $ScriptDir $rel
+        if ([IO.File]::Exists($dst) -and (Get-FileHash -LiteralPath $dst).Hash -eq (Get-FileHash -LiteralPath $src).Hash) { continue }
+        if ($rel -eq 'update.bat' -and [IO.File]::Exists($dst)) { $rel = 'update.bat.new'; $dst = Join-Path $ScriptDir $rel }
+        if ([IO.File]::Exists($dst)) {
+            $save = Join-Path $bak $rel
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($save)) | Out-Null
+            [IO.File]::Copy($dst,$save)
+        }
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($dst)) | Out-Null
+        $applied.Add($rel)
+        [IO.File]::Copy($src,$dst,$true)
+    }
+    Repair-Driver $ScriptDir
+    Write-Host ('[完成] 已检查 ' + $files.Count + ' 个发布文件，更新 ' + $applied.Count + ' 个。') -ForegroundColor Green
+    if ($applied.Contains('update.bat.new')) { Write-Host '启动器更新在 update.bat.new，关闭当前窗口后替换。' }
+} catch {
+    for ($k=$applied.Count-1; $k -ge 0; $k--) {
+        $dst=Join-Path $ScriptDir $applied[$k]
+        $save=Join-Path $bak $applied[$k]
+        if ([IO.File]::Exists($save)) { [IO.File]::Copy($save,$dst,$true) }
+        elseif ([IO.File]::Exists($dst)) { [IO.File]::Delete($dst) }
+    }
+    throw
+} finally {
+    if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($tmp)) -eq [IO.Path]::GetTempPath().TrimEnd('\') -and
+        [IO.Path]::GetFileName($tmp) -eq "TEMP_comsol_update_$key" -and [IO.Directory]::Exists($tmp)) {
+        Remove-Item -LiteralPath $tmp -Recurse -Force
+    }
+    if (-not $Offline -and [IO.File]::Exists($zip)) { [IO.File]::Delete($zip) }
+}

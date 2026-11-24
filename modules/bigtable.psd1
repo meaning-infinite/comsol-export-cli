@@ -10,5 +10,5 @@
         AbsExpr    = 'ewfd.Qh'    # 体积分被积函数
     }
 
-    Keys = @('Name', 'Params', 'AbsDomains', 'AbsExpr')
+    Keys = @('Name', 'Params', 'AbsDomains', 'AbsExpr', 'Allownan', 'Component', 'Material', 'Selection')
 }

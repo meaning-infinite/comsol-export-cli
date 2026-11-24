@@ -5,5 +5,5 @@
     Kind     = 'spectrum'
     Title    = '透射/反射谱'
     Defaults = @{ Plot = 'false' }
-    Keys     = @('Plot', 'Name')
+    Keys     = @('Plot', 'Name', 'Allownan')
 }

@@ -25,8 +25,13 @@ public class ExportDriver {
     static class Job {
         Map<String, String> p;
         Path jobDir, outdir, modelsDir, tmpdir;
-        String outname, dataset, datasetTag, study;
-        int blocks;
+        String outname, dataset, study, component = "";
+        int blocks, currentBlock, skipped;
+        final Map<Integer,Integer> blockFiles = new HashMap<>();
+        String runtime = "", loadedModel = "";
+        final Set<Path> expected = new LinkedHashSet<>();
+        final Map<Path,String> artifacts = new LinkedHashMap<>();
+        final List<String> details = new ArrayList<>();
         Model model;
         String[] pnames = new String[0];
         List<SolUse> sols = new ArrayList<>();
@@ -76,7 +81,9 @@ public class ExportDriver {
         String msg = root.getMessage() == null ? "" : root.getMessage().trim();
         msg = msg.replace("\r", "").replace("\n", " / ");
         while (msg.contains("  ")) msg = msg.replace("  ", " ");
-        StringBuilder sb = new StringBuilder(root.getClass().getSimpleName());
+        StringBuilder sb = new StringBuilder();
+        if (e != root && e.getMessage() != null) sb.append(e.getMessage().replace("\n", " / ")).append(" · ");
+        sb.append(root.getClass().getSimpleName());
         if (!msg.isEmpty()) sb.append(": ").append(msg);
         StackTraceElement[] st = root.getStackTrace();
         if (st != null) {
@@ -97,9 +104,14 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.7.16";
+    static final String DRIVER_VERSION = "v1.9.0";
 
-    static Path CURRENT_JOB_DIR = null;
+    static int progressBlock, progressBlocks, progressTotal, progressDone;
+    static boolean progressImages;
+    static final class JobFailure extends RuntimeException {
+        final int code;
+        JobFailure(int code, String message) { super(message); this.code = code; }
+    }
     static Path LOG_FILE = null;
     static Path PROGRESS_FILE = null;
     static String PROGRESS_LABEL = "导出";
@@ -118,207 +130,237 @@ public class ExportDriver {
 
     // 进度落盘：CLI 靠它显示「已取 x/N」。先写 progress.tmp 再改名，避免 CLI 读到半行。
     static void progress(int done, int total, String label) {
+        progressTotal = total;
+        progressDone = done;
         if (PROGRESS_FILE == null) return;
         String s = "done=" + done + "\ntotal=" + total + "\nlabel=" + label
-                + "\nts=" + System.currentTimeMillis() + "\n";
+                + "\nunit=" + (progressImages ? "files" : "solutions") + "\nblock=" + progressBlock + "\nblocks=" + progressBlocks + "\nts=" + System.currentTimeMillis() + "\n";
         try {
             Path tmp = PROGRESS_FILE.resolveSibling("progress.tmp");
             Files.write(tmp, s.getBytes(StandardCharsets.UTF_8));
-            Files.move(tmp, PROGRESS_FILE, StandardCopyOption.REPLACE_EXISTING);
+            publish(tmp, PROGRESS_FILE);
         } catch (Exception ignore) { }
     }
 
-    // 统一收尾：写 exit 标记（CLI 靠它判断退出码），刷 stdout/stderr，再退出
-    static void finish(Path jobDir, int code) {
-        if (jobDir != null) {
+    public static void main(String[] args) {
+        if (args.length == 1 && "--check-runtime".equals(args[0])) {
             try {
-                Files.write(jobDir.resolve("exit"), String.valueOf(code).getBytes(StandardCharsets.UTF_8));
-            } catch (IOException ignore) { }
+                ModelUtil.class.getMethod("loadCopy", String.class, String.class);
+                com.comsol.model.SolverSequence.class.getMethod("study");
+                com.comsol.model.Study.class.getMethod("getSolverSequences", String.class);
+                com.comsol.model.NumericalFeature.class.getMethod("getReal");
+                System.out.println(DRIVER_VERSION + " Java " + System.getProperty("java.version"));
+                return;
+            } catch (ReflectiveOperationException | LinkageError e) {
+                System.err.println("驱动与所选 COMSOL 安装不兼容：" + e);
+                System.exit(2);
+            }
         }
-        System.out.flush();
-        System.err.flush();
+        if (args.length != 1) {
+            System.err.println("usage: ExportDriver <job.properties>");
+            System.exit(2);
+        }
+        Job j = new Job();
+        Path spec = Paths.get(args[0]).toAbsolutePath();
+        j.jobDir = spec.getParent();
+        LOG_FILE = j.jobDir.resolve("driver.self.log");
+        PROGRESS_FILE = j.jobDir.resolve("progress.txt");
+        int code = 0;
+        String error = "";
+        try {
+            j.p = readSpec(spec);
+            Files.writeString(j.jobDir.resolve("started"), "pid=" + ProcessHandle.current().pid());
+            log("[driver] 启动 驱动版本=" + DRIVER_VERSION + " " + classStamp());
+            execute(j);
+        } catch (Throwable e) {
+            code = e instanceof JobFailure ? ((JobFailure)e).code : 4;
+            error = errText(e);
+            log("[driver] " + error);
+            log(stackOf(e));
+            System.err.println(error);
+        } finally {
+            try { ModelUtil.clear(); } catch (Throwable ignored) { }
+            if (j.tmpdir != null) {
+                try { deleteTree(j.tmpdir); } catch (IOException e) { String note = "临时目录清理失败 " + j.tmpdir + " " + e; j.details.add(note); log(note); }
+            }
+        }
+        try {
+            if (j.outdir != null) writeManifest(j, code, error);
+            if (code == 0) {
+                Files.deleteIfExists(j.jobDir.resolve("exporting"));
+                Files.writeString(j.jobDir.resolve("exported"), "ok");
+                log("[driver] 全部完成");
+            }
+        } catch (Exception e) {
+            code = 4;
+            System.err.println("写出交接清单或完成标记失败：" + e);
+        }
+        try { Files.writeString(j.jobDir.resolve("exit"), Integer.toString(code)); }
+        catch (IOException e) { System.err.println(e); }
         System.exit(code);
     }
 
-    public static void main(String[] args) {
-        // 控制台被重定向时 Java 默认不自动 flush，进程被杀就看得到 0 字节日志；这里强制 UTF-8 + 自动 flush
-        // 注意：不要用 new FileOutputStream(FileDescriptor.out) 重建 System.out ——
-        // 某些机器上该句柄不可用，会静默把输出丢光（远程曾出现 driver.log 恒为 0B）。
-        // 编码由 -Dfile.encoding=UTF-8 保证；日志另写 driver.self.log。
-        if (args.length < 1) { System.err.println("usage: ExportDriver <job.properties>"); System.exit(2); }
-
-        Job j = new Job();
-        try {
-            j.p = readSpec(Paths.get(args[0]));
-        } catch (IOException e) {
-            System.err.println("读作业文件失败: " + e.getMessage()); System.exit(2); return;
-        }
-        String modelPath = j.p.get("model");
-        String outdir = j.p.get("outdir");
+    static void execute(Job j) throws Exception {
+        String source = j.p.getOrDefault("model", "");
         j.outname = j.p.get("outname");
-        j.blocks = Integer.parseInt(j.p.getOrDefault("blocks", "0").trim());
-        j.jobDir = Paths.get(args[0]).toAbsolutePath().getParent();
-        CURRENT_JOB_DIR = j.jobDir;
-        LOG_FILE = j.jobDir.resolve("driver.self.log");
-        PROGRESS_FILE = j.jobDir.resolve("progress.txt");
-        log("[driver] 启动 pid=" + ProcessHandle.current().pid() + " java=" + System.getProperty("java.version")
-                + " 驱动版本=" + DRIVER_VERSION + " " + classStamp());
-        try {
-            Files.write(j.jobDir.resolve("started"),
-                    ("pid=" + ProcessHandle.current().pid()).getBytes(StandardCharsets.UTF_8));
-            log("[driver] 已写 started 标记");
-        } catch (IOException ignore) { }
-
-        if (modelPath == null || !Files.isRegularFile(Paths.get(modelPath))) {
-            System.err.println("模型不存在: " + modelPath); finish(j.jobDir, 2);
+        j.blocks = Integer.parseInt(j.p.getOrDefault("blocks", "0"));
+        if (source.isEmpty() || j.outname == null || j.blocks < 1)
+            throw new JobFailure(2, "作业缺少 model、outname 或导出块");
+        Path input = Paths.get(source).toAbsolutePath();
+        Path root = Paths.get(j.p.get("outdir")).toAbsolutePath();
+        j.outdir = j.p.containsKey("resultdir") ? Paths.get(j.p.get("resultdir")).toAbsolutePath().normalize() : root.resolve(modelBase(input));
+        Files.createDirectories(j.outdir);
+        j.modelsDir = Paths.get(j.p.getOrDefault("modelsdir", root.getParent().resolve("models").toString()));
+        Path solved = j.p.containsKey("solvedfile") ? Paths.get(j.p.get("solvedfile"))
+                : j.modelsDir.resolve("solved").resolve(j.outname + ".mph");
+        if (!Files.isRegularFile(solved) && Files.isRegularFile(j.jobDir.resolve("solved.mph")))
+            solved = j.jobDir.resolve("solved.mph");
+        String flag = j.p.getOrDefault("solve", "1");
+        boolean solve = !("0".equals(flag) || "false".equalsIgnoreCase(flag));
+        boolean resume = solve && Files.isRegularFile(j.jobDir.resolve("solved"));
+        Path load = resume ? solved : input;
+        if (!Files.isRegularFile(load)) throw new JobFailure(2, "找不到模型 " + load);
+        if (solve && !resume && "batch".equals(j.p.get("solver")))
+            throw new JobFailure(3, "批处理求解未完成，缺少 solved 标记");
+        j.loadedModel = load.toString();
+        ModelUtil.initStandalone(false);
+        j.runtime = ModelUtil.getComsolVersion();
+        log("[driver] COMSOL " + j.runtime + " 读取 " + load);
+        j.model = ModelUtil.loadCopy("m_export", load.toString());
+        j.study = resolveStudy(j.model, j.p.getOrDefault("study", ""));
+        if (solve && !resume) {
+            try { j.model.study(j.study).run(); }
+            catch (Exception e) { throw new JobFailure(3, errText(e)); }
+            Files.createDirectories(solved.getParent());
+            j.model.save(solved.toString());
+            Files.writeString(j.jobDir.resolve("solved"), "ok");
         }
-        if (j.blocks <= 0) { System.err.println("作业文件里没有 Export 块"); finish(j.jobDir, 2); }
-        // 产出按模型分文件夹：output\<模型文件名去 .mph>\ 下放该模型的全部产物，
-        // 免得多个模型的 csv/png 全挤在 output 里
-        Path outRoot = Paths.get(outdir).toAbsolutePath();
-        j.outdir = outRoot.resolve(modelBase(Paths.get(modelPath)));
-        log("[driver] 产出目录 " + j.outdir);
-
-        String modelsDirProp = j.p.getOrDefault("modelsdir", "").trim();
-        j.modelsDir = modelsDirProp.isEmpty()
-                ? outRoot.getParent().resolve("models")
-                : Paths.get(modelsDirProp).toAbsolutePath();
-        Path solvedModel = j.modelsDir.resolve("solved").resolve(j.outname + ".mph");
-        if (!Files.isRegularFile(solvedModel)) {
-            Path legacy = j.jobDir.resolve("solved.mph");
-            if (Files.isRegularFile(legacy)) solvedModel = legacy;
+        Files.writeString(j.jobDir.resolve("exporting"), "ok");
+        j.chunk = chunkSize(j);
+        j.sols = listSols(j);
+        int total = j.sols.stream().mapToInt(u -> u.n).sum();
+        if (total == 0) throw new JobFailure(4, "所选研究 " + j.study + " 没有已存解，请选择含有所需解的模型");
+        j.dataset = datasetFor(j, j.sols.get(0).tag);
+        String wanted = j.p.getOrDefault("solution", "").trim();
+        if (!wanted.isEmpty()) {
+            if (!hasDataset(j, wanted) || j.sols.stream().noneMatch(u -> u.tag.equals(j.model.result().dataset(wanted).getString("solution"))))
+                throw new JobFailure(2, "指定数据集不属于所选解范围 " + wanted);
+            j.dataset = wanted;
         }
-        Path mkSolved = j.jobDir.resolve("solved");
-        Path mkExporting = j.jobDir.resolve("exporting");
-        Path mkExported = j.jobDir.resolve("exported");
-
-        Path tmp = null;
-        try {
-            tmp = Files.createTempDirectory("comsol-export-");
-            j.tmpdir = tmp;
-            Path copy = tmp.resolve("model.mph");
-            Files.copy(Paths.get(modelPath), copy, StandardCopyOption.REPLACE_EXISTING);
-            log("[driver] 已拷模型到临时目录");
-
-            log("[driver] 初始化 COMSOL (initStandalone)…");
-            ModelUtil.initStandalone(false);
-            log("[driver] COMSOL 初始化完成");
-
-            String solveFlag = j.p.getOrDefault("solve", "1").trim();
-            boolean doSolve = !("0".equals(solveFlag) || "false".equalsIgnoreCase(solveFlag));
-            boolean resume = doSolve && Files.isRegularFile(solvedModel) && Files.isRegularFile(mkSolved);
-            Model model;
-            try {
-                if (resume) {
-                    System.out.println("[driver] 续跑：加载已求解的模型 " + solvedModel);
-                    model = ModelUtil.load("m_export", solvedModel.toString());
-                } else {
-                    System.out.println("[driver] 打开模型副本: " + copy);
-                    model = ModelUtil.load("m_export", copy.toString());
+        j.pnames = studyParamNames(j.model, j.study);
+        for (String tag : j.model.study(j.study).feature().tags()) {
+            var step = j.model.study(j.study).feature(tag);
+            j.details.add("研究步 " + tag + " · " + step.getType() + " · " + (step.isActive() ? "启用" : "停用"));
+            if (step.isActive() && "Parametric".equals(step.getType())) {
+                for (String key : Arrays.asList("pname", "plistarr", "punit")) {
+                    try { j.details.add(tag + "." + key + " = " + String.join(" | ", step.getStringArray(key))); }
+                    catch (RuntimeException ignored) { /* Property is optional in older models. */ }
                 }
-            } catch (Exception ex) {
-                String m = String.valueOf(ex.getMessage());
-                if (m.contains("later version")) {
-                    throw new RuntimeException("模型是由更高版本 COMSOL 创建的，当前驱动版本打不开。请用 -Setup [1] 选择与模型匹配的 COMSOL 版本后重试。");
-                }
-                throw ex;
             }
-            j.model = model;
-            System.out.flush();
+        }
+        planArtifacts(j);
+        j.details.add("扫描参数 " + (j.pnames.length == 0 ? "无" : String.join(", ", j.pnames)));
+        progressBlocks = j.blocks;
+        for (int i = 1; i <= j.blocks; i++) {
+            j.component = "";
+            j.dataset = wanted.isEmpty() ? datasetFor(j, j.sols.get(0).tag) : wanted;
+            j.currentBlock = i;
+            progressBlock = i;
+            String type = j.block(i, "type", "global").trim().toLowerCase(Locale.ROOT);
+            Handler handler = HANDLERS.get(type);
+            if (handler == null) throw new JobFailure(2, "未知导出类型 " + type);
+            PROGRESS_LABEL = "导出块 " + i + "/" + j.blocks + " " + j.block(i, "name", type);
+            progressImages = Arrays.asList("eigenslice", "slice2d", "image").contains(type);
+            progress(0, progressImages ? j.blockFiles.get(i) : total, PROGRESS_LABEL);
+            handler.run(j, i);
+            progress(progressTotal, progressTotal, PROGRESS_LABEL);
+            j.details.add("块 " + i + " " + j.block(i, "name", type) + " 已完成");
+        }
+        if (!j.expected.equals(j.artifacts.keySet())) throw new IOException("产物集合与配方不符");
+    }
 
-            j.study = resolveStudy(model, j.p.getOrDefault("study", ""));
-            if (!doSolve) {
-                System.out.println("[driver] 只导出：模型里已有解，跳过求解");
-                Files.write(mkExporting, "ok".getBytes(StandardCharsets.UTF_8));
-            } else if (!resume) {
-                System.out.println("[driver] 求解研究: " + j.study);
-                System.out.flush();
-                long t0 = System.currentTimeMillis();
-                log("[driver] heap max=" + (Runtime.getRuntime().maxMemory() / 1048576) + "MB");
-                try {
-                    log("[driver] 开始求解 (study=" + j.study + ")…");
-                    model.study(j.study).run();
-                    log("[driver] 求解结束");
-                } catch (Throwable e) {
-                    log("[driver] 求解异常: " + e);
-                    log(stackOf(e));
-                    finish(j.jobDir, 3);
+    static String eigenSuffix(boolean multi, int sequence, int mode, String plane) {
+        return (multi ? "_s" + sequence : "") + "_m" + mode + "_" + plane.trim() + ".png";
+    }
+
+    static void planArtifacts(Job j) {
+        for (int i = 1; i <= j.blocks; i++) {
+            String kind = j.block(i, "type", "global").toLowerCase(Locale.ROOT);
+            if (!HANDLERS.containsKey(kind)) throw new JobFailure(2, "未知导出类型 " + kind);
+            String fallback = "global".equals(kind) ? "export" + i : ("eigenslice".equals(kind) ? "eigen" + i : kind);
+            String name = j.block(i, "name", fallback);
+            j.p.putIfAbsent("block." + i + ".name", name);
+            String prefix = j.outname + "_" + name;
+            List<Path> files = new ArrayList<>();
+            if ("image".equals(kind)) files.add(j.outdir.resolve(prefix + "_all.png"));
+            else if ("eigenslice".equals(kind) || "slice2d".equals(kind)) {
+                String[] planes = split(j.block(i, "planes", "xy|zx|yz"));
+                for (String p : planes) {
+                    String plane = p.trim().toLowerCase(Locale.ROOT);
+                    if (!Arrays.asList("xy","zx","yz").contains(plane)) throw new JobFailure(2, "无效切面 " + p);
+                    if ("slice2d".equals(kind)) files.add(j.outdir.resolve(prefix + "_" + plane + ".png"));
+                    else {
+                        int max = Integer.parseInt(j.block(i, "maxmodes", "50"));
+                        if (max <= 0) throw new JobFailure(2, "MaxModes 必须为正整数");
+                        for (int n = 0; n < j.sols.size(); n++)
+                            for (int k = 1; k <= Math.min(max, j.sols.get(n).n); k++)
+                                files.add(j.outdir.resolve(prefix + eigenSuffix(j.sols.size()>1, n+1, k, plane)));
+                    }
                 }
-                System.out.println("[driver] 求解完成，耗时 " + (System.currentTimeMillis() - t0) / 1000 + " s");
-                System.out.flush();
-                Files.createDirectories(solvedModel.getParent());
-                model.save(solvedModel.toString());
-                System.out.println("[driver] 已求解模型: " + solvedModel);
-                Files.write(mkSolved, "ok".getBytes(StandardCharsets.UTF_8));
             } else {
-                System.out.println("[driver] 续跑：跳过求解");
+                files.add(csvTarget(j, i, name));
+                if ("spectrum".equals(kind) && Boolean.parseBoolean(j.block(i, "plot", "false")))
+                    files.add(j.outdir.resolve(prefix + ".png"));
             }
-            Files.write(mkExporting, "ok".getBytes(StandardCharsets.UTF_8));
-
-            j.datasetTag = j.p.getOrDefault("solution", "").trim();
-            if (j.datasetTag.isEmpty() || !hasDataset(j, j.datasetTag)) j.datasetTag = resolveDataset(model, j.study);
-            j.dataset = j.datasetTag;
-            System.out.println("[driver] 数据集: " + j.datasetTag
-                    + "（" + model.result().dataset(j.datasetTag).getType() + "）");
-            j.pnames = studyParamNames(model, j.study);
-            if (j.pnames.length > 0) {
-                System.out.println("[driver] 参数化扫描变量: " + String.join(", ", j.pnames));
-                System.out.flush();
+            j.blockFiles.put(i, files.size());
+            for (Path file : files) {
+                if (!j.outdir.equals(file.normalize().getParent()) || !j.expected.add(file))
+                    throw new JobFailure(2, "产物重名或路径越界 " + file);
             }
-
-            // 先清点解：每个解节点有多少个解，后面按块逐解取数并逐块校验列数
-            j.chunk = chunkSize(j);
-            j.sols = listSols(j);
-            int totSols = 0;
-            for (SolUse u : j.sols) {
-                System.out.println("[driver] 解节点 " + u.tag + (u.n > 0 ? ": " + u.n + " 个解" : ": 无可用解"));
-                if (u.n > 0) totSols += u.n;
-            }
-            System.out.println("[driver] 待导出解数 " + totSols + "，分块 " + j.chunk
-                    + "，heap max=" + (Runtime.getRuntime().maxMemory() >> 20) + "MB");
-            if (totSols == 0) {
-                System.out.println("[driver] 警告: 模型里没有可用的解（没求解过？先用 solve=1 跑研究）");
-            }
-            System.out.flush();
-            Files.createDirectories(j.outdir);
-
-            for (int i = 1; i <= j.blocks; i++) {
-                String type = j.block(i, "type", "global").trim().toLowerCase();
-                String name = j.block(i, "name", "export" + i).trim();
-                Handler h = HANDLERS.get(type);
-                if (h == null) {
-                    System.err.println("暂不支持的导出类型: " + type + "（可用: " + String.join(", ", HANDLERS.keySet()) + "）");
-                    finish(j.jobDir, 4);
-                }
-                System.out.println("[driver] 导出块 " + i + ": " + type + " / " + name);
-                System.out.flush();
-                PROGRESS_LABEL = "导出块 " + i + "/" + j.blocks + " " + name;
-                progress(0, totSols, PROGRESS_LABEL);
-                try {
-                    h.run(j, i);
-                } catch (Exception e) {
-                    String detail = errText(e);
-                    log("[driver] 导出块 " + name + " 失败: " + detail);
-                    log(stackOf(e));
-                    System.err.println("导出块 " + name + " 失败: " + detail);
-                    finish(j.jobDir, 4);
-                }
-            }
-
-            Files.deleteIfExists(mkExporting);
-            Files.write(mkExported, "ok".getBytes(StandardCharsets.UTF_8));
-            System.out.println("[driver] 全部完成");
-            finish(j.jobDir, 0);
-        } catch (Throwable e) {
-            log("[driver] 驱动异常: " + e);
-            log(stackOf(e));
-            System.err.println("驱动异常: " + e);
-            e.printStackTrace();
-            finish(j.jobDir, 4);
-        } finally {
-            try { ModelUtil.clear(); } catch (Exception ignore) { }
-            if (tmp != null) { try { deleteTree(tmp); } catch (Exception ignore) { } }
         }
+    }
+
+    static void record(Job j, Path path, String description) throws IOException {
+        if (!Files.isRegularFile(path) || Files.size(path) == 0) throw new IOException("缺少产物 " + path);
+        if (j.artifacts.putIfAbsent(path, description) != null) throw new IOException("产物重名 " + path);
+        if (progressImages) progress(progressDone + 1, progressTotal, PROGRESS_LABEL);
+    }
+
+    static void publish(Path staged, Path target) throws IOException {
+        try { Files.move(staged, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
+        catch (AtomicMoveNotSupportedException e) { Files.move(staged, target, StandardCopyOption.REPLACE_EXISTING); }
+    }
+
+    static void writeManifest(Job j, int code, String error) throws IOException {
+        List<String> lines = new ArrayList<>();
+        Collections.addAll(lines, "# Export manifest", "", "- 状态 " + (code == 0 ? "完成" : "失败 · " + error),
+                "- 作业 " + j.jobDir.getFileName(), "- 导出时间 " + java.time.OffsetDateTime.now(),
+                "- 输入模型 " + j.p.get("model"), "- 实际读取 " + j.loadedModel,
+                "- 研究 " + (j.study == null ? j.p.get("study") : j.study) + " · 解范围 " + j.p.getOrDefault("solscope", "study"),
+                "- 配方 " + j.p.getOrDefault("recipe", "job.properties"),
+                "- CLI " + j.p.getOrDefault("cli", "未记录") + " · driver " + DRIVER_VERSION + " · COMSOL " + j.runtime,
+                "- 配置块 " + j.blocks + " · 计划产物 " + (j.blockFiles.isEmpty() ? "未展开" : Integer.toString(j.expected.size())) + " · 完成产物 " + j.artifacts.size() + " · 跳过非有限行 " + j.skipped,
+                "", "## 解与产物", "");
+        if (!j.loadedModel.isEmpty()) {
+            Path source = Paths.get(j.loadedModel);
+            lines.add("- 输入文件 " + Files.size(source) + " bytes · 修改时间 " + Files.getLastModifiedTime(source));
+        }
+        for (Path p : j.expected) if (!j.artifacts.containsKey(p)) lines.add("- 缺件 " + p.getFileName());
+        for (SolUse u : j.sols) lines.add("- " + u.study + " / " + u.tag + " · 解 1–" + u.n);
+        for (Map.Entry<Path,String> a : j.artifacts.entrySet())
+            lines.add("- " + a.getKey().getFileName() + " · " + a.getValue() + " · " + Files.size(a.getKey()) + " bytes");
+        for (String detail : j.details) lines.add("- " + detail);
+        if (code != 0) lines.add("- 未完整交付，停止于块 " + j.currentBlock + "；其余请求见下方配方快照。");
+        Collections.addAll(lines, "", "## 作业规格", "", "```text");
+        j.p.forEach((k,v) -> lines.add(k + "=" + v));
+        lines.add("```");
+        String name = j.p.containsKey("resultdir") ? "EXPORT_MANIFEST.md" : j.jobDir.getFileName() + "_EXPORT_MANIFEST.md";
+        Path target = j.outdir.resolve(name);
+        Path part = Files.createTempFile(j.outdir, "manifest-", ".tmp");
+        try {
+            Files.write(part, lines, StandardCharsets.UTF_8);
+            publish(part, target);
+        } finally { Files.deleteIfExists(part); }
     }
 
     // ---------- 逐解取数核心 ----------
@@ -328,28 +370,29 @@ public class ExportDriver {
     // 现在先读每个解节点的解数 getSize()[1]，再按块显式指定解编号（manualindices）逐块取，
     // 每块都校验列数；取不满就报错，绝不静默写出不完整的表。
     static final class SolUse {
-        String tag;
+        String tag, study;
+        int offset;
         int n;          // 解数；<=0 表示该节点没有可用解
     }
 
     interface SliceSink {
         // solTag 解节点；from 起始解编号；nCols 本块解数；v[节点][表达式][解]
-        void slice(String solTag, int from, int nCols, double[][][] v) throws Exception;
+        void slice(SolUse solution, int from, int nCols, double[][][] v) throws Exception;
     }
 
     // 多次数据的模型：每个解节点配一个独立的 Solution 数据集，
     // 直接改 dset1 的 solution 属性在多研究/多步骤模型里不生效，会只剩第一步的解。
     static String datasetFor(Job j, String solTag) {
-        String tag = "dset_sol_" + solTag;
+        String tag = "dset_sol_" + solTag + (j.component.isEmpty() ? "" : "_" + j.component);
         try {
             if (!Arrays.asList(j.model.result().dataset().tags()).contains(tag)) {
                 j.model.result().dataset().create(tag, "Solution");
             }
             j.model.result().dataset(tag).set("solution", solTag);
+            if (!j.component.isEmpty()) j.model.result().dataset(tag).set("comp", j.component);
             return tag;
         } catch (Exception e) {
-            System.out.println("[driver] 警告: 解节点 " + solTag + " 建数据集失败（" + e.getMessage() + "），回退到 " + j.dataset);
-            return j.dataset;
+            throw new IllegalStateException("无法绑定解节点 " + solTag, e);
         }
     }
 
@@ -362,16 +405,68 @@ public class ExportDriver {
         return c < 1 ? 200 : (c > 5000 ? 5000 : c);
     }
 
+    static String solutionFamily(String type) {
+        String t = type == null ? "" : type.toLowerCase(Locale.ROOT);
+        if (t.contains("eigen") || t.contains("modeanalysis")) return "eigen";
+        if (t.equals("time") || t.startsWith("transient") || t.startsWith("timedependent")) return "time";
+        if (t.equals("parametric") || t.startsWith("stationary") || t.startsWith("frequency") || t.startsWith("wavelength")) return "stationary";
+        return "";
+    }
+
+    static boolean activeSequence(Model m, String study, String tag) {
+        Set<String> activeSteps = new HashSet<>(), activeFamilies = new HashSet<>(), disabledFamilies = new HashSet<>();
+        boolean enabledPhysics = false;
+        for (String step : m.study(study).feature().tags()) {
+            var feature = m.study(study).feature(step);
+            String type = feature.getType();
+            if (Arrays.asList("Parametric", "Batch", "BatchSweep", "ClusterSweep").contains(type)) continue;
+            if (feature.isActive()) {
+                activeSteps.add(step);
+                activeFamilies.add(solutionFamily(type));
+                enabledPhysics = true;
+            } else disabledFamilies.add(solutionFamily(type));
+        }
+        if (!enabledPhysics) return false;
+        boolean bound = false, enabledBinding = false, disabledBinding = false;
+        for (String f : m.sol(tag).feature().tags()) {
+            var feature = m.sol(tag).feature(f);
+            if (!"StudyStep".equals(feature.getType())) continue;
+            String step = feature.getString("studystep");
+            if (step == null || step.isEmpty()) continue;
+            bound = true;
+            if (activeSteps.contains(step)) enabledBinding = true; else disabledBinding = true;
+        }
+        if (bound && !enabledBinding) return false;
+        if (bound && !disabledBinding) return true;
+        // Stored/compound sequences may not identify a single step. With conflicting steps of the
+        // same solution type the default scope cannot establish ownership; explicit all remains available.
+        String family = solutionFamily(m.sol(tag).getType());
+        if (family.isEmpty()) return disabledFamilies.isEmpty();
+        if (disabledFamilies.contains(family)) return false;
+        return activeFamilies.contains(family) || activeFamilies.contains("");
+    }
+
     static List<SolUse> listSols(Job j) {
         List<SolUse> list = new ArrayList<>();
+        boolean all = "all".equalsIgnoreCase(j.p.getOrDefault("solscope", "study"));
+        int offset = 0;
+        Set<String> related = new HashSet<>(Arrays.asList(j.model.study(j.study).getSolverSequences("All")));
         for (String t : j.model.sol().tags()) {
+            String study;
+            try { study = j.model.sol(t).study(); }
+            catch (RuntimeException e) { study = ""; } // Unattached stored solution.
+
+            if (!all && !(j.study.equals(study) || ((study == null || study.isEmpty()) && related.contains(t)))) continue;
+            if (j.model.sol(t).isEmpty()) continue;
+            if (!all && !activeSequence(j.model, j.study, t)) {
+                j.details.add("未选择解 " + t + " · 研究步已停用或存储解归属不唯一");
+                continue;
+            }
+            int[] size = j.model.sol(t).getSize();
+            if (size.length < 2 || size[1] <= 0) continue;
             SolUse u = new SolUse();
-            u.tag = t;
-            u.n = 0;
-            try {
-                int[] sz = j.model.sol(t).getSize();
-                if (sz != null && sz.length >= 2 && sz[1] > 0) u.n = sz[1];
-            } catch (Exception ignore) { }
+            u.tag = t; u.study = study == null || study.isEmpty() ? (related.contains(t) ? j.study : "") : study;
+            u.n = size[1]; u.offset = offset; offset += u.n;
             list.add(u);
         }
         return list;
@@ -406,7 +501,8 @@ public class ExportDriver {
         } catch (Exception e) {
             throw new IllegalStateException(where + " 取数失败（节点 " + node + "）: " + e.getMessage());
         }
-        int got = (a == null || a.length == 0) ? 0 : a[0].length;
+        int got = (a == null || a.length == 0 || a[0] == null) ? 0 : a[0].length;
+        if (a != null) for (double[] row : a) if (row == null || row.length != expect) { got = row == null ? 0 : row.length; break; }
         if (got != expect) {
             throw new IllegalStateException(where + " 取数不完整：要 " + expect + " 列，实得 " + got
                     + " 列（节点 " + node + "）。可能是解没存全，或 Java 堆不够（当前 max="
@@ -416,32 +512,38 @@ public class ExportDriver {
     }
 
     static LinkedHashMap<String, int[]> walkSols(Job j, String[] nodes, SliceSink sink) throws Exception {
+        return walkSols(j, nodes, Integer.MAX_VALUE, sink);
+    }
+
+    static LinkedHashMap<String, int[]> walkSols(Job j, String[] nodes, int limit, SliceSink sink) throws Exception {
         LinkedHashMap<String, int[]> stat = new LinkedHashMap<>();
-        int chunk = chunkSize(j);
+        int chunk = j.chunk;
         int totN = 0;
         for (SolUse u : j.sols) { if (u.n > 0) totN += u.n; }
+        totN = Math.min(totN, limit);
         int doneN = 0;
         progress(0, totN, PROGRESS_LABEL);
         for (SolUse u : j.sols) {
-            if (u.n <= 0) continue;
+            int count = Math.min(u.n, limit - doneN);
+            if (count <= 0) break;
             String dset = datasetFor(j, u.tag);
             for (String nd : nodes) j.model.result().numerical(nd).set("data", dset);
             int got = 0;
-            for (int from = 1; from <= u.n; from += chunk) {
-                int to = Math.min(u.n, from + chunk - 1);
+            for (int from = 1; from <= count; from += chunk) {
+                int to = Math.min(count, from + chunk - 1);
                 int nCols = to - from + 1;
                 for (String nd : nodes) pinChunk(j, nd, from, to);
                 double[][][] v = new double[nodes.length][][];
                 for (int q = 0; q < nodes.length; q++) {
                     v[q] = realChunk(j, nodes[q], nCols, "解节点 " + u.tag + " 第 " + from + "…" + to + " 个解");
                 }
-                sink.slice(u.tag, from, nCols, v);
+                sink.slice(u, from, nCols, v);
                 got += nCols;
                 doneN += nCols;
                 progress(doneN, totN, PROGRESS_LABEL);
             }
             for (String nd : nodes) unpinChunk(j, nd);
-            stat.put(u.tag, new int[] { u.n, got });
+            stat.put(u.tag, new int[] { count, got });
         }
         progress(totN, totN, PROGRESS_LABEL);
         return stat;
@@ -460,7 +562,9 @@ public class ExportDriver {
 
     static void requireNoLoss(Job j, int i, int nan) {
         if (nan <= 0) return;
+        j.skipped += nan;
         if ("1".equals(j.block(i, "allownan", "0").trim())) {
+            j.details.add("块 " + i + " 按 Allownan=1 跳过 " + nan + " 行");
             System.out.println("[driver] 警告: 有 " + nan + " 个解算不出数（NaN/Inf），已按 Allownan=1 跳过");
             return;
         }
@@ -469,60 +573,109 @@ public class ExportDriver {
                 + (Runtime.getRuntime().maxMemory() >> 20) + "MB");
     }
 
-    // 整行内容做键，替掉 O(n²) 的全表比较
-    static final class RowKey {
-        final double[] v;
-        final int h;
-        RowKey(double[] v) { this.v = v; this.h = Arrays.hashCode(v); }
-        @Override public int hashCode() { return h; }
-        @Override public boolean equals(Object o) {
-            return (o instanceof RowKey) && Arrays.equals(v, ((RowKey) o).v);
+    static String csvCell(String text) {
+        if (text.indexOf(',') < 0 && text.indexOf('"') < 0 && !text.contains("\n") && !text.contains("\r")) return text;
+        return "\"" + text.replace("\"", "\"\"") + "\"";
+    }
+
+    // A physical expression with an explicit unit evaluates to a dimensionless value.
+    static String[] columnExpressions(Job j, int i, String[] expressions, String[] columns) {
+        String[] units = j.blockArr(i, "units");
+        if (units.length != 0 && units.length != expressions.length) throw new IllegalArgumentException("Units 与 Expr 长度不同");
+        String[] result = expressions.clone();
+        for (int k = 0; k < result.length; k++) {
+            String unit = units.length == 0 ? "" : units[k].trim();
+            String expr = result[k].replace(" ", "");
+            if (unit.isEmpty() && columns[k].endsWith("_nm") && expr.matches("c_const/(?:[A-Za-z0-9_]+\\.)?freq")) unit = "nm";
+            if (!unit.isEmpty()) result[k] = "(" + result[k] + ")/1[" + unit + "]";
+        }
+        return result;
+    }
+
+    static final String WAVE_EXPR = "(c_const/real(freq))/1[nm]";
+
+    static double[] wavelengths(Job j, SolUse u, int from, int count) {
+        String tag = "gev_identity_wave";
+        try {
+            if (!Arrays.asList(j.model.result().numerical().tags()).contains(tag))
+                j.model.result().numerical().create(tag, "EvalGlobal");
+            j.model.result().numerical(tag).set("data", datasetFor(j, u.tag));
+            j.model.result().numerical(tag).set("expr", WAVE_EXPR);
+            pinChunk(j, tag, from, from + count - 1);
+            return realChunk(j, tag, count, "波长标识")[0];
+        } catch (RuntimeException e) {
+            // Time/stationary solutions may have no frequency.
+            return new double[0];
         }
     }
 
-    // 流式写 CSV：逐行落 .part，全部成功才改名；中途失败不留半截文件
-    static final class CsvStream {
+    static final class CsvStream implements AutoCloseable {
+        final Job job;
         final Path target, part;
-        final BufferedWriter w;
-        boolean nmFirst, committed;
-        CsvStream(Path target, String[] cols) throws IOException {
-            this.target = target;
-            Files.createDirectories(target.getParent());
-            this.part = target.resolveSibling(target.getFileName() + ".part");
-            this.w = Files.newBufferedWriter(part, StandardCharsets.UTF_8);
-            w.write(String.join(",", cols));
-            w.newLine();
+        final BufferedWriter writer;
+        final String[] columns;
+        final boolean addWave;
+        int rows;
+        boolean committed;
+        CsvStream(Job j, Path path, String[] cols) throws IOException {
+            job = j; target = path; columns = cols.clone();
+            Set<String> unique = new HashSet<>(Arrays.asList("study_tag", "sol_tag", "sol_num", "solution_index"));
+            for (String c : cols) if (c.isBlank() || !unique.add(c)) throw new IllegalArgumentException("CSV 列名为空、重复或保留：" + c);
+            addWave = !unique.contains("lambda_nm");
+            part = Files.createTempFile(target.getParent(), "csv-", ".part");
+            writer = Files.newBufferedWriter(part, StandardCharsets.UTF_8);
+            for (String c : columns) { writer.write(csvCell(c)); writer.write(','); }
+            if (addWave) writer.write("lambda_nm,");
+            writer.write("study_tag,sol_tag,sol_num,solution_index");
+            writer.newLine();
         }
-        void row(double[] v) throws IOException {
-            StringBuilder sb = new StringBuilder();
-            for (int q = 0; q < v.length; q++) {
-                if (q > 0) sb.append(',');
-                if (q == 0 && nmFirst) {
-                    // 6.4 的 c_const/ewfd.freq 直接给 nm；别的版本给 m，按量级兜一下
-                    double nm = Math.abs(v[q]) < 1.0 ? v[q] * 1e9 : v[q];
-                    sb.append(String.format(Locale.ROOT, "%.2f", nm));
-                } else {
-                    sb.append(String.format(Locale.ROOT, "%.6g", v[q]));
-                }
+        void row(double[] values, SolUse u, int local, double[] wave, int col) throws IOException {
+            for (double value : values) {
+                if (Double.isFinite(value)) writer.write(Double.toString(value));
+                writer.write(',');
             }
-            w.write(sb.toString());
-            w.newLine();
+            if (addWave) {
+                if (wave.length > col && Double.isFinite(wave[col])) writer.write(Double.toString(wave[col]));
+                writer.write(',');
+            }
+            writer.write(csvCell(u.study) + "," + csvCell(u.tag) + "," + local + "," + (u.offset + local));
+            writer.newLine(); rows++;
         }
         void commit() throws IOException {
-            w.close();
-            Files.move(part, target, StandardCopyOption.REPLACE_EXISTING);
+            if (rows == 0) throw new IOException("没有可输出的有限数据行");
+            writer.close();
+            publish(part, target);
             committed = true;
+            record(job, target, rows + " 行 · " + String.join(", ", columns));
         }
-        void abort() {
-            if (committed) return;
-            try { w.close(); } catch (Exception ignore) { }
-            try { Files.deleteIfExists(part); } catch (Exception ignore) { }
+        public void close() throws IOException {
+            try { writer.close(); } finally { if (!committed) Files.deleteIfExists(part); }
         }
     }
 
-    static boolean nmFirst(String[] cols, String[] expr) {
-        return cols.length > 0 && expr.length > 0
-                && cols[0].endsWith("_nm") && expr[0].trim().startsWith("c_const/");
+    static void writeRows(Job j, int i, String node, String[] cols, boolean modes) throws Exception {
+        String name = j.block(i, "name", "export" + i);
+        int limit = modes ? Integer.parseInt(j.block(i, "maxmodes", "50").trim()) : Integer.MAX_VALUE;
+        if (limit < 1) throw new IllegalArgumentException("MaxModes 必须为正整数");
+        List<String> header = new ArrayList<>();
+        if (modes) header.add("mode");
+        Collections.addAll(header, cols);
+        try (CsvStream out = new CsvStream(j, csvTarget(j, i, name), header.toArray(new String[0]))) {
+            int[] nan = {0};
+            logSols(walkSols(j, new String[] {node}, limit, (u, from, n, v) -> {
+                double[] wave = out.addWave ? wavelengths(j, u, from, n) : new double[0];
+                for (int c = 0; c < n; c++) {
+                    double[] row = new double[header.size()];
+                    int off = modes ? 1 : 0;
+                    if (modes) row[0] = u.offset + from + c;
+                    for (int q = 0; q < cols.length; q++) row[q+off] = v[0][q][c];
+                    if (!Arrays.stream(row).allMatch(Double::isFinite)) { nan[0]++; continue; }
+                    out.row(row, u, from+c, wave, c);
+                }
+            }));
+            requireNoLoss(j, i, nan[0]);
+            out.commit();
+        }
     }
 
     // ---------- global / spectrum ----------
@@ -534,6 +687,7 @@ public class ExportDriver {
         if (expr0.length == 0 || cols0.length != expr0.length) {
             throw new IllegalStateException("expr/cols 数量不匹配");
         }
+        expr0 = columnExpressions(j, i, expr0, cols0);
         int m = j.pnames.length;
         String[] expr = new String[m + expr0.length];
         String[] cols = new String[m + cols0.length];
@@ -549,45 +703,15 @@ public class ExportDriver {
         j.model.result().numerical(node).set("expr", expr);
         j.model.result().numerical(node).set("descr", cols);
 
-        Path target = csvTarget(j, i, name);
-        CsvStream out = new CsvStream(target, cols);
-        out.nmFirst = nmFirst(cols, expr);
-        Set<RowKey> seen = new HashSet<>();
-        int[] st = new int[3];              // 0 行数, 1 NaN 个数, 2 重复行数
-        try {
-            LinkedHashMap<String, int[]> stat = walkSols(j, new String[] { node }, (tag, from, nCols, v) -> {
-                double[][] a = v[0];
-                for (int c = 0; c < nCols; c++) {
-                    double[] row = new double[expr.length];
-                    boolean ok = true;
-                    for (int q = 0; q < expr.length; q++) {
-                        double val = a[q][c];
-                        row[q] = val;
-                        if (Double.isNaN(val) || Double.isInfinite(val)) ok = false;
-                    }
-                    if (!ok) { st[1]++; continue; }
-                    if (!seen.add(new RowKey(row))) { st[2]++; continue; }
-                    out.row(row);
-                    st[0]++;
-                }
-            });
-            logSols(stat);
-            if (st[0] == 0) throw new IllegalStateException("没有取到任何解（检查解节点与表达式）");
-            requireNoLoss(j, i, st[1]);
-            out.commit();
-        } finally {
-            out.abort();
-        }
-        System.out.println("[driver] 写出 " + target + "（" + st[0] + " 行 × " + cols.length + " 列"
-                + (st[2] > 0 ? "，重复解已合并 " + st[2] + " 行" : "") + "）");
+        writeRows(j, i, node, cols, false);
     }
 
     // spectrum：透射/反射谱（CSV 必出，曲线图可选 Plot=true）
     static void exportSpectrum(Job j, int i) throws Exception {
         String name = j.block(i, "name", "spectrum");
         if (j.block(i, "expr", "").trim().isEmpty()) {
-            j.p.put("block." + i + ".expr", "c_const/ewfd.freq|abs(ewfd.S21)^2|abs(ewfd.S11)^2");
-            j.p.put("block." + i + ".cols", "lambda_nm|T|R");
+            j.p.put("block." + i + ".expr", "(c_const/ewfd.freq)/1[nm]|abs(ewfd.S21)^2|abs(ewfd.S11)^2");
+            j.p.put("block." + i + ".cols", "lambda_nm|T00|R00");
         }
         exportGlobal(j, i);
         if ("true".equalsIgnoreCase(j.block(i, "plot", "false").trim())) {
@@ -602,11 +726,12 @@ public class ExportDriver {
         j.model.result(tag).create("glob1", "Global");
         String[] expr = { "abs(ewfd.S21)^2", "abs(ewfd.S11)^2" };
         j.model.result(tag).feature("glob1").set("expr", expr);
-        j.model.result(tag).feature("glob1").set("descr", new String[] { "T", "R" });
+        j.model.result(tag).feature("glob1").set("descr", new String[] { "T00", "R00" });
         try { j.model.result(tag).set("title", name); } catch (Exception ignore) { }
         j.model.result(tag).run();
         Path png = j.outdir.resolve(j.outname + "_" + name + ".png");
         exportPng(j, i, tag, png);
+        record(j, png, "零阶透反射曲线 · 数据集 " + j.dataset);
         System.out.println("[driver] 写出 " + png);
     }
 
@@ -627,15 +752,6 @@ public class ExportDriver {
         }
         if (want <= 0) throw new Exception("SolNum 必须从 1 开始，收到 " + want);
         List<SolUse> sols = j.sols;
-        if (sols.isEmpty()) {
-            sols = new ArrayList<SolUse>();
-            for (String tag : j.model.sol().tags()) {
-                SolUse s = new SolUse();
-                s.tag = tag;
-                try { s.n = j.model.sol(tag).getSize()[1]; } catch (Exception ignore) { }
-                sols.add(s);
-            }
-        }
         int acc = 0;
         StringBuilder ranges = new StringBuilder();
         for (SolUse s : sols) {
@@ -657,7 +773,8 @@ public class ExportDriver {
         java.util.List<Path[]> perComp = new java.util.ArrayList<>();
         java.util.List<String> sfxList = new java.util.ArrayList<>();
         // 分面图只是拼总表用的中间件：写到作业临时目录，拼完即删，outdir 里只留组合图
-        Path work = (j.tmpdir != null ? j.tmpdir : j.outdir).resolve("img_" + i);
+        if (j.tmpdir == null) j.tmpdir = Files.createDirectories(j.jobDir.resolve("render-work"));
+        Path work = j.tmpdir.resolve("img_" + i);
         try {
             Files.createDirectories(work);
             for (String s : list) {
@@ -674,12 +791,14 @@ public class ExportDriver {
                 k++;
             }
             // 拼版：每个分量一块 —— 左边三维，右边上 xy、下 xz 与 zy 均分（用户指定）
-            if (!perComp.isEmpty()) {
+            if (perComp.isEmpty()) throw new IllegalArgumentException("场图 Expr 为空");
+            {
                 java.util.List<String> labels = new java.util.ArrayList<>();
                 for (String s : list) { String e = s.trim(); if (!e.isEmpty()) labels.add(e); }
                 String name0 = j.block(i, "name", "image");
                 Path all = j.outdir.resolve(j.outname + "_" + name0 + "_all.png");
                 composeFieldSheet(perComp, labels, sfxList, i, all);
+                record(j, all, "场图 " + String.join(", ", labels));
             }
         } finally {
             try { deleteTree(work); } catch (Exception ignore) { }
@@ -852,7 +971,22 @@ public class ExportDriver {
         // 之前把绘图组钉在 firstDataset（模型里第一个 Solution 数据集）上，周期结构模型里
         // 第一个数据集常常不是「研究1//解 1」，解号对不上就从窗口外裁剪，图全白。
         String dsData = "ds_img_" + i + tagSfx;
-        String[] pick = pickSol(j, solnum);
+        String solTag = j.block(i, "soltag", "").trim();
+        String[] pick;
+        if (solTag.isEmpty()) pick = pickSol(j, solnum);
+        else {
+            SolUse selected = j.sols.stream().filter(u -> solTag.equals(u.tag)).findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("所选研究中没有解 " + solTag));
+            int local = Integer.parseInt(solnum);
+            if (local < 1 || local > selected.n) throw new IllegalArgumentException("解号超出 " + solTag + " 的范围");
+            pick = new String[]{solTag, Integer.toString(local)};
+        }
+        if (tagSfx.isEmpty() || tagSfx.equals("_0")) {
+            SolUse u = j.sols.stream().filter(x -> x.tag.equals(pick[0])).findFirst().get();
+            double[] wave = wavelengths(j, u, Integer.parseInt(pick[1]), 1);
+            j.details.add("场图 " + name + " · " + u.study + "/" + u.tag + "/" + pick[1]
+                    + (wave.length > 0 && Double.isFinite(wave[0]) ? " · " + wave[0] + " nm" : ""));
+        }
         String localSol = pick[1];
         log("[driver] 场图解 " + solnum + " → 解节点 " + pick[0] + " 第 " + localSol + " 个");
         if (hasDataset(j, dsData)) {
@@ -883,7 +1017,7 @@ public class ExportDriver {
         // 三维切片会被裁剪在可视范围外，导出成空白白图
         trySet(j.model.result(tag3), "view", "auto");   // auto = COMSOL 默认三维视角，和 GUI 里看到的一致
         j.model.result(tag3).set("data", dsData);
-        trySet(j.model.result(tag3), "solnum", localSol);
+        j.model.result(tag3).set("solnum", localSol);
         String[][] cuts = {
                 { "sli1", "xy", "quickz", Double.toString(zc) },
                 { "sli2", "zx", "quicky", Double.toString(yc) },
@@ -959,7 +1093,7 @@ public class ExportDriver {
             String pg = "pg2d_" + i + tagSfx + "_" + plane;
             if (!hasResult(j, pg)) j.model.result().create(pg, "PlotGroup2D");
             j.model.result(pg).set("data", dtag);
-            trySet(j.model.result(pg), "solnum", localSol);
+            j.model.result(pg).set("solnum", localSol);
             int[] px = canvasSize(pxW, pxH, plane, bb);
             // 竖图（细长截面）把色标挪到下方：右侧色标会吃掉本就只有几百像素的宽度，
             // COMSOL 为保 1:1 会把纵轴撑大，数据只剩中间一条
@@ -1260,6 +1394,7 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         String expr = j.block(i, "expr", "ewfd.normE").trim();
         String[] planes = j.block(i, "planes", "xy|zx|yz").trim().split("\\|");
         int maxModes = Integer.parseInt(j.block(i, "maxmodes", "50").trim());
+        if (maxModes <= 0) throw new IllegalArgumentException("MaxModes 必须为正整数");
         String tag = "pg_eig_" + i;
         buildSliceGroup(j, i, tag);
         j.model.result(tag).feature("sli1").set("expr", expr);
@@ -1281,20 +1416,21 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
             for (int k = 1; k <= nMode; k++) {
                 try {
                     j.model.result(tag).set("solnum", Integer.toString(k));
-                } catch (Exception ex) { break; }
+                } catch (Exception ex) { throw new IllegalStateException("无法选择模态 " + solTag + "/" + k, ex); }
                 boolean any = false;
                 for (String plane : planes) {
                     try {
                         j.model.result(tag).feature("sli1").set("quickplane", plane.trim());
                         j.model.result(tag).feature("sli1").set(offsetKey(plane.trim()), j.block(i, "at", "0").trim());
                         j.model.result(tag).run();
-                        String mid = multiSol ? ("_s" + solIdx + "_m" + k) : ("_m" + k);
-                        Path png = j.outdir.resolve(j.outname + mid + "_" + plane.trim() + ".png");
+                        Path png = j.outdir.resolve(j.outname + "_" + j.block(i, "name", "eigen" + i)
+                                + eigenSuffix(multiSol, solIdx, k, plane));
                         exportPng(j, i, tag, png);
                         System.out.println("[driver] 写出 " + png);
+                        record(j, png, solTag + "/" + k + " " + plane);
                         written++; any = true;
                     } catch (Exception ex) {
-                        System.out.println("[driver] 模式 " + k + " 平面 " + plane + " 跳过: " + ex.getMessage());
+                        throw new IOException("缺少模态切片 " + solTag + "/" + k + "/" + plane, ex);
                     }
                 }
                 if (!any) break;
@@ -1344,6 +1480,7 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
             j.model.result(pg).run();
             Path png = j.outdir.resolve(j.outname + "_" + name + "_" + plane + ".png");
             exportPng(j, i, pg, png);
+            record(j, png, expr + " · " + plane + " · 数据集 " + j.dataset);
             System.out.println("[driver] 写出 " + png);
         }
     }
@@ -1358,6 +1495,8 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         if (expr.length == 0) { expr = new String[] { "ewfd.normE" }; }
         if (cols.length != expr.length) throw new IllegalStateException("expr/cols 数量不匹配");
         String node = "int_" + i;
+        if (!dim.equals("line") && !dim.equals("surface")) throw new IllegalArgumentException("Dim 必须为 line 或 surface");
+        expr = columnExpressions(j, i, expr, cols);
         String type = dim.equals("line") ? "IntLine" : "IntSurface";
         if (!Arrays.asList(j.model.result().numerical().tags()).contains(node)) {
             j.model.result().numerical().create(node, type);
@@ -1381,36 +1520,52 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
                 throw new IllegalStateException("实体编号不存在（" + dim + "）: " + ents + " — " + e.getMessage());
             }
         }
-        List<double[]> found = evalAll(j, i, node, expr.length);
-        if (found.isEmpty()) throw new IllegalStateException("积分没有取到任何值（检查实体编号与表达式）");
-        double[][] data = new double[expr.length][found.size()];
-        for (int c = 0; c < found.size(); c++)
-            for (int q = 0; q < expr.length; q++) data[q][c] = found.get(c)[q];
-        Path target = csvTarget(j, i, name);
-        writeCsv(target, data, expr, cols);
-        System.out.println("[driver] 写出 " + target);
+        writeRows(j, i, node, cols, false);
     }
-
 
     // ---------- bigtable：通用原始大表（全局参数 + 谱线 + 各域吸收） ----------
     static void exportBigTable(Job j, int i) throws Exception {
         String name = j.block(i, "name", "bigtable");
         String domSpec = j.block(i, "absdomains", "auto").trim();
         String absExpr = j.block(i, "absexpr", "ewfd.Qh").trim();
-        String paramSpec = j.block(i, "params", "all").trim().toLowerCase(Locale.ROOT);
+        String paramSpec = j.block(i, "params", "all").trim();
+
+        String component = j.block(i, "component", "").trim();
+        if (component.isEmpty()) {
+            String[] components = j.model.component().tags();
+            if (components.length != 1 && !domSpec.equalsIgnoreCase("none"))
+                throw new IllegalArgumentException("多个组件，请在 bigtable 指定 Component");
+            if (components.length > 0) component = components[0];
+        } else if (!Arrays.asList(j.model.component().tags()).contains(component)) {
+            throw new IllegalArgumentException("找不到组件 " + component);
+        }
+        if (j.model.component().tags().length > 1 && !component.isEmpty()) {
+            j.component = component;
+            j.dataset = datasetFor(j, j.sols.get(0).tag);
+        }
+        String material = j.block(i, "material", "").trim();
+        String selection = j.block(i, "selection", "").trim();
+        if ((!selection.isEmpty() && !material.isEmpty()) || (!domSpec.equalsIgnoreCase("auto") && (!selection.isEmpty() || !material.isEmpty())))
+            throw new IllegalArgumentException("Material、Selection、显式 AbsDomains 只能选择一种");
+        String species = (material.isEmpty() && selection.isEmpty()) ? "ITO" : "abs";
+        Set<String> requested = new LinkedHashSet<>();
+        for (String key : paramSpec.split("[,|]")) if (!key.trim().isEmpty()) requested.add(key.trim());
 
         // 1) 全局参数表达式
         List<String> pExps = new ArrayList<>();
         List<String> pNames = new ArrayList<>();
-        if (!paramSpec.equals("none")) {
+        if (!paramSpec.equalsIgnoreCase("none")) {
             for (String v : j.model.param().varnames()) {
-                if (paramSpec.equals("all") || Arrays.asList(split(paramSpec)).contains(v.toLowerCase(Locale.ROOT))) {
+                if (paramSpec.equalsIgnoreCase("all") || requested.remove(v)) {
                     pExps.add(v); pNames.add(v + "_val");
                 }
             }
         }
 
-        String[] specExpr = { "c_const/ewfd.freq", "ewfd.freq/1e12", "abs(ewfd.S21)^2", "abs(ewfd.S11)^2",
+        if (!paramSpec.equalsIgnoreCase("all") && !paramSpec.equalsIgnoreCase("none") && !requested.isEmpty())
+            throw new IllegalArgumentException("未知 Params 参数 " + requested);
+
+        String[] specExpr = { "(c_const/ewfd.freq)/1[nm]", "ewfd.freq/1[THz]", "abs(ewfd.S21)^2", "abs(ewfd.S11)^2",
                 "ewfd.Ttotal", "ewfd.Rtotal", "arg(ewfd.S21)", "1-ewfd.Ttotal-ewfd.Rtotal", "ewfd.Pin" };
         String[] specCols = { "lambda_nm", "freq_THz", "T00", "R00", "T_total", "R_total",
                 "phase_S21_rad", "A_1-T-R", "Pin_W" };
@@ -1420,13 +1575,19 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         String[] domNames;
         if (domSpec.equalsIgnoreCase("auto")) {
             List<Integer> cand = new ArrayList<>();
-            for (String mt : j.model.component("comp1").material().tags()) {
-                String label = j.model.component("comp1").material(mt).label();
-                if (label == null || !label.toLowerCase(Locale.ROOT).contains("ito")) continue;
-                for (int e : j.model.component("comp1").material(mt).selection().entities(3))
-                    if (!cand.contains(e)) cand.add(e);
+            if (!selection.isEmpty()) {
+                for (int e : j.model.component(component).selection(selection).entities(3)) cand.add(e);
+            } else {
+                for (String mt : j.model.component(component).material().tags()) {
+                    String label = j.model.component(component).material(mt).label();
+                    boolean match = material.isEmpty() ? label != null && label.toLowerCase(Locale.ROOT).contains("ito")
+                            : material.equals(mt) || material.equalsIgnoreCase(label);
+                    if (!match) continue;
+                    for (int e : j.model.component(component).material(mt).selection().entities(3))
+                        if (!cand.contains(e)) cand.add(e);
+                }
             }
-            if (cand.isEmpty()) throw new IllegalStateException("没有找到材料名含 ITO 的域（可在 AbsDomains 里显式写编号）");
+            if (cand.isEmpty()) throw new IllegalArgumentException("未找到吸收域，请核对 Component、Material、Selection 或 AbsDomains");
             double[] zc = new double[cand.size()];
             for (int z = 0; z < cand.size(); z++) zc[z] = domainZCenter(j, cand.get(z));
             Integer[] order = new Integer[cand.size()];
@@ -1437,7 +1598,7 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
             domNames = new String[cand.size()];
             for (int z = 0; z < order.length; z++) {
                 domIds[z] = cand.get(order[z]);
-                domNames[z] = layerName(z, order.length);
+                domNames[z] = (order.length <= 3 && species.equals("ITO") ? layerName(z, order.length) + "_" : "") + "d" + domIds[z];
             }
         } else if (domSpec.isEmpty() || domSpec.equalsIgnoreCase("none")) {
             domIds = new int[0]; domNames = new String[0];
@@ -1457,6 +1618,12 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
             for (int z = 0; z < ids.size(); z++) { domIds[z] = ids.get(z); domNames[z] = nms.get(z); }
         }
 
+        Set<Integer> uniqueDomains = new HashSet<>();
+        for (int d = 0; d < domIds.length; d++) {
+            if (domIds[d] <= 0 || domNames[d].isBlank()) throw new IllegalArgumentException("域号必须为正、域名不能为空");
+            if (!uniqueDomains.add(domIds[d])) throw new IllegalArgumentException("重复吸收域 " + domIds[d]);
+            j.details.add("吸收域 " + domNames[d] + " · " + component + " 域 " + domIds[d] + " · " + absExpr);
+        }
         // 3) 建节点
         String gNode = "bt_g_" + i;
         if (!Arrays.asList(j.model.result().numerical().tags()).contains(gNode))
@@ -1488,16 +1655,13 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         // 5) 列名（全 ASCII）
         List<String> cols = new ArrayList<>(pNames);
         java.util.Collections.addAll(cols, specCols);
-        for (String nm : domNames) { cols.add("Qrh_ITO_" + nm + "_W"); cols.add("A_ITO_" + nm + "_pct"); }
-        cols.add("Qrh_ITO_total_W"); cols.add("A_ITO_total_pct");
+        for (String nm : domNames) { cols.add("Qrh_" + species + "_" + nm + "_W"); cols.add("A_" + species + "_" + nm + "_pct"); }
+        cols.add("Qrh_" + species + "_total_W"); cols.add("A_" + species + "_total_pct");
 
         Path target = csvTarget(j, i, name);
-        CsvStream out = new CsvStream(target, cols.toArray(new String[0]));
-        out.nmFirst = nmFirst(cols.toArray(new String[0]), specExpr);
-        Set<RowKey> seen = new HashSet<>();
-        int[] st = new int[3];              // 0 行数, 1 NaN 个数, 2 重复行数
+        int[] st = new int[3]; // rows, non-finite source values, zero Pin
         int base = nP + specExpr.length;
-        try {
+        try (CsvStream out = new CsvStream(j, target, cols.toArray(new String[0]))) {
             LinkedHashMap<String, int[]> stat = walkSols(j, nodes, (tag, from, nCols, v) -> {
                 double[][] a = v[0];
                 for (int c = 0; c < nCols; c++) {
@@ -1510,21 +1674,19 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
                     }
                     if (!ok) { st[1]++; continue; }
                     double pin = row[nP + 8];
-                    if (pin == 0) pin = 1.0;
-                    row[nP + 8] = pin;
+                    if (pin == 0) st[2]++;
                     double sumQ = 0;
                     for (int z = 0; z < nDom; z++) {
                         double q = v[z + 1][0][c];
                         if (Double.isNaN(q) || Double.isInfinite(q)) { ok = false; break; }
                         row[base + z * 2] = q;
-                        row[base + z * 2 + 1] = 100.0 * q / pin;
+                        row[base + z * 2 + 1] = normalizedAbsorption(q, pin);
                         sumQ += q;
                     }
                     if (!ok) { st[1]++; continue; }
-                    row[base + nDom * 2] = sumQ;
-                    row[base + nDom * 2 + 1] = 100.0 * sumQ / pin;
-                    if (!seen.add(new RowKey(row))) { st[2]++; continue; }
-                    out.row(row);
+                    row[base + nDom * 2] = nDom == 0 ? Double.NaN : sumQ;
+                    row[base + nDom * 2 + 1] = nDom == 0 ? Double.NaN : normalizedAbsorption(sumQ, pin);
+                    out.row(row, tag, from+c, new double[0], c);
                     st[0]++;
                 }
             });
@@ -1532,11 +1694,13 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
             if (st[0] == 0) throw new IllegalStateException("大表没有取到任何数据（检查解节点与研究设置）");
             requireNoLoss(j, i, st[1]);
             out.commit();
-        } finally {
-            out.abort();
         }
-        System.out.println("[driver] 写出 " + target + "（" + st[0] + " 行 × " + cols.size() + " 列"
-                + (st[2] > 0 ? "，重复解已合并 " + st[2] + " 行" : "") + "）");
+        if (st[2] > 0) j.details.add("Pin_W 为零 " + st[2] + " 行，归一化吸收列留空");
+        if (nDom == 0) j.details.add("未计算分域吸收，分域合计列留空");
+    }
+
+    static double normalizedAbsorption(double watts, double inputWatts) {
+        return inputWatts == 0 ? Double.NaN : 100.0 * watts / inputWatts;
     }
 
     // 按 z 位置给吸收域起英文名：1 个 ito；2 个 lower/upper；3 个 lower/hole/upper
@@ -1556,7 +1720,9 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         j.model.result().numerical(tag).set("data", j.dataset);
         j.model.result().numerical(tag).set("expr", new String[] { "1", "z" });
         j.model.result().numerical(tag).selection().set(new int[] { dom });
-        double[][] r = j.model.result().numerical(tag).getReal();
+        pinChunk(j, tag, 1, 1);
+        double[][] r = realChunk(j, tag, 1, "吸收域 " + dom);
+        if (r.length != 2 || r[1].length != 1) throw new IllegalStateException("吸收域缺少体积或高度 " + dom);
         double v = r[0][0];
         if (v == 0) throw new IllegalStateException("吸收域 " + dom + " 体积为 0");
         return r[1][0] / v;
@@ -1569,9 +1735,8 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         String[] colsIn = j.blockArr(i, "cols");
         if (exprIn.length == 0) { exprIn = new String[] { "ewfd.freq" }; colsIn = new String[] { "freq" }; }
         if (colsIn.length != exprIn.length) throw new IllegalStateException("expr/cols 数量不匹配");
-        final String[] expr = exprIn;
+        final String[] expr = columnExpressions(j, i, exprIn, colsIn);
         final String[] cols = colsIn;
-        int maxModes = Integer.parseInt(j.block(i, "maxmodes", "50").trim());
         String node = "gmod_" + i;
         if (!Arrays.asList(j.model.result().numerical().tags()).contains(node)) {
             j.model.result().numerical().create(node, "EvalGlobal");
@@ -1579,69 +1744,7 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         j.model.result().numerical(node).set("data", j.dataset);
         j.model.result().numerical(node).set("expr", expr);
         j.model.result().numerical(node).set("descr", cols);
-        // 逐解取数（按块显式指定解编号），按表达式去重后连续编号
-        List<double[]> rows = new ArrayList<>();
-        Set<RowKey> seen = new HashSet<>();
-        int[] st = new int[3];
-        LinkedHashMap<String, int[]> stat = walkSols(j, new String[] { node }, (tag, from, nCols, v) -> {
-            double[][] a = v[0];
-            for (int c = 0; c < nCols; c++) {
-                double[] row = new double[expr.length + 1];
-                boolean ok = true;
-                for (int q = 0; q < expr.length; q++) {
-                    double val = a[q][c];
-                    if (Double.isNaN(val) || Double.isInfinite(val)) { ok = false; break; }
-                    row[q + 1] = val;
-                }
-                if (!ok) { st[1]++; continue; }
-                double[] key = new double[expr.length];
-                System.arraycopy(row, 1, key, 0, expr.length);
-                if (!seen.add(new RowKey(key))) { st[2]++; continue; }
-                row[0] = rows.size() + 1;
-                rows.add(row);
-                st[0]++;
-            }
-        });
-        logSols(stat);
-        if (rows.isEmpty()) throw new IllegalStateException("没有取到任何模态（检查解节点与表达式）");
-        requireNoLoss(j, i, st[1]);
-        String[] allExpr = new String[expr.length + 1];
-        String[] allCols = new String[expr.length + 1];
-        allExpr[0] = "mode"; allCols[0] = "mode";
-        System.arraycopy(expr, 0, allExpr, 1, expr.length);
-        System.arraycopy(cols, 0, allCols, 1, cols.length);
-        double[][] data = new double[allExpr.length][rows.size()];
-        for (int c = 0; c < rows.size(); c++)
-            for (int q = 0; q < allExpr.length; q++) data[q][c] = rows.get(c)[q];
-        Path target = csvTarget(j, i, name);
-        writeCsv(target, data, allExpr, allCols);
-        System.out.println("[driver] 写出 " + target);
-    }
-
-    // 遍历所有解节点与解编号取数，按行去重（积分共用）
-    static List<double[]> evalAll(Job j, int i, String node, int nExpr) throws Exception {
-        List<double[]> found = new ArrayList<>();
-        Set<RowKey> seen = new HashSet<>();
-        int[] st = new int[3];
-        LinkedHashMap<String, int[]> stat = walkSols(j, new String[] { node }, (tag, from, nCols, v) -> {
-            double[][] a = v[0];
-            for (int c = 0; c < nCols; c++) {
-                double[] row = new double[nExpr];
-                boolean ok = true;
-                for (int q = 0; q < nExpr; q++) {
-                    double val = a[q][c];
-                    if (Double.isNaN(val) || Double.isInfinite(val)) { ok = false; break; }
-                    row[q] = val;
-                }
-                if (!ok) { st[1]++; continue; }
-                if (!seen.add(new RowKey(row))) { st[2]++; continue; }
-                found.add(row);
-                st[0]++;
-            }
-        });
-        logSols(stat);
-        requireNoLoss(j, i, st[1]);
-        return found;
+        writeRows(j, i, node, cols, true);
     }
 
     static double unitFactor(String u) {
@@ -1743,7 +1846,7 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         j.model.result().export(tag).set("pngfilename", part.toString().replace("\\", "/"));
         Files.createDirectories(target.getParent());
         j.model.result().export(tag).run();
-        Files.move(part, target, StandardCopyOption.REPLACE_EXISTING);
+        publish(part, target);
     }
 
     /** 把 COMSOL 二维图里那个包住模型的方框拆掉：左右保留（左侧刻度数字、右侧色标），
@@ -1957,6 +2060,7 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         List<String> names = new ArrayList<>();
         try {
             for (String ft : model.study(study).feature().tags()) {
+                if (!model.study(study).feature(ft).isActive()) continue;
                 if (!"Parametric".equals(model.study(study).feature(ft).getType())) continue;
                 String[] pn = model.study(study).feature(ft).getStringArray("pname");
                 for (String s : pn) for (String piece : s.split(",")) {
@@ -1973,69 +2077,15 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
         if (want != null && !want.isEmpty()) {
             for (String t : tags) if (t.equals(want)) return t;
             System.err.println("模型里没有研究 '" + want + "'，可用: " + String.join(", ", tags));
-            finish(CURRENT_JOB_DIR, 2);
+            throw new JobFailure(2, "找不到指定研究 " + want);
         }
-        if (tags.length == 0) { System.err.println("模型里没有研究"); finish(CURRENT_JOB_DIR, 2); }
+        if (tags.length == 0) throw new JobFailure(2, "模型里没有研究");
         return tags[0];
-    }
-
-    // 取「第一个可用数据集」并写回 tag：光有 tag 不够用。
-    // 模型的第一个数据集往往不是「<研究>//解 1」（也可能是 CutPlane / 已失效的 Solution），
-    // 直接拿来建二维切面数据集就是「数据集类型无效」，图整张空白。
-    // 优先：该研究的解数据集 → Solution 型 → 第一个；都没有就自己建一个 Solution 绑到 sol1。
-    static String firstDataset(Model model) {
-        return resolveDataset(model, null);
-    }
-
-    static String resolveDataset(Model model, String study) {
-        String[] ds = model.result().dataset().tags();
-        List<String> cand = new ArrayList<>();
-        if (study != null && !study.isEmpty()) {
-            for (String t : ds) {
-                try {
-                    String on = model.result().dataset(t).getString("solution");
-                    if (on != null && !on.isEmpty()) cand.add(t);
-                } catch (Exception ignore) { }
-            }
-        }
-        List<String> src = cand.isEmpty() ? Arrays.asList(ds) : cand;
-        for (String t : src) {
-            if ("Solution".equalsIgnoreCase(model.result().dataset(t).getType())) return t;
-        }
-        if (!src.isEmpty()) return src.get(0);
-        String tag = "dset_export";
-        if (!Arrays.asList(ds).contains(tag)) model.result().dataset().create(tag, "Solution");
-        return tag;
     }
 
     static String[] split(String s) {
         if (s == null || s.trim().isEmpty()) return new String[0];
         return s.split("\\|", -1);
-    }
-
-    static void writeCsv(Path target, double[][] data, String[] expr, String[] cols) throws IOException {
-        Path part = Paths.get(target.toString() + ".part");
-        try (BufferedWriter w = Files.newBufferedWriter(part, StandardCharsets.UTF_8)) {
-            w.write(String.join(",", cols));
-            w.newLine();
-            int nPoints = (data.length > 0) ? data[0].length : 0;
-            for (int c = 0; c < nPoints; c++) {
-                StringBuilder sb = new StringBuilder();
-                for (int q = 0; q < data.length; q++) {
-                    if (q > 0) sb.append(',');
-                    double v = data[q][c];
-                    if (q == 0 && cols[0].endsWith("_nm") && expr[0].trim().startsWith("c_const/")) {
-                        double nm = (Math.abs(v) < 1.0) ? v * 1e9 : v;
-                        sb.append(String.format(Locale.ROOT, "%.2f", nm));
-                    } else {
-                        sb.append(String.format(Locale.ROOT, "%.6g", v));
-                    }
-                }
-                w.write(sb.toString());
-                w.newLine();
-            }
-        }
-        Files.move(part, target, StandardCopyOption.REPLACE_EXISTING);
     }
 
     /** 模型文件名去掉 .mph —— 用作 output 下的产物子文件夹名（与模型同名） */
@@ -2051,8 +2101,8 @@ static int[] canvasSize(int w, int h, String plane, double[] bb) {
 
     static void deleteTree(Path root) throws IOException {
         if (!Files.exists(root)) return;
-        Files.walk(root).sorted(Comparator.reverseOrder()).forEach(p -> {
-            try { Files.deleteIfExists(p); } catch (IOException ignore) { }
-        });
+        try (java.util.stream.Stream<Path> entries = Files.walk(root)) {
+            for (Path p : entries.sorted(Comparator.reverseOrder()).toArray(Path[]::new)) Files.deleteIfExists(p);
+        }
     }
 }

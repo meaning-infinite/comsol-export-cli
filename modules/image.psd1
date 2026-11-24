@@ -16,5 +16,5 @@
         Grid   = 'off'            # on = 三维画坐标框（栅格）；默认不画
     }
 
-    Keys = @('Name', 'Expr', 'SolNum', 'Width', 'Height', 'Title', 'Edges', 'Grid', 'At', 'Plane')
+    Keys = @('Name', 'Expr', 'SolNum', 'Width', 'Height', 'Title', 'Edges', 'Grid', 'At', 'Plane', 'SolTag')
 }

@@ -10,5 +10,5 @@
         Expr = @('ewfd.normE')
         Cols = @('E')
     }
-    Keys     = @('Dim', 'Ents', 'Expr', 'Cols', 'Name')
+    Keys     = @('Dim', 'Ents', 'Expr', 'Cols', 'Name', 'Units', 'Allownan')
 }

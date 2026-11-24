@@ -9,5 +9,5 @@
         Cols     = @('freq')
         MaxModes = 50
     }
-    Keys     = @('Expr', 'Cols', 'MaxModes', 'Name')
+    Keys     = @('Expr', 'Cols', 'MaxModes', 'Name', 'Units', 'Allownan')
 }

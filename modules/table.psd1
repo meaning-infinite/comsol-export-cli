@@ -5,8 +5,8 @@
     Kind     = 'global'
     Title    = '数据导出（全局量）'
     Defaults = @{
-        Expr = @('c_const/ewfd.freq', 'abs(ewfd.S21)^2', 'abs(ewfd.S11)^2')
-        Cols = @('lambda_nm', 'T', 'R')
+        Expr = @('(c_const/ewfd.freq)/1[nm]', 'abs(ewfd.S21)^2', 'abs(ewfd.S11)^2')
+        Cols = @('lambda_nm', 'T00', 'R00')
     }
-    Keys     = @('Expr', 'Cols', 'Name')
+    Keys     = @('Expr', 'Cols', 'Name', 'Units', 'Allownan')
 }

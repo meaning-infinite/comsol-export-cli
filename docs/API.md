@@ -1,12 +1,12 @@
 ﻿# COMSOL 导出 CLI · API 文档
 
-> 最后更新：2026-11-12 · 对应 v1.1 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
+> 最后更新：2026-11-25 · 对应 v1.9.0 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
 > 接口与内部约定的参考手册，随版本持续更新。使用说明见 [README.md](../README.md)，配方写法见 [recipes/README.md](../recipes/README.md)。
 
 ## 1. 分层与调用链
 
 ```
-run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler  →  output/<模型名>/
+run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler  →  output/<批次>/
              │                                    │
              └── queue.json（调度/状态）           └── logs/<作业>/{solved,exporting,exported}
 ```
@@ -14,9 +14,9 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 | 层 | 文件 | 职责 | 不做什么 |
 |---|---|---|---|
 | 入口 | `run.bat` | `chcp 65001` + 调 `cli.ps1` | — |
-| 编排 | `cli.ps1` | 选模型/配方、写作业文件、调度队列、画界面、清锁 | 不碰模型内容 |
+| 编排 | `cli.ps1` | 选模型/配方、写作业文件、调度队列、画界面、核对进程身份 | 不碰模型内容 |
 | 作业约定 | `job.properties` | 一次求解 + 若干导出块 | 不含逻辑 |
-| 驱动 | `driver/ExportDriver.java` | 加载副本、跑研究、按块导出、写标记 | 不改参数/网格 |
+| 驱动 | `driver/ExportDriver.java` | 读取内存模型、按块导出、写交付清单和标记 | 不改参数/网格 |
 | 导出块 | handler | 每类导出一种实现 | 互不知道彼此 |
 
 ## 2. CLI 接口（cli.ps1）
@@ -33,9 +33,9 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 | `-DryRun` | switch | 只打印作业与导出块；不写队列、不启动计算、不弹确认 |
 | `-Resume` | switch | 跳过选择，直接调度队列里未完成的作业 |
 | `-Mode` | string | `solve` 求解并导出（默认）/ `export` 只导出已有解的模型 / `watch` 只监视在跑的任务；空 = 交互询问 |
-| `-KillJob <n>` | int | 终止队列里第 n 个作业（不受单实例守卫限制） |
+| `-KillJob <ID>` | string | 按稳定作业目录名终止。纯数字沿用队列历史序号。 |
 | `-ProgressStyle <1\|2\|3>` | string | 进度显示样式，默认 `2`；环境变量 `COMSOL_EXPORT_STYLE` 覆盖；配置 `ProgressStyle` 次之 |
-| `-Cores <n>` | int | 求解核数（传给 `comsolbatch -np`），默认 `0` = 让 COMSOL 自己决定 |
+| `-Cores <n>` | int | 每作业核数，求解传 `-np`，导出传 `-XX:ActiveProcessorCount`。默认按并发容量分配。 |
 | `-Heap <6g>` | string | Java 堆，覆盖按物理内存自动估算的值；环境变量 `COMSOL_EXPORT_XMX` 亦可 |
 | `-WinWidth <n>` | int | 控制台宽度（列），默认 `88`；高度自动按屏幕工作区占满。环境变量 `COMSOL_EXPORT_COLS` 覆盖；`COMSOL_EXPORT_NORESIZE=1` 关掉自动设尺寸 |
 | `-Help` | switch | 帮助 |
@@ -50,7 +50,7 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 | 3 | 求解失败 |
 | 4 | 导出失败（表达式取不到数、配置非法） |
 
-> 2/3/4 由驱动产生，CLI 转成中文提示并打印 `driver.err` 末 3 行原因。
+> 驱动写入本作业退出码。批次含求解失败时 CLI 返回 3，仅含导出失败或主动终止时返回 4。run.bat 透传退出码。
 
 ### 2.3 交互键
 
@@ -101,7 +101,9 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 |---|---|
 | `model` | 模型绝对路径 |
 | `study` | 研究标签，空则取模型第一个研究 |
-| `outdir` | 输出根目录；驱动实际写 `<outdir>/<模型文件名去 .mph>/`（每个模型一个同名子文件夹） |
+| `outdir / resultdir` | 输出根和本次独占目录。旧规格缺 resultdir 时沿用模型目录、使用作业专属清单名。 |
+| `solscope / solution` | study（默认）或 all（跨研究）。solution 可指定范围内的 Solution 数据集用于默认绘图。 |
+| `solver / solvedfile` | 新作业由 batch 求解，写唯一解文件，导出凭 solved 标记读取该文件。 |
 | `outname` | 输出文件名（不含扩展名） |
 | `modelsdir` | 模型目录，用于存 `solved/` 下已求解模型 |
 | `solve` | `1` 求解后导出（默认）/ `0` 只导出：跳过研究求解，直接用模型里已有的解 |
@@ -128,19 +130,19 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 | `Expr` | — | `|` 分隔的表达式列表 |
 | `Cols` | — | 列名，数量必须与 Expr 一致 |
 
-行 = 解，列 = 扫描参数（自动前置）+ Expr。首列名以 `_nm` 结尾且表达式以 `c_const/` 开头时按 nm 输出（按量级判断米/纳米）。
+每行对应一个已存解。启用的扫描参数置于最前，后接表达式列、可取时的 lambda_nm，以及 study_tag、sol_tag、sol_num、solution_index。双精度写出，数值相同的解保留各自编号。Units 与 Expr 一一对应，空项沿用表达式单位。波长可写 `(c_const/real(freq))/1[nm]` 或指定 `Units=nm`，每列选一种换算写法。旧配方中 `c_const/freq` 或 `c_const/ewfd.freq` 配合 _nm 后缀也按 nm 输出。
 
 ### 4.3 spectrum
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `Expr` | `c_const/ewfd.freq|abs(ewfd.S21)^2|abs(ewfd.S11)^2` | 一般不填 |
-| `Cols` | `lambda_nm|T|R` | 一般不填 |
+| `Expr` | `(c_const/ewfd.freq)/1[nm]\|abs(ewfd.S21)^2\|abs(ewfd.S11)^2` | 一般不填 |
+| `Cols` | `lambda_nm\|T00\|R00` | 一般不填 |
 | `Plot` | `false` | `true` 时额外输出 T/R 曲线 PNG（1D Global 图） |
 
 ### 4.4 image — 场图（只出 1 张组合总表，v1.7.15 起）
 
-**只产出 1 个文件**：`<outname>_<name>_all.png`。三维与三张二维切面先导到作业临时目录（`%TEMP%\comsol-export-*\img_N\`），拼完立即删除，模型的产物子目录里不会再留分面图。
+**只产出 1 个文件**：`<outname>_<name>_all.png`。三维与三张二维切面先导到作业临时目录（`<作业目录>\render-work\img_N\`），拼完立即删除，模型的产物子目录里不会再留分面图。
 
 总表 **300 dpi**（PNG 内写 `pHYs` = 11811 px/m；ImageIO 重编码会丢 dpi，驱动自己补写），带图题、色标、坐标轴刻度；默认画每个域的边界线，去掉了 COMSOL 徽标与三轴方向图标。
 
@@ -155,7 +157,7 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `Expr` | `ewfd.Ex,ewfd.Ey` | 场表达式，逗号分隔 = 逐分量各占一块（不用 `ewfd.normE` 模值） |
-| `SolNum` | `1` | 取**全部解里的第几个**（与 CSV 行序一致）。多解节点时驱动自动翻成「解节点 + 节点内序号」并打日志 `场图解 N → 解节点 solX 第 M 个`；超出总数会报错并列出各节点范围 |
+| `SolNum / SolTag` | 1 / 空 | 单填 SolNum 对应 CSV 的 solution_index。指定 SolTag 时 SolNum 对应该节点的 sol_num。清单记录实际选中的节点、序号和可用波长。 |
 | `Width` | `1200` | 像素。`Height > 0` 时作为二维画布宽度 |
 | `Height` | `0` | `0` = 按切面长宽比自动算（此时 `Width` 不参与）；写死数字则强制该像素高度 |
 | `Title` | 空 | 自定义图题；空则用「平面 + COMSOL 自动量名」 |
@@ -193,20 +195,21 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 ### 4.7 integral — 线/面积分（2026-11）
 
 字段：`Dim`（`surface`|`line`）、`Ents`（`all` 或编号列表 `3,4,17`）、`Expr`、`Cols`。
-实现：`numerical().create(tag,"IntSurface"/"IntLine")`，`selection().all()` 或 `selection().set(int[])`；逐解节点、逐 `solnum` 取值，去重后写 CSV（一行一个解）。编号不存在时报错并中止该块。
+实现：`numerical().create(tag,"IntSurface"/"IntLine")`，`selection().all()` 或 `selection().set(int[])`；逐解节点、逐 `solnum` 取值并保留解身份（一行一个解）。编号不存在时报错并中止该块。
 
 ### 4.8 modes — 模态数值表（2026-11）
 
-字段：`Expr`（默认 `ewfd.freq`）、`Cols`、`MaxModes`（默认 50）。
-实现：`EvalGlobal` + 逐 sol 逐 solnum，遇异常即停；输出列 `mode` + 指定列。对波长解模型也能用（每个解一行，值相同则去重）。
+字段含 Expr、Cols、Units、MaxModes、Allownan。MaxModes 默认 50，整个 modes 块最多取前 N 个已存解。mode 与 solution_index 一致，简并模保留独立行。eigenslice 的 MaxModes 按节点计，任一请求切面缺失均标记失败。
 
 ### 4.10 bigtable — 通用原始大表（2026-11）
 
 一次导出：全局参数（`<name>_val`，自动）+ 谱线 9 列 + 各吸收域 `Qrh/A` 两列 + 合计两列。
 - 参数列来自 `model.param().varnames()`，模型参数变了列自动变（`Params=all|none|名单`）。
-- 吸收域：`AbsDomains=auto` 时按材料名含 ITO 收集域，再按 `IntVolume ∫z dV / ∫1 dV` 的 z 中心排序命名（2 个 lower/upper，3 个 lower/hole/upper）；也可显式 `3:lower,6:upper,9:hole`。
+- 吸收域：`AbsDomains=auto` 时按材料名含 ITO 收集域，按 z 中心排序并在自动列名中保留域号。Component 指定组件，Material 可取材料标签或完整名称，Selection 可取命名域选择；也可显式 `3:lower,6:upper,9:hole`。
 - 吸收百分比 = `100 × ∫AbsExpr dV / ewfd.Pin`；`T00/R00=|S21|²/|S11|²`（0 阶），`T_total/R_total=ewfd.Ttotal/Rtotal`（含衍射级）。
 - 表头全 ASCII，避免远程控制台/Excel 乱码。
+
+Pin_W=0 时保留原值与绝对吸收功率，百分比留空。AbsDomains=none 时分域合计留空。Params 支持 all、none、逗号名单或数组，遇未知参数报错。宽谱表的 A_1-T-R = 1 − T_total − R_total，zero_order_remainder 单列保存 1 − T00 − R00。
 
 ### 4.9 预制模块系统（2026-11）
 
@@ -274,7 +277,7 @@ static void exportFoo(Job j, int i) throws Exception {
 |---|---|
 | `buildSliceGroup(j, i, tag)` | 建 3D 绘图组 + 切片，按块字段设置平面与位置 |
 | `exportPng(j, i, plotGroup, target)` | 导出 PNG（先写 `.part.png` 再改名） |
-| `writeCsv(...)` | 写 CSV（先写 `.part` 再改名） |
+| `CsvStream.commit()` | 写 CSV（先写 `.part` 再改名） |
 | `offsetKey(plane)` | 平面 → 偏移属性名映射 |
 
 ## 6. 运行时状态
@@ -295,6 +298,8 @@ static void exportFoo(Job j, int i) throws Exception {
 | `status` | `pending` `running` `done` `failed` `killed` `disconnected` |
 | `duration` | 用时（秒），用于估算 |
 
+新记录还保存 resultDir、batchDir、cores、heapMB、workerStartUtc。状态变更先刷新临时文件至磁盘，再替换主文件并保留 .bak。主文件损坏时读最近的完整备份。两份都不可读时停止，只读监视不会触发修复。单一写者负责状态迁移。
+
 ### 6.2 标记文件
 
 | 文件 | 写入方 | 含义 |
@@ -313,10 +318,10 @@ static void exportFoo(Job j, int i) throws Exception {
 
 求解与导出拆成两个进程，CLI 负责交接：
 
-1. **求解阶段**：`comsolbatch.exe -inputfile <原模型> -outputfile <modelsdir>\solved\<outname>.mph -batchlog <jobDir>\solve.log -batchlogout -alivetime 5`（配方给了 `Study` 就加 `-study`，`-Cores` 给了就加 `-np`）。
+1. **求解阶段**：`comsolbatch.exe -inputfile <原模型> -outputfile <solvedfile> -batchlog <jobDir>\solve.log -batchlogout -alivetime 5`（配方给了 `Study` 就加 `-study`，`-Cores` 给了就加 `-np`）。
    - 不弹 COMSOL 窗口，headless；**不在原模型旁留 `.lock`**（实测只有它自己的输出模型会被写）。
    - 成功后 CLI 写 `solved` 标记，立刻起导出阶段，不需要人工干预。
-2. **导出阶段**：驱动 `solve=0`，只做 打开 → 清点解 → 分块导出。
+2. **导出阶段**：直接导出用 solve=0，求解后按 solved 标记读取 solvedfile，流程为打开 → 清点解 → 分块导出。
 
 作业目录里的 `phase` 文件记录当前在 `solve` 还是 `export`，重启 CLI 后据此续跑。
 
@@ -326,14 +331,14 @@ static void exportFoo(Job j, int i) throws Exception {
 |---|---|---|
 | 波长域、频域求解 | 所选研究启用的步骤与 `solve.log` | 显示 COMSOL 日志进度，按近期变化估时 |
 | 含特征频率或特征值步骤的求解 | 当前阶段、已用时间，日志可选的 Iter、Nconv | 显示最近一次迭代及该次已收敛的特征值数。研究类型无法确认时也只显示阶段，不推算求解百分比或 ETA |
-| 导出 | `jobDir\progress.txt`（驱动原子写 `done=` / `total=` / `label=`） | 解是我们自己枚举的，`已取 x/N` 精确 |
+| 导出 | `jobDir\progress.txt`（驱动写 done / total / block / blocks / unit / label） | 当前块按解或图片计数，显示导出总进度 |
 
 - **总时长**到秒（从作业启动算起，定态显示，数字在走就说明进程还活着）；**剩余时间**到分钟。不再单独显示阶段用时，也不再给「完成时刻」（`21:08` 那种），一行只放一个时间。
-- 每个作业按最近 120 秒的进度增量估算剩余时间，每 5 秒留一个样本。波长域、频域求解按日志百分比，导出按当前块的已取解数。观测不足 10 秒或窗口内没有增量时显示“未知”。切换阶段、导出块或计数回退时重新采样。
+- 每个作业按最近 120 秒的进度增量估算剩余时间，每 5 秒留一个样本。波长域、频域求解按日志百分比，导出按已完成块数加当前块完成比例，各块等权。观测不足 10 秒或窗口内没有增量时显示“未知”。切换阶段或计数回退时重新采样。
 - 阶段名由日志里的短语归类：准备 / 网格与建模 / 编译 / 建立求解器 / 组装矩阵 / 矩阵分解 / 解方程 / 收尾。
 - 输出被重定向（日志、管道）时自动降级为「阶段变化才打一行」，不会刷屏。
 
-同一批选中的模型全部启动独立后台进程，旧配置 MaxParallel 不再限制并发。恢复监视会接回在跑的进程并立即启动遗留待办。每个模型有一个固定位置的状态框，阶段、进度、完成、失败和终止均原地更新。小窗口优先压缩为三行一框，仍放不下时可用 PgUp/PgDn 翻页。单作业保留三套样式（`-ProgressStyle`）。
+每作业独立进程。调度器按可用物理内存的 70% 和逻辑核数划分预算，自动规划以每槽 4 GiB 为参考。Java 堆和 COMSOL 本机内存分别分配，因此堆预算不能限制全部进程的实际占用。watch 只读，Resume 接回后台进程并按资源启动待办。每个模型有一个固定位置的状态框，阶段、进度、完成、失败和终止均原地更新。小窗口优先压缩为三行一框，仍放不下时可用 PgUp/PgDn 翻页。单作业保留三套样式（`-ProgressStyle`）。
 
 | 样式 | 形态 | 适合 |
 |---|---|---|
@@ -354,12 +359,19 @@ static void exportFoo(Job j, int i) throws Exception {
   - 两个坑：`GetWindowRect(GetConsoleWindow())` 恒返回 0，必须 `GetParent` 拿顶层窗口再量；conhost 下 `[Console]::SetWindowSize` 只改逻辑行列、不动像素，且不夹取到屏幕内。
   - `-WinDebug`（或 `COMSOL_EXPORT_WINDEBUG=1`）打印 `[窗口] 目标 88 列，实得 88x46（px）· 每列 9.99px，每行 20.53px，可用高 912px`；`COMSOL_EXPORT_NORESIZE=1` 关掉整段。
   - 本机实测（1536×960、125%）：`120x30 / 1199×616px` → `88x46 / 899×912px`，窗口高正好等于可用高 912。
-- **终止**：K 选择活动作业，`-KillJob n` 使用队列序号。仅匹配启动命令中的完整 `-batchlog <作业目录>/solve.log` 或 `ExportDriver <作业目录>/job.properties` 参数，再终止已核实的进程树。另一窗口可发起终止；队列由持有文件锁的 CLI 原子替换。恢复监视时按作业目录和阶段接回进程。
+- **终止**：K 选择活动作业，`-KillJob n` 兼容队列历史序号，推荐使用作业 ID。核对进程创建时间，并仅匹配启动命令中的完整 `-batchlog <作业目录>/solve.log` 或 `ExportDriver <作业目录>/job.properties` 参数，再终止已核实的进程树。另一窗口可发起终止；队列由持有文件锁的 CLI 原子替换。恢复监视时按作业目录和阶段接回进程。
+
+### 6.7 结果交接与安装
+
+单作业的 `EXPORT_MANIFEST.md` 与 CSV/PNG 同层，多模型批次另有同名索引链接各作业。正常失败列出请求但缺失的产物；在驱动启动前失败或被外部终止时，调度器记录状态、规格和已落盘文件。作业目录各自独占；输入 MPH 不做手工整文件复制，导出通过 `ModelUtil.loadCopy` 读取。
+
+`release.psd1` 定义发布目录和必需运行文件。`pack.ps1` 生成含 SHA-256 文件清单的 ZIP，`update.ps1 -Offline` 先验证后安装。首次更新旧版可从解压的新包运行 `update.ps1 -Offline <zip> -InstallDir <旧安装>`。
 
 ## 7. 变更记录
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.9.0 | 2026-11-25 | 只读监视、续跑与终止、队列恢复、资源预算。修正研究范围、解身份、吸收与单位、模态上限及域选择。Java 11 驱动、离线校验、分块进度和 EXPORT_MANIFEST.md。 |
 | v1.0 | 2026-11-12 | 首个可用版本：comsolbatch + Java 驱动、队列、锁、续跑、单实例守卫 |
 | v1.0.1 | 2026-11-12 | 修首次运行 `state\` 目录不存在导致写配置失败 |
 | v1.1 | 2026-11-12 | 驱动改 handler 分派；新增 `spectrum` / `image` / `eigenslice`；`-DryRun` 不再真正执行 |
@@ -400,11 +412,21 @@ static void exportFoo(Job j, int i) throws Exception {
 
 ## 8. 待验证 / 已知缺口
 
-- `eigenslice` 的“单解节点内多模态”枚举尚未在真实特征频率模型上跑过（测试模型只有波长解，用 4 个解节点代替验证）。
+- COMSOL 6.2 音叉模型已有三个特征解节点，各含一个解。modes 限取前两行，eigenslice 的三个平面共交付 9 张 PNG。单节点包含多个特征模态的切片仍待独立样本验证。
 - `spectrum` 曲线图横轴取默认（未强制设为波长），多条解曲线会画在同一张图上。
 - 六作业并发、单项取消和旧队列恢复已通过 Windows PowerShell 5.1 替身进程测试。真实模型同时运行仍取决于公共电脑的许可和资源。
 
-### 多解导出口径（v1.6 起）
+### v1.9.0 本地验收（2026-11-25）
+
+| 场景 | 结果 |
+|---|---|
+| 6.2 瞬态模型 | 25 个时步，限取两行，运行于自带 Java 11。 |
+| 6.4 已解波长域模型 | 4 个解身份、3 个吸收域；单点场图按 sol3/1 导出。 |
+| 空解和缺切面 | 空解返回非零。后一块切片失败时，前一块 CSV 可交付，清单列出 8 个缺件。 |
+| 三作业恢复 | 关闭测试调度器，续跑接回第一个进程，按 ID 终止第二个，第三个独立完成。 |
+| 离线更新 | 从干净发布目录打包，全量安装、原 ZIP 保留。删掉 image 模块的包在覆盖前被拒绝。 |
+
+### 历史实现（v1.6；现行取数与预算见第 4、6 节）
 
 - **先清点再取数**：驱动打开模型后先对每个解节点读 `model.sol(tag).getSize()`（`[自由度, 解数]`），日志打印 `解节点 solX: N 个解` 与 `待导出解数`。`getSize()` 抛错（未初始化的解）的节点记 0 个解并跳过。
 - **按块显式指定解编号**：不再依赖 `innerinput=all` 一次取完——解数大（如 651 个 λ）时 COMSOL 会静默少给列。每块用 `innerinput=manualindices` + `solnumindices="1 2 …N"` 精确请求，块大小 `Chunk`（配方字段，默认 200）。

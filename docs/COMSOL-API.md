@@ -1,6 +1,17 @@
 ﻿# COMSOL Java API 笔记（驱动用到的部分）
 
-> 最后更新：2026-11-12 · 对应 COMSOL 6.4 / 驱动 v1.1
+> 更新于 2026-11-25，驱动 v1.9.0。历史实验保留各段实测版本。
+
+## 版本兼容
+
+| COMSOL | 验证范围 |
+|---|---|
+| 6.1 | 核对官方 Java API 的 `loadCopy`、`SolverSequence.study`、`Study.getSolverSequences`。待对应安装实测。 |
+| 6.2 | 自带 JDK 11 编译，正式 CLI 导出随附瞬态模型的 25 个时步，音叉已有特征解交付 9 张切片。 |
+| 6.3 | 核对官方 Java API 的独立加载与研究接口。待对应安装实测。 |
+| 6.4 | 正式 CLI 导出已有波长域解、域功率、限取两行的 modes 表及指定节点的场图。 |
+
+发布的类文件主版本为 55（Java 11），各版本均从所选安装取 Java 和插件。`ExportDriver --check-runtime` 检查实际类路径，版本过旧或缺少公共方法时在入队前报错。模型向下兼容性仍由 COMSOL 决定。官方文档：[6.1 SolverSequence](https://doc.comsol.com/6.1/doc/com.comsol.help.comsol/api/com/comsol/model/SolverSequence.html)、[6.3 ModelUtil](https://doc.comsol.com/6.3/doc/com.comsol.help.comsol/api/com/comsol/model/util/ModelUtil.html)。
 > 本文只记**驱动里实际调用过的 API**与踩过的坑，不是 COMSOL 官方文档的替代品。项目自身的接口见 [API.md](API.md)。
 > 标“已验证”的条目都在 `ExportDriver.java` 里跑通过；标“未验证”的别直接依赖。
 
@@ -18,7 +29,7 @@ double[][] a = model.result().numerical("gev").getReal();
 |---|---|---|
 | 返回形状 | `[表达式][解]`，不是 `[解][表达式]` | 已验证 |
 | 场表达式 | 模型里**没有** `ewfd.T` / `ewfd.R`；用 `abs(ewfd.S21)^2`（T）、`abs(ewfd.S11)^2`（R），否则报 `FlException('Failed_to_evaluate_expression')` | 已验证 |
-| 波长 | `c_const/ewfd.freq` 在 6.4 直接返回 nm（866.0）；老版本可能返回 m，按量级判断：`|v| < 1 ? v*1e9 : v` | 已验证 |
+| 波长 | 用无量纲表达式 `(c_const/real(freq))/1[nm]` 输出 nm，保持双精度 | 已验证 |
 | 单点耗时 | 约 53 s（网格复用，不做参数重扫时） | 已验证 |
 
 ## 2. 解与数据集
@@ -95,9 +106,11 @@ model.result().export("img1").run();
 
 ## 5. 求解与模型加载
 
+正式入口的求解由 comsolbatch 完成，导出只调用 `ModelUtil.loadCopy` 读取分离的内存模型。驱动不再显式把整份 MPH 复制进临时目录。渲染中间文件仅在需要拼场图时创建，正常结束和异常退出都经过清理。跨研究读取须显式启用 `SolScope=all`。
+
 ```java
 ModelUtil.initStandalone(false);
-Model m = ModelUtil.load("m", path);
+Model m = ModelUtil.loadCopy("m", path);
 m.study("std1").run();
 m.save(target);
 ModelUtil.clear();
@@ -113,11 +126,11 @@ ModelUtil.clear();
 
 ## 6. 编译与类路径
 
-- 用 COMSOL 自带 JDK：`D:\COMSOL\COMSOL64\Multiphysics\java\win64\jre\bin\javac.exe`
+- 用 COMSOL 自带 JDK：`D:\COMSOL\COMSOL62\Multiphysics\java\win64\jre\bin\javac.exe`
 - **带内部类/lambda 必须用 javac**：`comsolcompile ExportDriver.java` 只产出主类，运行报 `NoClassDefFoundError: ExportDriver$Handler`。
 
 ```
-javac -encoding UTF-8 -proc:none -cp "<COMSOL>\plugins\*" ExportDriver.java
+javac -encoding UTF-8 -proc:none -source 11 -target 11 -cp "<COMSOL>\plugins\*" ExportDriver.java
 java -Xmx4g -cp "<COMSOL>\plugins\*;<driver 目录>" ExportDriver <job.properties>
 ```
 

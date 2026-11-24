@@ -10,10 +10,11 @@
         # 透射/反射谱：lambda_nm,T,R + T/R 曲线图
         @{ Module = 'spectrum'; Name = 'spectrum'; Plot = 'true' }
 
-        # 谱数据表：额外给出吸收 A = 1 - T - R（按组参数分列在最左）
+        # 谱数据表：额外给出吸收按全部衍射级计算，另存零阶余量（按组参数分列在最左）
         @{ Module = 'table'; Name = 'data'
-           Expr = @('c_const/ewfd.freq', 'abs(ewfd.S21)^2', 'abs(ewfd.S11)^2',
+           Expr = @('(c_const/ewfd.freq)/1[nm]', 'abs(ewfd.S21)^2', 'abs(ewfd.S11)^2',
+                    'ewfd.Ttotal', 'ewfd.Rtotal', '1-ewfd.Ttotal-ewfd.Rtotal',
                     '1-abs(ewfd.S21)^2-abs(ewfd.S11)^2')
-           Cols = @('lambda_nm', 'T', 'R', 'A') }
+           Cols = @('lambda_nm', 'T00', 'R00', 'T_total', 'R_total', 'A_1-T-R', 'zero_order_remainder') }
     )
 }
