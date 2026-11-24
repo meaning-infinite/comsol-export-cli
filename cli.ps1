@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.8.6'
+$script:CliVersion = 'v1.8.7'
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
     '██╔════╝ ██╔═══██╗  ████╗ ████║  ██╔════╝  ██╔═══██╗  ██║     ',
@@ -1366,15 +1366,49 @@ function Read-FileTailText([string]$path, [int]$maxBytes = 65536) {
     } catch { return '' }
 }
 
-# 求解阶段：只认 comsolbatch 写出来的 solve.log（UTF-8）。它的百分比是整项研究的进度，
-# 不会在每个扫参点归零（实测 2 个 sim_xy 点：先 0→50，再从 50→100）。
+# 仅读取所选研究的启用步骤，不启动 COMSOL，也不读取解向量。
+function Get-StudyProgressKind([string]$modelPath, [string]$studyTag) {
+    $file = $archive = $stream = $reader = $subtree = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression
+        $file = [IO.File]::Open($modelPath, 'Open', 'Read', [IO.FileShare]'ReadWrite, Delete')
+        $archive = [IO.Compression.ZipArchive]::new($file, 'Read', $true)
+        $entry = $archive.GetEntry('dmodel.xml')
+        if (-not $entry) { return 'unknown' }
+        $stream = $entry.Open()
+        $settings = [Xml.XmlReaderSettings]::new()
+        $settings.MaxCharactersInDocument = 67108864
+        $reader = [Xml.XmlReader]::Create($stream, $settings)
+        if (-not $reader.ReadToFollowing('StudyList')) { return 'unknown' }
+        $subtree = $reader.ReadSubtree()
+        $doc = [Xml.XmlDocument]::new()
+        $doc.XmlResolver = $null
+        $doc.Load($subtree)
+        $studies = @($doc.DocumentElement.SelectNodes('Study') | Where-Object { -not $studyTag -or $_.GetAttribute('tag') -eq $studyTag })
+        if ($studies.Count -ne 1) { return 'unknown' }
+        $ops = @(foreach ($step in $studies[0].SelectNodes('StudyFeatureList/StudyFeature')) {
+            if ($step.SelectSingleNode('entityFlags').InnerText -notmatch 'DISABLED') {
+                $step.GetAttribute('op')
+            }
+        })
+        if ($ops -match '^Eigen(?:frequency|value)') { return 'eigen' }
+        if (($ops -match '^(Wavelength|Frequency)$') -and -not ($ops -notmatch '^(Wavelength|Frequency|Parametric)$')) { return 'sweep' }
+    } catch {
+        # 旧格式、读锁或未知研究类型均退回阶段显示。
+    } finally {
+        foreach ($resource in @($subtree,$reader,$stream,$archive,$file)) { if ($resource) { $resource.Dispose() } }
+    }
+    return 'unknown'
+}
+
+$script:SolveKinds = @{}
 function Get-SolveLogState($job) {
-    $o = @{ Pct = -1; Stage = ''; Param = ''; Opened = $false; Running = $false }
+    $o = @{ Pct = -1; Stage = ''; Param = ''; Eigen = $false; Iteration = ''; Opened = $false; Running = $false }
     $txt = Read-FileTailText (Join-Path $job.jobDir 'solve.log') 131072
     if ([string]::IsNullOrWhiteSpace($txt)) { return $o }
-    if ($txt -match '正在打开文件') { $o.Opened = $true }
-    if ($txt -match '正在运行|研究\d|参数化扫描') { $o.Running = $true }
-    $ms = [regex]::Matches($txt, '当前进度:\s*(\d+)\s*%[^\S\r\n]*-[^\S\r\n]*([^\r\n]*)')
+    if ($txt -match '正在打开文件|Opening file') { $o.Opened = $true }
+    if ($txt -match '正在运行|研究\d|参数化扫描|Running:') { $o.Running = $true }
+    $ms = [regex]::Matches($txt, '(?im)^[ \t]*(?:当前进度|Current progress)[:：]\s*(\d+)\s*%[^\S\r\n]*-[^\S\r\n]*([^\r\n]*)')
     if ($ms.Count -gt 0) {
         $last = $ms[$ms.Count - 1]
         $o.Pct = [int]$last.Groups[1].Value
@@ -1387,6 +1421,27 @@ function Get-SolveLogState($job) {
             }
         }
         $o.Running = $true
+    }
+    # 只匹配求解器消息，文件名和模型名不作为研究类型证据。
+    $eigenSolver = '特征值求解器|特征频率求解器|Eigen(?:value|frequency)\s+Solver'
+    $o.Eigen = $o.Stage -match '特征频率|特征值|eigenfrequenc|eigenvalue|\bARPACK\b|\bFEAST\b' -or
+               $txt -match ("(?im)^[ \t]*(?:(?:$eigenSolver)\b|<[-]+[^\r\n]*(?:$eigenSolver|特征频率|Eigenfrequency))")
+    if ($o.Eigen) {
+        $o.Running = $true
+        if (-not $o.Stage) { $o.Stage = '特征求解' }
+    }
+    # Nconv 是本次迭代已收敛的特征值数，不是总工作量。
+    $tables = [regex]::Matches($txt, '(?im)^[ \t]*(?<header>Iter[ \t]+[^\r\n]*\bNconv\b[^\r\n]*)\r?\n(?<rows>(?:[ \t]*\d+[ \t]+[^\r\n]+(?:\r?\n|$))*)')
+    if ($tables.Count) {
+        $o.Eigen = $true
+        $table = $tables[$tables.Count - 1]
+        $columns = $table.Groups['header'].Value.Trim() -split '\s+'
+        $index = [array]::IndexOf([string[]]@($columns | ForEach-Object { $_.ToLowerInvariant() }), 'nconv')
+        $lastRow = ($table.Groups['rows'].Value.Trim() -split '\r?\n')[-1].Trim() -split '\s+'
+        if ($lastRow.Count -eq $columns.Count -and $lastRow[0] -match '^\d+$' -and $lastRow[$index] -match '^\d+$') {
+            $o.Iteration = '最近迭代 ' + $lastRow[0] + ' · 已收敛特征值 ' + $lastRow[$index]
+            $o.Running = $true
+        }
     }
     $mp = [regex]::Matches($txt, '参数\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\r\n。]{1,40})')
     if ($mp.Count -gt 0) {
@@ -1492,12 +1547,33 @@ function Get-ProgressInfo($job) {
     $stageIdx = -1
     $stageName = ''
     $solDone = -1; $solTotal = -1
+    $stageOnly = $false
+    $phaseLabel = '导出'
     if ($phase -eq 'solve') {
         $s = Get-SolveLogState $job
         $stageIdx = Get-StageIndex $s.Stage
         $stageName = Get-StageLabel $s.Stage
-        if ($s.Pct -ge 0) { $pct = $s.Pct }
+        $key = [string]$job.jobDir
+        if ($s.Eigen) { $script:SolveKinds[$key] = 'eigen' }
+        if (-not $script:SolveKinds.ContainsKey($key)) {
+            $kind = [string]$job.solveKind
+            if (-not $kind) {
+                $spec = Read-JobSpec $key
+                $kind = Get-StudyProgressKind $job.model $spec['study']
+            }
+            $script:SolveKinds[$key] = $kind
+        }
+        $kind = $script:SolveKinds[$key]
+        $phaseLabel = '求解'
+        if ($kind -eq 'eigen') { $phaseLabel = '特征求解' }
+        $stageOnly = $kind -ne 'sweep'
+        if (-not $stageOnly) { $pct = $s.Pct }
+        if ($stageOnly -and $s.Stage) { $stageName = $s.Stage }
         if ($s.Running) { $detail = $stageName } elseif ($s.Opened) { $detail = '打开模型（大模型要几分钟）' } else { $detail = '启动 comsolbatch' }
+        if ($s.Iteration) {
+            if (-not $s.Stage) { $detail = '特征求解' }
+            $detail += ' · ' + $s.Iteration
+        }
         if ($s.Param) { $detail = $detail + ' · ' + $s.Param }
     } else {
         $e = Get-ExportState $job
@@ -1511,7 +1587,8 @@ function Get-ProgressInfo($job) {
         $stageName = '导出'
     }
 
-    if ($phase -eq 'solve') { $eta = Get-RecentEta $job 'solve' $pct 100 $now }
+    if ($stageOnly) { $eta = -1 }
+    elseif ($phase -eq 'solve') { $eta = Get-RecentEta $job 'solve' $pct 100 $now }
     else { $eta = Get-RecentEta $job ('export:' + $e.Label) $solDone $solTotal $now }
 
     $phaseNo = 1; $phaseAll = 1
@@ -1522,7 +1599,8 @@ function Get-ProgressInfo($job) {
 
     return [pscustomobject]@{
         Phase = $phase
-        PhaseLabel = $(if ($phase -eq 'solve') { '求解' } else { '导出' })
+        PhaseLabel = $phaseLabel
+        StageOnly = $stageOnly
         PhaseNo = $phaseNo
         PhaseAll = $phaseAll
         Pct = $pct
@@ -1542,6 +1620,7 @@ function Get-ProgressInfo($job) {
 
 function Format-TimeLine($info) {
     # 只留剩余时间：已用/总时长由调用方各写一次，不再重复
+    if ($info.StageOnly) { return '剩余时间不可估' }
     if ($info.Phase -eq 'export') { return ('本块剩 ' + (Format-Eta $info.Eta)) }
     return ('求解剩 ' + (Format-Eta $info.Eta))
 }
@@ -1582,6 +1661,7 @@ function Get-PhaseTag($info) {
 }
 
 function Get-PctText($info) {
+    if ($info.StageOnly) { return '阶段监视' }
     if ($info.Pct -lt 0) { return '  ?%' }
     return ((('{0,3}' -f $info.Pct)) + '%')
 }
@@ -1644,6 +1724,7 @@ function Render-Progress3($info, [string]$jobName, $ord, $total) {
 
 function Write-JobProgressLog($job, $info) {
     $sig = $info.Phase + '|' + [math]::Floor($info.Pct / 10)
+    if ($info.StageOnly) { $sig = $info.PhaseLabel + '|' + $info.Detail }
     if ($script:JobLogSig[$job.jobDir] -eq $sig) { return }
     $script:JobLogSig[$job.jobDir] = $sig
     Write-Host ('  [' + (Split-Path -Leaf $job.jobDir) + '] ' + (Get-PhaseTag $info) + ' ' + (Get-PctText $info) + ' · ' + $info.Detail)
@@ -1657,12 +1738,16 @@ function Show-BatchProgress($jobs) {
             $info = Get-ProgressInfo $job
             if ($script:IsRedirected) { Write-JobProgressLog $job $info; continue }
             $status = (Get-PhaseTag $info) + '  ' + (Get-PctText $info) + '  ·  ' + (Format-TimeLine $info)
+            if ($info.StageOnly) {
+                $status = $info.PhaseLabel + ' · 已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info)
+            }
             if ($job.cancelMessage) { $status = $job.cancelMessage }
         } else {
             $status = @{ done='已完成'; pending='等待中'; failed='失败'; killed='已终止' }[[string]$job.status]
         }
         $rows += ('  ' + $name)
         $rows += ('    ' + $status)
+        if ($job.status -eq 'running' -and $info.StageOnly) { $rows += ('    ' + $info.Detail) }
     }
     if (-not $script:IsRedirected) {
         $rows += '  Q 退出监视   K 选择要终止的作业'
@@ -1678,6 +1763,12 @@ function Show-ProgressJob($job, $ord, $total) {
     $style = '2'
     if ($script:PStyle) { $style = [string]$script:PStyle }
     if ($script:IsRedirected) { Write-JobProgressLog $job $info; return }
+    if ($info.StageOnly) {
+        $time = '已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info)
+        if ($style -eq '1') { Show-StatusLine ($info.PhaseLabel + ' · ' + $time + ' · ' + $info.Detail) $info.Fg $info.Bg }
+        else { Show-LiveBox ($info.PhaseLabel + ' · ' + $nm) @($info.Detail, $time, 'Q 退出监视   K 终止作业') $info.Bg }
+        return
+    }
     if ($style -eq '1') { Render-Progress1 $info $nm $ord $total }
     elseif ($style -eq '3') { Render-Progress3 $info $nm $ord $total }
     else { Render-Progress2 $info $nm $ord $total }
@@ -2555,6 +2646,7 @@ foreach ($m in $ModelList) {
     $jobs += [pscustomobject]@{
         id = $n; model = $m.FullName; recipe = $r.Name
         pid = 0; jobDir = $jobDir; outDir = $outDir
+        solveKind = $(if ($doSolve) { Get-StudyProgressKind $m.FullName ([string]$cfg.Study) } else { '' })
         created = (Get-Date).ToString('o'); started = ''
         status = 'pending'; mode = $(if ($doSolve) { 'solve' } else { 'export' })
     }

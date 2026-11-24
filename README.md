@@ -3,7 +3,7 @@
 <p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
 <p align="center">
-  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.8.6-2AA0B0"></a>
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.8.7-2AA0B0"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
   <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
   <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.x-368CCB">
@@ -47,7 +47,7 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 | `run.bat -Heap 8g` | 指定 Java 堆 |
 | `run.bat -Modules` | 列出预制模块与可覆盖参数 |
 
-双模型同时运行：在 `-Setup` 中将并发数设为 2，再从同一窗口选中两个模型。并行进度按作业显示，K 终止所选作业，Q 退出监视，`-Resume` 接回后台作业。剩余时间按最近两分钟的进度估算。
+双模型同时运行：在 `-Setup` 中将并发数设为 2，再从同一窗口选中两个模型。并行进度按作业显示，K 终止所选作业，Q 退出监视，`-Resume` 接回后台作业。波长域和频域求解按最近两分钟的进度估时。特征频率求解显示阶段和已用时间，日志提供时显示迭代与已收敛特征值数。
 
 ## 配方
 
