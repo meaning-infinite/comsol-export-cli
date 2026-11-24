@@ -113,7 +113,7 @@ function Get-BoxWidth([int]$contentW) {
     # 只用统一基准宽度：内容超长由 Cut-Text/Trim-Row 截断，绝不把框撑宽
     $w = $script:BoxW
     $lim = 0
-    try { $lim = [Console]::BufferWidth - 6 } catch { }
+    try { $lim = [math]::Min([Console]::BufferWidth, [Console]::WindowWidth) - 6 } catch { }
     if ($lim -gt 0) { $w = [math]::Min($w, $lim) }
     return $w
 }
@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.8.7'
+$script:CliVersion = 'v1.8.8'
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
     '██╔════╝ ██╔═══██╗  ████╗ ████║  ██╔════╝  ██╔═══██╗  ██║     ',
@@ -289,6 +289,45 @@ function Clear-ConsoleRows([int]$top, [int]$count) {
     $raw.SetBufferContents($rect, $blank)
 }
 
+# 一组方框共用同一块屏幕区域和行缓存。
+function Write-LiveFrame($disp) {
+    $raw = $Host.UI.RawUI
+    $size = $raw.BufferSize
+    $count = [math]::Min($disp.Count, $size.Height - 1)
+    $prev = [math]::Min($script:LiveCount, [Console]::CursorTop)
+    if ($prev -eq 0 -and [Console]::CursorLeft -ne 0) { Write-Host '' }
+    # 先预留屏幕行，让必要的滚屏发生在定位之前。
+    for ($i = $prev; $i -lt $count; $i++) { Write-Host '' }
+    $height = [math]::Max($count, $prev)
+    $top = [Console]::CursorTop - $height
+    $width = Get-BoxWidth 0
+    if ($prev -gt 0 -and $script:LiveBoxWidth -ne $width) { Clear-ConsoleRows $top $prev }
+    $sameArea = ($script:LiveBoxWidth -eq $width -and $prev -gt 0 -and $script:LiveWidth -eq $size.Width -and $script:LiveTop -eq $top)
+    $keys = @()
+    if ($prev -gt $count) { Clear-ConsoleRows ($top + $count) ($prev - $count) }
+    $wrote = $false
+    for ($i = 0; $i -lt $count; $i++) {
+        $key = ($disp[$i].Segs | ForEach-Object { "$($_.Color)|$($_.Bg)|$($_.Text)" }) -join [char]31
+        $keys += $key
+        if ($sameArea -and $i -lt $script:LiveKeys.Count -and $script:LiveKeys[$i] -ceq $key) { continue }
+        $wrote = $true
+        [Console]::SetCursorPosition(0, $top + $i)
+        foreach ($seg in $disp[$i].Segs) {
+            if ($seg.Bg) {
+                Write-Host $seg.Text -NoNewline -ForegroundColor $seg.Color -BackgroundColor $seg.Bg
+            } else {
+                Write-Host $seg.Text -NoNewline -ForegroundColor $seg.Color
+            }
+        }
+    }
+    if ($wrote -or $prev -ne $count) { [Console]::SetCursorPosition(0, $top + $count) }
+    $script:LiveTop = $top
+    $script:LiveKeys = $keys
+    $script:LiveWidth = $size.Width
+    $script:LiveBoxWidth = $width
+    $script:LiveCount = $count
+}
+
 function Show-LiveBox([string]$title, $rows, [string]$color) {
     $norm = @()
     foreach ($r in $rows) {
@@ -306,38 +345,7 @@ function Show-LiveBox([string]$title, $rows, [string]$color) {
     }
     try {
         $disp = New-BoxDisplay $title $norm $color
-        $raw = $Host.UI.RawUI
-        $size = $raw.BufferSize
-        $count = [math]::Min($disp.Count, $size.Height - 1)
-        $prev = [math]::Min($script:LiveCount, [Console]::CursorTop)
-        if ($prev -eq 0 -and [Console]::CursorLeft -ne 0) { Write-Host '' }
-        # 先预留屏幕行，让必要的滚屏发生在定位之前。
-        for ($i = $prev; $i -lt $count; $i++) { Write-Host '' }
-        $height = [math]::Max($count, $prev)
-        $top = [Console]::CursorTop - $height
-        $sameArea = ($prev -gt 0 -and $script:LiveWidth -eq $size.Width -and $script:LiveTop -eq $top)
-        $keys = @()
-        if ($prev -gt $count) { Clear-ConsoleRows ($top + $count) ($prev - $count) }
-        $wrote = $false
-        for ($i = 0; $i -lt $count; $i++) {
-            $key = ($disp[$i].Segs | ForEach-Object { "$($_.Color)|$($_.Bg)|$($_.Text)" }) -join [char]31
-            $keys += $key
-            if ($sameArea -and $i -lt $script:LiveKeys.Count -and $script:LiveKeys[$i] -ceq $key) { continue }
-            $wrote = $true
-            [Console]::SetCursorPosition(0, $top + $i)
-            foreach ($seg in $disp[$i].Segs) {
-                if ($seg.Bg) {
-                    Write-Host $seg.Text -NoNewline -ForegroundColor $seg.Color -BackgroundColor $seg.Bg
-                } else {
-                    Write-Host $seg.Text -NoNewline -ForegroundColor $seg.Color
-                }
-            }
-        }
-        if ($wrote -or $prev -ne $count) { [Console]::SetCursorPosition(0, $top + $count) }
-        $script:LiveTop = $top
-        $script:LiveKeys = $keys
-        $script:LiveWidth = $size.Width
-        $script:LiveCount = $count
+        Write-LiveFrame $disp
     } catch {
         if ($title -ne $script:LiveSig) {
             $script:LiveSig = $title
@@ -1016,11 +1024,11 @@ function Get-ComsolFromShortcuts {
 }
 
 function Read-Config {
-    $cfg = @{ ComsolBatch = ''; MaxParallel = 1; Models = '' }
+    $cfg = @{ ComsolBatch = ''; Models = '' }
     if (Test-Path -LiteralPath $ConfigFile) {
         try {
             $c = Import-PowerShellDataFile -LiteralPath $ConfigFile
-            foreach ($k in @('ComsolBatch', 'MaxParallel', 'Models')) {
+            foreach ($k in @('ComsolBatch', 'Models')) {
                 if ($null -ne $c[$k]) { $cfg[$k] = $c[$k] }
             }
         } catch { }
@@ -1035,7 +1043,6 @@ function Save-Config {
     $lines = @(
         '@{',
         ('    ComsolBatch  = ' + "'" + $Cfg.ComsolBatch + "'"),
-        ('    MaxParallel = ' + $Cfg.MaxParallel),
         ('    Models      = ' + "'" + $Cfg.Models + "'"),
         '}'
     )
@@ -1055,13 +1062,12 @@ function Start-Setup {
         Write-Host ('  配置: ' + $ConfigFile) -ForegroundColor Cyan
         $items = @(
             ('COMSOL   : ' + $cfg.ComsolBatch),
-            ('并发数   : ' + $cfg.MaxParallel),
             ('模型目录 : ' + $md),
             '重新扫描 COMSOL 安装',
             '退出'
         )
         $sel = Read-Menu '设置（回车=当前项，Esc=退出）' $items $last
-        if ($sel -le 0 -or $sel -eq 5) { return }
+        if ($sel -le 0 -or $sel -eq 4) { return }
         $last = $sel
         switch ($sel) {
             1 {
@@ -1074,16 +1080,11 @@ function Start-Setup {
                 Save-Config $cfg
             }
             2 {
-                $v = Read-Host '  并发数 (1 = 排队串行)'
-                $n = 0
-                if ([int]::TryParse($v, [ref]$n) -and $n -ge 1) { $cfg.MaxParallel = $n; Save-Config $cfg }
-            }
-            3 {
                 $v = Read-Host '  模型目录（留空=根目录\model）'
                 $cfg.Models = $v.Trim()
                 Save-Config $cfg
             }
-            4 {
+            3 {
                 $all = @(Find-Comsol)
                 $all = @($all | Sort-Object -Unique)
                 Write-Host ('  扫到 {0} 个:' -f $all.Count) -ForegroundColor Cyan
@@ -1731,27 +1732,57 @@ function Write-JobProgressLog($job, $info) {
 }
 
 function Show-BatchProgress($jobs) {
-    $rows = @()
-    foreach ($job in $jobs) {
-        $name = [IO.Path]::GetFileNameWithoutExtension([string]$job.model)
+    $textMode = $script:IsRedirected -or $script:BatchTextMode
+    if (-not $textMode) {
+        # 每框至少三行；预留一行提示和一行光标，矮窗口可翻页。
+        $height = [math]::Min([Console]::WindowHeight, [Console]::BufferHeight)
+        $room = [math]::Max(3, $height - 2)
+        $expanded = ($jobs.Count * 4 -le $room)
+        $perPage = [math]::Max(1, [math]::Floor($room / 3))
+        if ($expanded) { $perPage = $jobs.Count }
+        $pages = [int][math]::Ceiling($jobs.Count / $perPage)
+        $script:BatchPage = [math]::Min($pages - 1, [math]::Max(0, $script:BatchPage))
+        $first = $script:BatchPage * $perPage
+        $frame = @()
+    }
+    for ($i = 0; $i -lt $jobs.Count; $i++) {
+        $job = $jobs[$i]
+        $detail = ''
+        $color = 'Gray'
         if ($job.status -eq 'running') {
             $info = Get-ProgressInfo $job
-            if ($script:IsRedirected) { Write-JobProgressLog $job $info; continue }
-            $status = (Get-PhaseTag $info) + '  ' + (Get-PctText $info) + '  ·  ' + (Format-TimeLine $info)
-            if ($info.StageOnly) {
-                $status = $info.PhaseLabel + ' · 已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info)
-            }
-            if ($job.cancelMessage) { $status = $job.cancelMessage }
+            if ($textMode) { Write-JobProgressLog $job $info; continue }
+            $status = (Get-PhaseTag $info) + '  ' + (Get-PctText $info) + ' · ' + (Format-TimeLine $info)
+            if ($info.StageOnly) { $status = $info.PhaseLabel + ' · 已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info) }
+            $detail = $info.Detail
+            if ($job.cancelMessage) { $status = $job.cancelMessage; $color = 'Yellow' }
         } else {
-            $status = @{ done='已完成'; pending='等待中'; failed='失败'; killed='已终止' }[[string]$job.status]
+            if ($textMode) { continue }
+            switch ($job.status) {
+                'done'   { $status = '已完成'; $color = 'Green' }
+                'failed' { $status = '失败 · ' + $job.exitcode; $color = 'Red' }
+                'killed' { $status = '已终止'; $color = 'Yellow' }
+                default  { $status = '启动中' }
+            }
         }
-        $rows += ('  ' + $name)
-        $rows += ('    ' + $status)
-        if ($job.status -eq 'running' -and $info.StageOnly) { $rows += ('    ' + $info.Detail) }
+        if ($i -lt $first -or $i -ge ($first + $perPage)) { continue }
+        $name = [IO.Path]::GetFileNameWithoutExtension([string]$job.model)
+        $title = ('{0}/{1}  {2}' -f ($i + 1), $jobs.Count, $name)
+        if (-not $expanded -and $detail) { $status += ' · ' + $detail }
+        $rows = @(@{ Text = $status; Color = $color })
+        if ($expanded) { $rows += @{ Text = $detail; Color = 'DarkGray' } }
+        $frame += (New-BoxDisplay $title $rows 'Cyan')
     }
-    if (-not $script:IsRedirected) {
-        $rows += '  Q 退出监视   K 选择要终止的作业'
-        Show-LiveBox 'COMSOL 并行作业' $rows 'Cyan'
+    if ($textMode) { return }
+    $hint = 'Q 退出监视   K 终止作业'
+    if ($pages -gt 1) { $hint = ('PgUp/PgDn 翻页 {0}/{1}   ' -f ($script:BatchPage + 1), $pages) + $hint }
+    $width = Get-BoxWidth 0
+    $frame += @{ Segs = @(@{ Text = '  ' + (Pad-Text (Cut-Text $hint $width) $width); Color = 'DarkGray' }) }
+    try { Write-LiveFrame $frame }
+    catch {
+        Clear-LiveBox
+        $script:BatchTextMode = $true
+        Write-Host '  控制台无法定位光标，改用作业状态日志。'
     }
 }
 
@@ -2121,6 +2152,8 @@ function Invoke-Scheduler {
     $script:LiveSig = ''
     $script:LiveCount = 0
     $reported = @{}
+    $script:BatchPage = 0
+    $script:BatchTextMode = $false
     $script:JobLogSig = @{}
     $i = 0
     $t0 = Get-Date
@@ -2151,14 +2184,17 @@ function Invoke-Scheduler {
     while ($true) {
         $quitMonitor = $false
         while ($true) {
+            $panels = ($total -gt 1 -and -not $script:IsRedirected -and -not $script:BatchTextMode)
             $q = @(Get-Queue)
             foreach ($job in $q) {
                 if ($job.status -eq 'running') {
                     if ((Test-Path -LiteralPath (Join-Path $job.jobDir 'killed')) -and -not (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported'))) {
                         $message = Stop-OneJob $job
                         if ($job.status -ne 'killed' -and $job.cancelMessage -ne $message) {
-                            Clear-LiveBox
-                            Write-Host ('  ' + (Split-Path -Leaf $job.jobDir) + '  ' + $message) -ForegroundColor Yellow
+                            if (-not $panels) {
+                                Clear-LiveBox
+                                Write-Host ('  ' + (Split-Path -Leaf $job.jobDir) + '  ' + $message) -ForegroundColor Yellow
+                            }
                             Set-JobProp $job 'cancelMessage' $message
                         }
                     }
@@ -2175,7 +2211,7 @@ function Invoke-Scheduler {
                             } catch { }
                         }
                         $note = Clear-JobLock $job
-                        if ($note -eq '已清除') { Clear-LiveBox; Write-Host ("`n  已释放锁: " + $job.model) -ForegroundColor DarkGray }
+                        if (-not $panels -and $note -eq '已清除') { Clear-LiveBox; Write-Host ("`n  已释放锁: " + $job.model) -ForegroundColor DarkGray }
                     }
                     elseif (-not (Test-JobAlive $job.pid $job.jobDir)) {
                         # 进程刚退出时文件可能还在落盘，等一拍再判
@@ -2186,11 +2222,13 @@ function Invoke-Scheduler {
                             if ($why -eq '') {
                                 # 求解成功：写 solved 标记（驱动据此走 resume），接着起导出
                                 [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'solved'), '', (New-Object System.Text.UTF8Encoding($false)))
-                                Clear-LiveBox
-                                $durTxt = ''
-                                $ss = Parse-DateOrNull (Get-JobProp $job 'solveStarted')
-                                if ($ss) { $durTxt = '  用时 ' + (Format-Elapsed ((Get-Date) - $ss).TotalSeconds) }
-                                Write-Host ('  [求解完成] ' + (Split-Path -Leaf $job.jobDir) + $durTxt + '，开始导出…') -ForegroundColor Green
+                                if (-not $panels) {
+                                    Clear-LiveBox
+                                    $durTxt = ''
+                                    $ss = Parse-DateOrNull (Get-JobProp $job 'solveStarted')
+                                    if ($ss) { $durTxt = '  用时 ' + (Format-Elapsed ((Get-Date) - $ss).TotalSeconds) }
+                                    Write-Host ('  [求解完成] ' + (Split-Path -Leaf $job.jobDir) + $durTxt + '，开始导出…') -ForegroundColor Green
+                                }
                                 Start-ExportPhase $job
                                 Save-Queue $q
                             } else {
@@ -2216,15 +2254,12 @@ function Invoke-Scheduler {
                     }
                 }
             }
-            $running = @($q | Where-Object { $_.status -eq 'running' })
-            $pending = @($q | Where-Object { $_.status -eq 'pending' })
-            $slots = [int]$MaxParallel - $running.Count
-            if ($slots -lt 1 -and $pending.Count -gt 0 -and $running.Count -eq 0) { $slots = 1 }
-            while ($slots -gt 0 -and $pending.Count -gt 0) {
-                Start-OneJob $pending[0]
-                Save-Queue $q
-                $pending = @($pending | Select-Object -Skip 1)
-                $slots--
+            # 每个模型用独立后台进程。逐个登记 PID，无需等前一个作业结束。
+            foreach ($job in $q) {
+                if ($job.status -eq 'pending') {
+                    Start-OneJob $job
+                    Save-Queue $q
+                }
             }
             Save-Queue $q
 
@@ -2236,14 +2271,15 @@ function Invoke-Scheduler {
 
             $cur = @($running | Where-Object { $sessionIds -contains $_.jobDir })
             foreach ($finished in $fin) {
-                if (-not $reported.ContainsKey($finished.jobDir)) {
+                if (-not $panels -and -not $reported.ContainsKey($finished.jobDir)) {
                     Clear-LiveBox
                     $label = @{ done='导出完成'; failed='失败'; killed='已终止' }[[string]$finished.status]
                     Write-Host ('  [' + $label + '] ' + (Split-Path -Leaf $finished.jobDir))
                     $reported[$finished.jobDir] = $true
                 }
             }
-            if ($total -gt 1 -and $open.Count) {
+            if ($open.Count -eq 0) { break }
+            if ($total -gt 1) {
                 Show-BatchProgress $mine
             } elseif ($cur.Count -gt 0) {
                 $job = $cur[0]
@@ -2268,12 +2304,12 @@ function Invoke-Scheduler {
                 } catch { }
             }
 
-            if ($open.Count -eq 0) { break }
-
             try {
                 if ([Console]::KeyAvailable) {
                     $k = [Console]::ReadKey($true)
                     if ($k.Key -eq 'Q') { $quitMonitor = $true; break }
+                    if ($k.Key -eq 'PageDown') { $script:BatchPage++ }
+                    if ($k.Key -eq 'PageUp') { $script:BatchPage-- }
                     if ($k.Key -eq 'K') { Clear-LiveBox; Write-Host ''; Invoke-KillMenu; Write-Host '' }
                 }
             } catch { }
@@ -2352,8 +2388,6 @@ function Invoke-Scheduler {
     }
 }
 
-$MaxParallel = [int](Read-Config).MaxParallel
-if ($MaxParallel -lt 1) { $MaxParallel = 1 }
 $script:PStyle = $ProgressStyle
 if ([string]::IsNullOrWhiteSpace($script:PStyle)) {
     $script:PStyle = [string](Read-Config).ProgressStyle

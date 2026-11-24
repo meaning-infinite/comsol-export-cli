@@ -3,7 +3,7 @@
 <p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
 <p align="center">
-  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.8.7-2AA0B0"></a>
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.8.8-2AA0B0"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
   <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
   <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.x-368CCB">
@@ -41,13 +41,13 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 | `run.bat -Mode watch` | 监视在跑的任务 |
 | `run.bat -Resume` | 接着跑队列里没完成的作业 |
 | `run.bat -KillJob 2` | 终止第 2 个作业 |
-| `run.bat -Setup` | 修改 COMSOL 路径、并发数、模型目录 |
+| `run.bat -Setup` | 修改 COMSOL 路径、模型目录 |
 | `run.bat -DryRun` | 只打印作业计划，不写队列、不计算 |
 | `run.bat -Cores 8` | 指定核数 |
 | `run.bat -Heap 8g` | 指定 Java 堆 |
 | `run.bat -Modules` | 列出预制模块与可覆盖参数 |
 
-双模型同时运行：在 `-Setup` 中将并发数设为 2，再从同一窗口选中两个模型。并行进度按作业显示，K 终止所选作业，Q 退出监视，`-Resume` 接回后台作业。波长域和频域求解按最近两分钟的进度估时。特征频率求解显示阶段和已用时间，日志提供时显示迭代与已收敛特征值数。
+多选模型并确认后，CLI 随即启动全部作业，每个模型有独立状态框。K 终止所选作业，Q 退出监视，`-Resume` 接回后台作业。波长域和频域求解按最近两分钟的进度估时。特征频率求解显示阶段和已用时间，日志提供时显示迭代与已收敛特征值数。
 
 ## 配方
 
