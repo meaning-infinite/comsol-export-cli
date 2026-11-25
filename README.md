@@ -3,7 +3,7 @@
 <p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
 <p align="center">
-  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.9.0-2AA0B0"></a>
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.9.1-2AA0B0"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
   <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
   <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.1~6.4-368CCB">
@@ -27,10 +27,10 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 ```
 
 1. 把 `.mph` 放进 `models/`
-2. 双击 `run.bat`，选择模型与配方
+2. 双击 `run.bat`，依次选择模式、模型和配方
 3. 结束后从 `output/` 取结果
 
-适配 Windows PowerShell 5.1 和 COMSOL 6.1–6.4。6.2、6.4 已在本机从正式入口导出已有解。6.1、6.3 已核对公共 API，仍待对应安装实测。模型文件须与所选 COMSOL 版本兼容。首次运行会扫描本机 COMSOL 安装，路径记在本地配置里，不进仓库。
+适配 Windows PowerShell 5.1 和 COMSOL 6.1–6.4。6.2、6.4 已在本机从正式入口导出已有解。6.1、6.3 已核对公共 API，仍待对应安装实测。模型文件须与所选 COMSOL 版本兼容。选完配方后才检查 COMSOL。已有配置会直接使用保存的路径，首次使用会查找本机安装。导出驱动预检会显示当前路径，最多等待 60 秒。
 
 ## 命令行
 

@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.9.0'
+$script:CliVersion = 'v1.9.1'
 $script:CliExit = 0
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
@@ -1325,6 +1325,35 @@ function Get-DriverClassVersion([string]$dir) {
     return ''
 }
 
+function Assert-DriverRuntime([string]$javaPath, [string]$classPath, [int]$timeoutMs = 60000) {
+    # WinPS 的同步原生命令会共享菜单控制台。预检只接收参数，并通过管道返回诊断。
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $javaPath
+    $start.Arguments = '-cp "' + $classPath + '" ExportDriver --check-runtime'
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $proc = [Diagnostics.Process]::Start($start)
+    try {
+        $proc.StandardInput.Close()
+        $stdout = $proc.StandardOutput.ReadToEndAsync()
+        $stderr = $proc.StandardError.ReadToEndAsync()
+        if (-not $proc.WaitForExit($timeoutMs)) {
+            # 仅清理本次启动的预检进程，避免因刚好自行退出而隐藏超时原因。
+            try { $proc.Kill() } catch [InvalidOperationException] { }
+            [void]$proc.WaitForExit(1000)
+            throw ('COMSOL 驱动预检超时（{0:g} 秒），请核对 Java 路径 {1}' -f ($timeoutMs/1000),$javaPath)
+        }
+        $version = $stdout.GetAwaiter().GetResult().Trim()
+        $reason = $stderr.GetAwaiter().GetResult().Trim()
+        if ($proc.ExitCode -ne 0 -or ($version -split '\s+')[0] -ne $script:ExpectedDriverVersion) {
+            throw ('COMSOL 驱动预检失败（退出码 {0}，期望 {1}）。{2} {3}' -f $proc.ExitCode,$script:ExpectedDriverVersion,$version,$reason)
+        }
+    } finally { $proc.Dispose() }
+}
+
 function Get-ResourceBudget([int]$count) {
     $cpu = [Environment]::ProcessorCount
     try {
@@ -2033,8 +2062,6 @@ if ($Models -and ((Split-Path -Leaf $Models) -eq 'model')) {
 }
 
 
-$ModelList = $modelList
-
 function Write-Handoff($q) {
     $changedBatches = @{}
     $changes = @()
@@ -2641,6 +2668,132 @@ elseif (-not $Resume -and -not $KillJob -and -not $Diag -and [string]::IsNullOrW
 }
 
 if ($doWatch) { Watch-Queue; exit 0 }
+
+# 新作业先完成选择。浏览和取消菜单不依赖调度器或 COMSOL 运行环境。
+if (-not ($Resume -or $KillJob -or $Diag)) {
+    Write-Host ('  读取模型目录 ' + $Models) -ForegroundColor DarkGray
+    $modelFiles = @(Get-ModelFiles $Models)
+    $solvedDir = Join-Path $Models 'solved'
+    $solvedFiles = @()
+    if (Test-Path -LiteralPath $solvedDir) { $solvedFiles = @(Get-ModelFiles $solvedDir) }
+    $fromSolved = $false
+    # solved\ 作为“额外一项”挂在模型列表最后：序号 = 当前条数 + 1
+    $solvedNo = 0
+    if ($solvedFiles.Count -gt 0) { $solvedNo = $modelFiles.Count + 1 }
+    if ($modelFiles.Count -eq 0 -and $solvedNo -eq 0) { throw "目录里没有 .mph 或指向 .mph 的快捷方式: $Models" }
+
+    $miRaw = [string]$ModelIndex
+    $pickAll = $false
+    $idxs = @()
+    if (-not [string]::IsNullOrWhiteSpace($miRaw)) {
+        # -ModelIndex / 兼容旧的输入方式：直接解析，不弹菜单
+        if ($miRaw -match '^\s*a\s*$') {
+            $idxs = @(1..$modelFiles.Count)
+            $pickAll = $true
+        } elseif ($solvedNo -gt 0 -and $miRaw -match ('^\s*' + $solvedNo + '\s*$')) {
+            $modelFiles = $solvedFiles
+            $solvedNo = 0
+            $fromSolved = $true
+            $miRaw = ''
+        } else {
+            $idxs = @(ConvertTo-IndexList $miRaw $modelFiles.Count)
+            if ($idxs.Count -eq 0) { throw ('模型序号无效: ' + $ModelIndex) }
+        }
+    }
+    while ($idxs.Count -eq 0) {
+        $items = @()
+        $colors = @()
+        for ($i = 0; $i -lt $modelFiles.Count; $i++) {
+            # 快捷方式直接显示它指向的模型名（不再显示「链接名 → 目标」，也不做特殊标色）
+            $label = [System.IO.Path]::GetFileName($modelFiles[$i].FullName)
+            $color = 'Gray'
+            if ($modelFiles[$i].Missing) { $label = $label + '  （目标不存在）'; $color = 'DarkYellow' }
+            $items += $label
+            $colors += $color
+        }
+        if ($solvedNo -gt 0) {
+            $items += ('从 \solved 中选择（共 {0} 个）' -f $solvedFiles.Count)
+            $colors += 'Gray'
+        }
+        $title = '选择模型'
+        if ($fromSolved) { $title = '选择模型（solved\）' }
+
+        # 空格勾选多个；回车=当前行；Esc 放弃本次运行
+        $picks = @(Read-Menu $title $items 1 -Multi -ItemColors $colors)
+        if ($picks.Count -eq 0) {
+            Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow
+            exit 0
+        }
+        if ($solvedNo -gt 0 -and ($picks -contains $solvedNo)) {
+            Start-Sleep -Milliseconds 120
+            $plain = @($picks | Where-Object { $_ -ne $solvedNo })
+            if ($plain.Count -eq 0) {
+                # 只选了 solved\：整份列表换过去重选一次（换过去后这一项不再出现，避免套娃）
+                $modelFiles = $solvedFiles
+                $solvedNo = 0
+                $fromSolved = $true
+                Write-Host ('  已切到 ' + $solvedDir) -ForegroundColor Cyan
+                continue
+            }
+            $picks = $plain
+        }
+        if ($picks.Count -eq $modelFiles.Count) { $pickAll = $true }
+        $idxs = $picks
+    }
+    # solved\ 里的是算过的模型：默认只导出。这里强制不重算——输出路径就是
+    # <models>\solved\<outname>.mph，重算时输入和输出可能同名，等于边读边覆盖自己。
+    if ($fromSolved -and $doSolve) {
+        $doSolve = $false
+        if ($Mode -eq 'solve') {
+            throw ('solved\ 里的模型是按「只导出」使用的：重算会把它自己覆盖掉。要重算请选 models\ 里的裸模型: ' + $modelFiles[0].FullName)
+        }
+        Write-Host '  solved\ 里的模型：只导出（要重算请选 models\ 里的裸模型）' -ForegroundColor Cyan
+    }
+    $modelList = @($idxs | ForEach-Object { $modelFiles[$_-1] })
+    # a=全部：失效的快捷方式直接跳过并提示，不让整个队列被一条坏链接卡死
+    if ($pickAll) {
+        $skipped = @($modelList | Where-Object { $_.Missing })
+        foreach ($s in $skipped) { Write-Host ('  跳过（快捷方式目标不存在）: ' + $s.Name) -ForegroundColor DarkYellow }
+        $modelList = @($modelList | Where-Object { -not $_.Missing })
+        if ($modelList.Count -eq 0) { throw '选中的模型都不可用（快捷方式都指向不存在的文件）' }
+    }
+    $bad = @($modelList | Where-Object { $_.Missing })
+    if ($bad.Count -gt 0) {
+        $msg = @('这些快捷方式的目标模型不存在（快捷方式可能过期了，重建或者改指向新文件）：')
+        foreach ($b in $bad) {
+            $msg += ('  ' + $b.Name + '  →  ' + $b.FullName)
+            # 目标被改过名（常见：多加了 _npim 之类后缀）就给个提示，不自动改，免得指错文件
+            $d = Split-Path -Parent $b.FullName
+            $stem = [System.IO.Path]::GetFileNameWithoutExtension($b.FullName)
+            if ((Test-Path -LiteralPath $d) -and $stem) {
+                $near = @(Get-ChildItem -LiteralPath $d -Filter ($stem + '*.mph') -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer })
+                if ($near.Count -eq 1) { $msg += ('      疑似同名新文件: ' + $near[0].Name) }
+            }
+        }
+        throw ($msg -join [Environment]::NewLine)
+    }
+    $model = $modelList[0]
+
+    $recipes = @(Get-Recipes)
+    if (-not [string]::IsNullOrWhiteSpace($Recipe)) {
+        $hit = @($recipes | Where-Object { $_.Name -eq $Recipe })
+        if ($hit.Count -eq 0) {
+            throw ('找不到配方: ' + $Recipe + '（可选: ' + (($recipes | ForEach-Object { $_.Name }) -join ', ') + '）')
+        }
+        $r = $hit[0]
+    } else {
+        $items = @($recipes | ForEach-Object { $_.Name })
+        $ri = Read-Menu '选择配方' $items 1
+        if ($ri -le 0) { Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow; exit 0 }
+        $r = $recipes[$ri - 1]
+    }
+
+    $cfg = $r.Data
+    if (-not $cfg.NameTemplate) { throw ('配方缺少 NameTemplate: ' + $r.Name) }
+    $blocks = @(Expand-Blocks $cfg (Get-ModuleDefs))
+    if ($blocks.Count -eq 0) { throw ('配方没有任何导出内容（Use 或 Export 为空）: ' + $r.Name) }
+}
+
 [IO.Directory]::CreateDirectory($StateDir) | Out-Null
 
 # 队列只有一个写者。独占写句柄随 CLI 进程退出自动释放。
@@ -2713,10 +2866,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $driverDir 'ExportDriver.class'))) {
     throw ('驱动未编译，先运行: comsolcompile ' + (Join-Path $driverDir 'ExportDriver.java'))
 }
 
-$check = @(& $javaExe '-cp' ((Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir) 'ExportDriver' '--check-runtime')
-if ($LASTEXITCODE -ne 0 -or ($check -join ' ') -notlike ('*' + $script:ExpectedDriverVersion + '*')) {
-    throw '驱动预检失败，请核对安装版本及完整 driver 目录。'
-}
+Write-Host ('  正在检查 COMSOL 导出驱动 ' + $comsolRoot) -ForegroundColor DarkGray
+Assert-DriverRuntime $javaExe ((Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir)
 if ($Diag) {
     $cands = @(Get-ChildItem -LiteralPath $JobsDir -ErrorAction SilentlyContinue |
                Where-Object { $_.PSIsContainer -and (Test-Path -LiteralPath (Join-Path $_.FullName 'job.properties')) } |
@@ -2743,128 +2894,6 @@ if ($Resume) {
     Invoke-Scheduler
     exit $script:CliExit
 }
-
-
-$modelFiles = @(Get-ModelFiles $Models)
-$solvedDir = Join-Path $Models 'solved'
-$solvedFiles = @()
-if (Test-Path -LiteralPath $solvedDir) { $solvedFiles = @(Get-ModelFiles $solvedDir) }
-$fromSolved = $false
-# solved\ 作为“额外一项”挂在模型列表最后：序号 = 当前条数 + 1
-$solvedNo = 0
-if ($solvedFiles.Count -gt 0) { $solvedNo = $modelFiles.Count + 1 }
-if ($modelFiles.Count -eq 0 -and $solvedNo -eq 0) { throw "目录里没有 .mph 或指向 .mph 的快捷方式: $Models" }
-
-$miRaw = [string]$ModelIndex
-$pickAll = $false
-$idxs = @()
-if (-not [string]::IsNullOrWhiteSpace($miRaw)) {
-    # -ModelIndex / 兼容旧的输入方式：直接解析，不弹菜单
-    if ($miRaw -match '^\s*a\s*$') {
-        $idxs = @(1..$modelFiles.Count)
-        $pickAll = $true
-    } elseif ($solvedNo -gt 0 -and $miRaw -match ('^\s*' + $solvedNo + '\s*$')) {
-        $modelFiles = $solvedFiles
-        $solvedNo = 0
-        $fromSolved = $true
-        $miRaw = ''
-    } else {
-        $idxs = @(ConvertTo-IndexList $miRaw $modelFiles.Count)
-        if ($idxs.Count -eq 0) { throw ('模型序号无效: ' + $ModelIndex) }
-    }
-}
-while ($idxs.Count -eq 0) {
-    $items = @()
-    $colors = @()
-    for ($i = 0; $i -lt $modelFiles.Count; $i++) {
-        # 快捷方式直接显示它指向的模型名（不再显示「链接名 → 目标」，也不做特殊标色）
-        $label = [System.IO.Path]::GetFileName($modelFiles[$i].FullName)
-        $color = 'Gray'
-        if ($modelFiles[$i].Missing) { $label = $label + '  （目标不存在）'; $color = 'DarkYellow' }
-        $items += $label
-        $colors += $color
-    }
-    if ($solvedNo -gt 0) {
-        $items += ('从 \solved 中选择（共 {0} 个）' -f $solvedFiles.Count)
-        $colors += 'Gray'
-    }
-    $title = '选择模型'
-    if ($fromSolved) { $title = '选择模型（solved\）' }
-
-    # 空格勾选多个；回车=当前行；Esc 放弃本次运行
-    $picks = @(Read-Menu $title $items 1 -Multi -ItemColors $colors)
-    if ($picks.Count -eq 0) {
-        Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow
-        exit 0
-    }
-    if ($solvedNo -gt 0 -and ($picks -contains $solvedNo)) {
-        Start-Sleep -Milliseconds 120
-        $plain = @($picks | Where-Object { $_ -ne $solvedNo })
-        if ($plain.Count -eq 0) {
-            # 只选了 solved\：整份列表换过去重选一次（换过去后这一项不再出现，避免套娃）
-            $modelFiles = $solvedFiles
-            $solvedNo = 0
-            $fromSolved = $true
-            Write-Host ('  已切到 ' + $solvedDir) -ForegroundColor Cyan
-            continue
-        }
-        $picks = $plain
-    }
-    if ($picks.Count -eq $modelFiles.Count) { $pickAll = $true }
-    $idxs = $picks
-}
-# solved\ 里的是算过的模型：默认只导出。这里强制不重算——输出路径就是
-# <models>\solved\<outname>.mph，重算时输入和输出可能同名，等于边读边覆盖自己。
-if ($fromSolved -and $doSolve) {
-    $doSolve = $false
-    if ($Mode -eq 'solve') {
-        throw ('solved\ 里的模型是按「只导出」使用的：重算会把它自己覆盖掉。要重算请选 models\ 里的裸模型: ' + $modelFiles[0].FullName)
-    }
-    Write-Host '  solved\ 里的模型：只导出（要重算请选 models\ 里的裸模型）' -ForegroundColor Cyan
-}
-$modelList = @($idxs | ForEach-Object { $modelFiles[$_-1] })
-# a=全部：失效的快捷方式直接跳过并提示，不让整个队列被一条坏链接卡死
-if ($pickAll) {
-    $skipped = @($modelList | Where-Object { $_.Missing })
-    foreach ($s in $skipped) { Write-Host ('  跳过（快捷方式目标不存在）: ' + $s.Name) -ForegroundColor DarkYellow }
-    $modelList = @($modelList | Where-Object { -not $_.Missing })
-    if ($modelList.Count -eq 0) { throw '选中的模型都不可用（快捷方式都指向不存在的文件）' }
-}
-$bad = @($modelList | Where-Object { $_.Missing })
-if ($bad.Count -gt 0) {
-    $msg = @('这些快捷方式的目标模型不存在（快捷方式可能过期了，重建或者改指向新文件）：')
-    foreach ($b in $bad) {
-        $msg += ('  ' + $b.Name + '  →  ' + $b.FullName)
-        # 目标被改过名（常见：多加了 _npim 之类后缀）就给个提示，不自动改，免得指错文件
-        $d = Split-Path -Parent $b.FullName
-        $stem = [System.IO.Path]::GetFileNameWithoutExtension($b.FullName)
-        if ((Test-Path -LiteralPath $d) -and $stem) {
-            $near = @(Get-ChildItem -LiteralPath $d -Filter ($stem + '*.mph') -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer })
-            if ($near.Count -eq 1) { $msg += ('      疑似同名新文件: ' + $near[0].Name) }
-        }
-    }
-    throw ($msg -join [Environment]::NewLine)
-}
-$model = $modelList[0]
-
-$recipes = @(Get-Recipes)
-if (-not [string]::IsNullOrWhiteSpace($Recipe)) {
-    $hit = @($recipes | Where-Object { $_.Name -eq $Recipe })
-    if ($hit.Count -eq 0) {
-        throw ('找不到配方: ' + $Recipe + '（可选: ' + (($recipes | ForEach-Object { $_.Name }) -join ', ') + '）')
-    }
-    $r = $hit[0]
-} else {
-    $items = @($recipes | ForEach-Object { $_.Name })
-    $ri = Read-Menu '选择配方' $items 1
-    if ($ri -le 0) { Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow; exit 0 }
-    $r = $recipes[$ri - 1]
-}
-
-$cfg = $r.Data
-if (-not $cfg.NameTemplate) { throw ('配方缺少 NameTemplate: ' + $r.Name) }
-$blocks = @(Expand-Blocks $cfg (Get-ModuleDefs))
-if ($blocks.Count -eq 0) { throw ('配方没有任何导出内容（Use 或 Export 为空）: ' + $r.Name) }
 
 # 模型同名或配方生成相同 outname 时，解文件和导出文件会共用路径。
 $usedOutputs = @{}
