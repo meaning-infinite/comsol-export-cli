@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.9.1'
+$script:CliVersion = 'v1.9.2'
 $script:CliExit = 0
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
@@ -2047,21 +2047,6 @@ if ($Help) { Show-Help; exit 0 }
 if ($Modules) { Show-Modules; exit 0 }
 if ($Setup) { Start-Setup; exit 0 }
 
-if ([string]::IsNullOrWhiteSpace($Models)) {
-    $cfgTmp = Read-Config
-    if ([string]::IsNullOrWhiteSpace($cfgTmp.Models)) {
-        $Models = Join-Path $Root 'models'
-        if (-not (Test-Path -LiteralPath $Models)) { $Models = Join-Path $Root 'model' }
-    }
-    else { $Models = $cfgTmp.Models }
-}
-# 配置里存的是旧的单数 model 时，若同级已有 models 目录，以 models 为准
-if ($Models -and ((Split-Path -Leaf $Models) -eq 'model')) {
-    $sib = Join-Path (Split-Path -Parent $Models) 'models'
-    if (Test-Path -LiteralPath $sib) { $Models = $sib }
-}
-
-
 function Write-Handoff($q) {
     $changedBatches = @{}
     $changes = @()
@@ -2653,24 +2638,46 @@ if (($DryRun -and ($Resume -or $KillJob -or $Diag -or $Mode -eq 'watch')) -or
     ($Resume -and ($Mode -or $KillJob -or $Diag)) -or ($KillJob -and ($Mode -or $Diag))) {
     throw '预演、监视、续跑、诊断和终止参数组合冲突。'
 }
-# 模式：先决定这次是“求解+导出”还是“只导出已有解的模型”
-$doSolve = $true
-$doWatch = $false
-if ($Mode -eq 'export') { $doSolve = $false }
-elseif ($Mode -eq 'solve') { $doSolve = $true }
-elseif ($Mode -eq 'watch') { $doWatch = $true }
-elseif (-not $Resume -and -not $KillJob -and -not $Diag -and [string]::IsNullOrWhiteSpace($ModelIndex)) {
+# 直接监视和按 ID 终止只使用队列。交互启动、续跑和诊断先检查运行环境。
+if ($Mode -eq 'watch') { Watch-Queue; exit 0 }
+if (-not $KillJob) {
+    Write-Host '  正在检查 COMSOL 安装…' -ForegroundColor DarkGray
+    $comsolBatch = Resolve-Comsol $ComsolPath
+    $comsolRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $comsolBatch))
+    $javaExe    = Join-Path $comsolRoot 'java\win64\jre\bin\java.exe'
+    if (-not (Test-Path -LiteralPath $javaExe)) { throw ('找不到 Java: ' + $javaExe) }
+    $driverDir  = Join-Path $ScriptDir 'driver'
+    if (-not (Test-Path -LiteralPath (Join-Path $driverDir 'ExportDriver.class'))) {
+        throw ('驱动未编译，先运行: comsolcompile ' + (Join-Path $driverDir 'ExportDriver.java'))
+    }
+
+    Write-Host ('  正在检查 COMSOL 导出驱动 ' + $comsolRoot) -ForegroundColor DarkGray
+    Assert-DriverRuntime $javaExe ((Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir)
+}
+
+$doSolve = $Mode -ne 'export'
+if (-not $Mode -and -not $Resume -and -not $KillJob -and -not $Diag -and [string]::IsNullOrWhiteSpace($ModelIndex)) {
     $items = @('求解并导出', '导出模式', '监视模式')
     $mv = Read-Menu '选择模式' $items 1
     if ($mv -le 0) { Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow; exit 0 }
-    if ($mv -eq 2) { $doSolve = $false }
-    if ($mv -eq 3) { $doWatch = $true }
+    if ($mv -eq 3) { Watch-Queue; exit 0 }
+    $doSolve = ($mv -eq 1)
 }
 
-if ($doWatch) { Watch-Queue; exit 0 }
-
-# 新作业先完成选择。浏览和取消菜单不依赖调度器或 COMSOL 运行环境。
 if (-not ($Resume -or $KillJob -or $Diag)) {
+    if ([string]::IsNullOrWhiteSpace($Models)) {
+        $cfgTmp = Read-Config
+        if ([string]::IsNullOrWhiteSpace($cfgTmp.Models)) {
+            $Models = Join-Path $Root 'models'
+            if (-not (Test-Path -LiteralPath $Models)) { $Models = Join-Path $Root 'model' }
+        }
+        else { $Models = $cfgTmp.Models }
+    }
+    # 配置里存的是旧的单数 model 时，若同级已有 models 目录，以 models 为准
+    if ($Models -and ((Split-Path -Leaf $Models) -eq 'model')) {
+        $sib = Join-Path (Split-Path -Parent $Models) 'models'
+        if (Test-Path -LiteralPath $sib) { $Models = $sib }
+    }
     Write-Host ('  读取模型目录 ' + $Models) -ForegroundColor DarkGray
     $modelFiles = @(Get-ModelFiles $Models)
     $solvedDir = Join-Path $Models 'solved'
@@ -2857,17 +2864,6 @@ if ($KillJob) {
     exit 0
 }
 
-$comsolBatch = Resolve-Comsol $ComsolPath
-$comsolRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $comsolBatch))
-$javaExe    = Join-Path $comsolRoot 'java\win64\jre\bin\java.exe'
-if (-not (Test-Path -LiteralPath $javaExe)) { throw ('找不到 Java: ' + $javaExe) }
-$driverDir  = Join-Path $ScriptDir 'driver'
-if (-not (Test-Path -LiteralPath (Join-Path $driverDir 'ExportDriver.class'))) {
-    throw ('驱动未编译，先运行: comsolcompile ' + (Join-Path $driverDir 'ExportDriver.java'))
-}
-
-Write-Host ('  正在检查 COMSOL 导出驱动 ' + $comsolRoot) -ForegroundColor DarkGray
-Assert-DriverRuntime $javaExe ((Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir)
 if ($Diag) {
     $cands = @(Get-ChildItem -LiteralPath $JobsDir -ErrorAction SilentlyContinue |
                Where-Object { $_.PSIsContainer -and (Test-Path -LiteralPath (Join-Path $_.FullName 'job.properties')) } |

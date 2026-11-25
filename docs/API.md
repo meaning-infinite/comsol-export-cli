@@ -1,6 +1,6 @@
 ﻿# COMSOL 导出 CLI · API 文档
 
-> 最后更新：2026-11-25 · 对应 v1.9.1 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
+> 最后更新：2026-11-25 · 对应 v1.9.2 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
 > 接口与内部约定的参考手册，随版本持续更新。使用说明见 [README.md](../README.md)，配方写法见 [recipes/README.md](../recipes/README.md)。
 
 ## 1. 分层与调用链
@@ -54,7 +54,7 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 
 ### 2.3 交互键
 
-新作业按模式、模型、配方的顺序选择。完成选择后，CLI 读取队列、确定 COMSOL 安装，再用所选安装的 Java 检查导出驱动。预检独立于键盘输入，超过 60 秒会结束预检并显示 Java 路径。`-Mode watch` 和 `-Resume` 直接进入各自的流程。
+交互启动时，CLI 先确定 COMSOL 安装，再用该安装的 Java 检查导出驱动。通过后才显示模式菜单。选择求解或导出模式后，直接显示模型列表，再选配方。预检超过 60 秒会结束并显示 Java 路径。`-Resume` 和 `-Diag` 也先预检。`-Mode watch` 与 `-KillJob` 直接操作已有队列。
 
 | 键 | 场景 | 行为 |
 |---|---|---|
@@ -373,6 +373,7 @@ static void exportFoo(Job j, int i) throws Exception {
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.9.2 | 2026-11-25 | 交互启动在模式菜单前完成 COMSOL 安装和驱动预检。安装或驱动有误时立即报告，通过后直接选择模式、模型和配方。 |
 | v1.9.1 | 2026-11-25 | 修复从 PowerShell 7 启动时 Windows PowerShell 5.1 漏读已有配置。模型列表和配方先于安装查找与驱动预检显示，预检增加状态提示和 60 秒超时。 |
 | v1.9.0 | 2026-11-25 | 只读监视、续跑与终止、队列恢复、资源预算。修正研究范围、解身份、吸收与单位、模态上限及域选择。Java 11 驱动、离线校验、分块进度和 EXPORT_MANIFEST.md。 |
 | v1.0 | 2026-11-12 | 首个可用版本：comsolbatch + Java 驱动、队列、锁、续跑、单实例守卫 |
