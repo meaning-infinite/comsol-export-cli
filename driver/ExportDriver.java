@@ -5,13 +5,17 @@
 // 用法: ExportDriver <job.properties>
 // 作业文件键值：
 //   model / study / outdir / outname / modelsdir / blocks
-//   block.N.type   global | spectrum | image | eigenslice
+//   block.N.type   见 HANDLERS
 //   block.N.name   文件名后缀
 //   其余键按类型解释，见各 handler 注释。
 //
 // 退出码: 0 成功; 2 用法/文件错误; 3 求解失败; 4 导出失败
 
+import com.comsol.model.BatchFeature;
 import com.comsol.model.Model;
+import com.comsol.model.PropFeature;
+import com.comsol.model.SolverFeature;
+import com.comsol.model.Study;
 import com.comsol.model.util.ModelUtil;
 
 import java.io.*;
@@ -24,7 +28,7 @@ public class ExportDriver {
     // ---------- 作业上下文 ----------
     static class Job {
         Map<String, String> p;
-        Path jobDir, outdir, modelsDir, tmpdir;
+        Path jobDir, outdir, modelsDir, tmpdir, batchLog;
         String outname, dataset, study, component = "";
         int blocks, currentBlock, skipped;
         final Map<Integer,Integer> blockFiles = new HashMap<>();
@@ -57,6 +61,7 @@ public class ExportDriver {
         HANDLERS.put("slice2d", ExportDriver::exportSlice2D);   // 多切面二维正投影图
         HANDLERS.put("integral", ExportDriver::exportIntegral); // 线/面积分 -> CSV
         HANDLERS.put("modes", ExportDriver::exportModes);       // 特征频率数值 -> CSV
+        HANDLERS.put("solverlog", ExportDriver::exportSolverLog);
         HANDLERS.put("bigtable", ExportDriver::exportBigTable); // 通用原始大表（参数+谱线+域吸收）
     }
 
@@ -104,10 +109,10 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.9.0";
+    static final String DRIVER_VERSION = "v1.11.0";
 
     static int progressBlock, progressBlocks, progressTotal, progressDone;
-    static boolean progressImages;
+    static boolean progressFiles;
     static final class JobFailure extends RuntimeException {
         final int code;
         JobFailure(int code, String message) { super(message); this.code = code; }
@@ -134,7 +139,7 @@ public class ExportDriver {
         progressDone = done;
         if (PROGRESS_FILE == null) return;
         String s = "done=" + done + "\ntotal=" + total + "\nlabel=" + label
-                + "\nunit=" + (progressImages ? "files" : "solutions") + "\nblock=" + progressBlock + "\nblocks=" + progressBlocks + "\nts=" + System.currentTimeMillis() + "\n";
+                + "\nunit=" + (progressFiles ? "files" : "solutions") + "\nblock=" + progressBlock + "\nblocks=" + progressBlocks + "\nts=" + System.currentTimeMillis() + "\n";
         try {
             Path tmp = PROGRESS_FILE.resolveSibling("progress.tmp");
             Files.write(tmp, s.getBytes(StandardCharsets.UTF_8));
@@ -149,6 +154,8 @@ public class ExportDriver {
                 com.comsol.model.SolverSequence.class.getMethod("study");
                 com.comsol.model.Study.class.getMethod("getSolverSequences", String.class);
                 com.comsol.model.NumericalFeature.class.getMethod("getReal");
+                Study.class.getMethod("getLastComputationTime");
+                PropFeature.class.getMethod("hasProperty", String.class);
                 System.out.println(DRIVER_VERSION + " Java " + System.getProperty("java.version"));
                 return;
             } catch (ReflectiveOperationException | LinkageError e) {
@@ -237,15 +244,25 @@ public class ExportDriver {
         }
         Files.writeString(j.jobDir.resolve("exporting"), "ok");
         j.chunk = chunkSize(j);
-        j.sols = listSols(j);
-        int total = j.sols.stream().mapToInt(u -> u.n).sum();
-        if (total == 0) throw new JobFailure(4, "所选研究 " + j.study + " 没有已存解，请选择含有所需解的模型");
-        j.dataset = datasetFor(j, j.sols.get(0).tag);
+        boolean needsSolutions = false;
+        boolean wantsLog = false;
+        for (int i = 1; i <= j.blocks; i++) {
+            if ("solverlog".equalsIgnoreCase(j.block(i, "type", "global").trim())) wantsLog = true;
+            else needsSolutions = true;
+        }
+        if (wantsLog && resume && "batch".equals(j.p.get("solver"))) {
+            Path raw = j.jobDir.resolve("solve.log");
+            if (Files.isRegularFile(raw) && Files.size(raw) > 0) j.batchLog = raw;
+        }
         String wanted = j.p.getOrDefault("solution", "").trim();
-        if (!wanted.isEmpty()) {
-            if (!hasDataset(j, wanted) || j.sols.stream().noneMatch(u -> u.tag.equals(j.model.result().dataset(wanted).getString("solution"))))
+        int total = 0;
+        if (needsSolutions) {
+            j.sols = listSols(j);
+            total = j.sols.stream().mapToInt(u -> u.n).sum();
+            if (total == 0) throw new JobFailure(4, "所选研究 " + j.study + " 没有已存解，请选择含有所需解的模型");
+            if (!wanted.isEmpty() && (!hasDataset(j, wanted) || j.sols.stream().noneMatch(
+                    u -> u.tag.equals(j.model.result().dataset(wanted).getString("solution")))))
                 throw new JobFailure(2, "指定数据集不属于所选解范围 " + wanted);
-            j.dataset = wanted;
         }
         j.pnames = studyParamNames(j.model, j.study);
         for (String tag : j.model.study(j.study).feature().tags()) {
@@ -263,15 +280,15 @@ public class ExportDriver {
         progressBlocks = j.blocks;
         for (int i = 1; i <= j.blocks; i++) {
             j.component = "";
-            j.dataset = wanted.isEmpty() ? datasetFor(j, j.sols.get(0).tag) : wanted;
             j.currentBlock = i;
             progressBlock = i;
             String type = j.block(i, "type", "global").trim().toLowerCase(Locale.ROOT);
             Handler handler = HANDLERS.get(type);
             if (handler == null) throw new JobFailure(2, "未知导出类型 " + type);
+            if (!"solverlog".equals(type)) j.dataset = wanted.isEmpty() ? datasetFor(j, j.sols.get(0).tag) : wanted;
             PROGRESS_LABEL = "导出块 " + i + "/" + j.blocks + " " + j.block(i, "name", type);
-            progressImages = Arrays.asList("eigenslice", "slice2d", "image").contains(type);
-            progress(0, progressImages ? j.blockFiles.get(i) : total, PROGRESS_LABEL);
+            progressFiles = Arrays.asList("eigenslice", "slice2d", "image", "solverlog").contains(type);
+            progress(0, progressFiles ? j.blockFiles.get(i) : total, PROGRESS_LABEL);
             handler.run(j, i);
             progress(progressTotal, progressTotal, PROGRESS_LABEL);
             j.details.add("块 " + i + " " + j.block(i, "name", type) + " 已完成");
@@ -285,14 +302,17 @@ public class ExportDriver {
 
     static void planArtifacts(Job j) {
         for (int i = 1; i <= j.blocks; i++) {
-            String kind = j.block(i, "type", "global").toLowerCase(Locale.ROOT);
+            String kind = j.block(i, "type", "global").trim().toLowerCase(Locale.ROOT);
             if (!HANDLERS.containsKey(kind)) throw new JobFailure(2, "未知导出类型 " + kind);
             String fallback = "global".equals(kind) ? "export" + i : ("eigenslice".equals(kind) ? "eigen" + i : kind);
             String name = j.block(i, "name", fallback);
             j.p.putIfAbsent("block." + i + ".name", name);
             String prefix = j.outname + "_" + name;
             List<Path> files = new ArrayList<>();
-            if ("image".equals(kind)) files.add(j.outdir.resolve(prefix + "_all.png"));
+            if ("solverlog".equals(kind)) {
+                files.add(j.outdir.resolve(prefix + ".txt"));
+                if (j.batchLog != null) files.add(j.outdir.resolve(prefix + "_batch.log"));
+            } else if ("image".equals(kind)) files.add(j.outdir.resolve(prefix + "_all.png"));
             else if ("eigenslice".equals(kind) || "slice2d".equals(kind)) {
                 String[] planes = split(j.block(i, "planes", "xy|zx|yz"));
                 for (String p : planes) {
@@ -323,12 +343,102 @@ public class ExportDriver {
     static void record(Job j, Path path, String description) throws IOException {
         if (!Files.isRegularFile(path) || Files.size(path) == 0) throw new IOException("缺少产物 " + path);
         if (j.artifacts.putIfAbsent(path, description) != null) throw new IOException("产物重名 " + path);
-        if (progressImages) progress(progressDone + 1, progressTotal, PROGRESS_LABEL);
+        if (progressFiles) progress(progressDone + 1, progressTotal, PROGRESS_LABEL);
     }
 
     static void publish(Path staged, Path target) throws IOException {
         try { Files.move(staged, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
         catch (AtomicMoveNotSupportedException e) { Files.move(staged, target, StandardCopyOption.REPLACE_EXISTING); }
+    }
+
+    // COMSOL keeps the last computation metadata on the study and original messages on individual features.
+    static void exportSolverLog(Job j, int i) throws IOException {
+        String prefix = j.outname + "_" + j.block(i, "name", "solverlog");
+        Path report = j.outdir.resolve(prefix + ".txt");
+        Path part = Files.createTempFile(j.outdir, "solver-history-", ".part");
+        try {
+            boolean all = "all".equalsIgnoreCase(j.p.getOrDefault("solscope", "study"));
+            int count;
+            try (BufferedWriter out = Files.newBufferedWriter(part, StandardCharsets.UTF_8)) {
+                out.write("COMSOL 求解器运行日志\n模型 " + j.loadedModel + "\n导出使用 COMSOL " + j.runtime);
+                out.write("\n范围 " + (all ? "全部研究与保留的节点" : "研究 " + j.study) + "\n");
+                for (String tag : all ? j.model.study().tags() : new String[]{j.study}) {
+                    Study study = j.model.study(tag);
+                    long date = study.getLastComputationDate();
+                    long duration = study.getLastComputationTime();
+                    String elapsed = duration < 0 || (duration == 0 && date <= 0) ? "未记录"
+                            : String.format(Locale.ROOT, "%.3f s", duration / 1000.0);
+                    String version = study.getLastComputationVersion();
+                    String timing = "研究 " + tag + " (" + study.label() + ") · 上次计算耗时 " + elapsed
+                            + " · 计算时间 " + (date > 0 ? java.time.Instant.ofEpochMilli(date) : "未记录")
+                            + " · 求解版本 " + (version == null || version.isBlank() ? "未记录" : version);
+                    out.write("\n" + timing + "\n");
+                    j.details.add(timing);
+                }
+                out.write("\n以下为模型保留的节点原文。扫描作业和解节点可能记录同一阶段，请勿累加。\n");
+                count = writeStoredLogs(j, all, out);
+                if (count == 0 && j.batchLog == null)
+                    throw new JobFailure(4, "模型没有保存求解器运行日志，本作业也没有原始批处理日志可导出");
+                out.write("\n含日志的模型节点数 " + count + "\n");
+                if (j.batchLog != null) out.write("本次 CLI 求解的原始批处理日志 " + prefix + "_batch.log\n");
+            }
+            publish(part, report);
+            record(j, report, "求解器运行日志 · " + count + " 个模型节点");
+        } finally { Files.deleteIfExists(part); }
+        if (j.batchLog != null) {
+            Path target = j.outdir.resolve(prefix + "_batch.log");
+            Path rawPart = Files.createTempFile(j.outdir, "solver-history-", ".part");
+            try {
+                Files.copy(j.batchLog, rawPart, StandardCopyOption.REPLACE_EXISTING);
+                publish(rawPart, target);
+                record(j, target, "本作业原始 comsolbatch 日志 · " + j.batchLog);
+            } finally { Files.deleteIfExists(rawPart); }
+        }
+    }
+
+    static int writeStoredLogs(Job j, boolean all, BufferedWriter out) throws IOException {
+        Set<String> related = all ? Collections.emptySet()
+                : new HashSet<>(Arrays.asList(j.model.study(j.study).getSolverSequences("All")));
+        int count = 0;
+        for (String tag : j.model.sol().tags()) {
+            var seq = j.model.sol(tag);
+            String owner;
+            try { owner = seq.study(); }
+            catch (RuntimeException e) { owner = ""; } // An unattached stored sequence can have no study.
+            if ((owner == null || owner.isEmpty()) && related.contains(tag)) owner = j.study;
+            if (!all && !j.study.equals(owner)) continue;
+            for (String child : seq.feature().tags())
+                count += writeNodeLog(out, seq.feature(child), owner, "sol/" + tag + "/" + child);
+        }
+        for (String tag : j.model.batch().tags()) {
+            BatchFeature batch = j.model.batch(tag);
+            String owner = batch.study();
+            if (all || j.study.equals(owner))
+                count += writeNodeLog(out, batch, owner, "batch/" + tag);
+        }
+        return count;
+    }
+
+    static int writeNodeLog(BufferedWriter out, PropFeature node, String owner, String path) throws IOException {
+        int count = 0;
+        String message = node.hasProperty("message") ? node.getString("message") : null;
+        if (message != null && !message.isBlank()) {
+            out.write("\n===== " + path + " · " + node.label() + " · 研究 "
+                    + (owner == null || owner.isEmpty() ? "未关联" : owner) + " =====\n");
+            out.write(message);
+            out.write("\n");
+            count++;
+        }
+        if (node instanceof SolverFeature) {
+            SolverFeature solver = (SolverFeature)node;
+            for (String tag : solver.feature().tags())
+                count += writeNodeLog(out, solver.feature(tag), owner, path + "/" + tag);
+        } else if (node instanceof BatchFeature) {
+            BatchFeature batch = (BatchFeature)node;
+            for (String tag : batch.feature().tags())
+                count += writeNodeLog(out, batch.feature(tag), owner, path + "/" + tag);
+        }
+        return count;
     }
 
     static void writeManifest(Job j, int code, String error) throws IOException {

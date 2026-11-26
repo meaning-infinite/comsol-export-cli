@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.10.1'
+$script:CliVersion = 'v1.11.0'
 $script:CliExit = 0
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
@@ -766,7 +766,7 @@ function Show-Help {
     Write-Host '    -Help            显示本帮助'
     Write-Host ''
     Write-Host '  配方字段: Task / Study / NameTemplate / Export'
-    Write-Host '  Export 块 Type: global | spectrum | image | eigenslice | slice2d | integral | modes | bigtable'
+    Write-Host '  Export 块 Type: global | spectrum | image | eigenslice | slice2d | integral | modes | bigtable | solverlog'
     Write-Host ''
 }
 
@@ -874,7 +874,7 @@ function Expand-Blocks {
     $names = @{}
     foreach ($b in $blocks) {
         $kind = [string]$b.Type
-        if ($kind -notin @('global','spectrum','image','slice2d','eigenslice','bigtable','integral','modes')) { throw "未知导出类型 $kind" }
+        if ($kind -notin @('global','spectrum','image','slice2d','eigenslice','bigtable','integral','modes','solverlog')) { throw "未知导出类型 $kind" }
         if ($b.Name) {
             if ($b.Name.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) { throw "非法导出块文件名 $($b.Name)" }
             if ($names.ContainsKey($b.Name)) { throw "导出块重名 $($b.Name)" }
@@ -900,8 +900,7 @@ function Show-Modules {
     $rows = @()
     foreach ($k in ($map.Keys | Sort-Object)) {
         $m = $map[$k]
-        $keys = ''
-        if ($m.Keys) { $keys = ($m.Keys | Where-Object { $_ -ne 'Name' }) -join ', ' }
+        $keys = $m.Keys -join ', '
         $rows += [pscustomobject]@{ Text = ('[{0}] {1}（{2}）  可覆盖: {3}' -f $m.Id, $m.Title, $m.Kind, $keys); Color = 'Gray' }
     }
     Write-BoxRows '预制模块' $rows
@@ -1340,7 +1339,7 @@ function Get-JobStates {
 # 可用参数 -Heap 8g 或环境变量 COMSOL_EXPORT_XMX 覆盖。
 # 驱动 class 里的版本串（DRIVER_VERSION 常量），用来发现「只更新了脚本、没更新 driver」的情况：
 # 远程出现过 cli.ps1 是新的、driver 还是旧 class，于是同样的 bug 反复报。
-$script:ExpectedDriverVersion = 'v1.9.0'
+$script:ExpectedDriverVersion = 'v1.11.0'
 
 function Get-DriverClassVersion([string]$dir) {
     $p = Join-Path $dir 'ExportDriver.class'
@@ -2198,8 +2197,10 @@ function Write-Handoff($q) {
                 try { Remove-Item -LiteralPath $render -Recurse -Force } catch { Write-Warning ('渲染临时目录待清理 ' + $render) }
             }
             if ($job.status -ne 'done' -and [IO.Directory]::Exists($dir)) {
-                foreach ($part in [IO.Directory]::EnumerateFiles($dir,'csv-*.part')) {
-                    try { [IO.File]::Delete($part) } catch { Write-Warning ('未完成表格待清理 ' + $part) }
+                foreach ($pattern in 'csv-*.part','solver-history-*.part') {
+                    foreach ($part in [IO.Directory]::EnumerateFiles($dir,$pattern)) {
+                        try { [IO.File]::Delete($part) } catch { Write-Warning ('未完成产物待清理 ' + $part) }
+                    }
                 }
             }
         }
@@ -2211,7 +2212,7 @@ function Write-Handoff($q) {
             if ($null -ne $job.solveExitCode) { $lines += '- comsolbatch 退出码 ' + $job.solveExitCode }
             if ($job.solveError) { $lines += '- 求解报错 ' + $job.solveError }
             $lines += @('', '## 已落盘文件', '')
-            $files = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Extension -in @('.csv','.png') })
+            $files = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Extension -in @('.csv','.png','.txt','.log') })
             if ($files.Count) { $lines += @($files | ForEach-Object { '- ' + $_.Name + ' · ' + $_.Length + ' bytes' }) }
             else { $lines += '- 无已完成产物' }
             $spec = Join-Path $job.jobDir 'job.properties'

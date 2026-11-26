@@ -1,6 +1,6 @@
 ﻿# COMSOL 导出 CLI · API 文档
 
-> 最后更新：2026-11-26 · 对应 v1.10.1 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
+> 最后更新：2026-11-26 · 对应 v1.11.0 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
 > 接口与内部约定的参考手册，随版本持续更新。使用说明见 [README.md](../README.md)，配方写法见 [recipes/README.md](../recipes/README.md)。
 
 ## 1. 分层与调用链
@@ -120,10 +120,10 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 
 | 字段 | 说明 |
 |---|---|
-| `Type` | 必填，`global` `spectrum` `image` `eigenslice` |
-| `Name` | 块名，多于一块时作为文件名后缀 |
+| `Type` | 必填，`global` `spectrum` `image` `eigenslice` `slice2d` `integral` `modes` `bigtable` `solverlog` |
+| `Name` | 块名。日志与图像产物始终使用该名，多块导出的 CSV 也使用该名。 |
 
-单块作业输出 `<outname>.csv` / `<outname>_<name>.png`；多块输出 `<outname>_<name>.csv`。
+单块数值表写入 `<outname>.csv`，多块作业写入 `<outname>_<name>.csv`。图像与日志的文件名见对应类型。
 
 ### 4.2 global
 
@@ -235,12 +235,26 @@ Pin_W=0 时保留原值与绝对吸收功率，百分比留空。AbsDomains=none
 | `modes` | modes | 模态数值表 |
 | `slice2d` | slice2d | 多切面二维正投影 |
 | `spectrum` | spectrum | 常规谱线 |
+| `solverlog` | solverlog | 最近一次研究耗时与模型保留的运行日志 |
 | `table` | table | 任意表达式表 |
 | `image` | image | 单点场图：**只出 1 张组合总表**（三维+xy+xz+zy 拼好），300 dpi |
 
 `image` 模块的关键字段：`SolNum`（取第几个解 —— 做"逐共振点各出一组场图"时就是各共振点的解号）、`Expr`、`Width`（`Height>0` 时的二维宽度）、`Height`（0 = 二维按切面长宽比自动）、`Title`（空 = 自动）、`Edges`。分辨率由驱动内 `SCALE` 常量统一放大，不需要在配方里写。
 
 新增模块 = 加一个 psd1；新增能力 = `HANDLERS` 一行 + 一个 psd1。
+
+### 4.11 solverlog — 求解器运行日志
+
+配方 `99_求解器历史记录导出` 使用 `SolScope='all'`，读取模型中全部研究与求解器、作业节点保存的日志。单独使用时无需解向量或结果数据集。组合配方可加 `Use = @(@{ Module='solverlog' })`，`SolScope='study'`（默认）仅导出所选研究的记录。
+
+| 产物 | 来源与口径 |
+|---|---|
+| `<outname>_<Name>.txt` | `Name` 默认 `solver_history`。每项研究最近一次计算的耗时（秒）、计算时间（UTC）、求解时的 COMSOL 版本，随后按节点路径列出保存的原文。缺失的元数据标为“未记录”。 |
+| `<outname>_<Name>_batch.log` | 仅当本次 CLI 作业已完成原生批处理求解、且有非空 `solve.log` 时逐字节复制。含整个批处理作业的输出。 |
+
+`Study.getLastComputationTime()` 以毫秒计。比较两种求解器时，用同一研究的耗时计算加速比 `T_PARDISO / T_cuDSS`。节点和扫描作业日志可能重复记录某一步；求解器名称、自由度、单步耗时和内存以原文为准。确认 cuDSS 实际参与求解需核对原文中的后端信息。GPU 利用率需在运行时另行采集。[COMSOL Study API](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/api/com/comsol/model/Study.html)
+
+“存储完整的求解器历史记录”控制生成代码中的求解器配置记录。模型内的运行日志受日志缓冲区限制；需要保留长扫描全文时，可在求解前启用“首选项 → 用户界面 → 日志和消息 → 存储到文件”。“只导出”读取所选模型，若其中没有运行日志，作业报错并在交接清单写明原因。[求解器历史设置](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/application_programming_guide.15.27.html) · [COMSOL 日志窗口](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_solver.36.113.html)
 
 ## 5. 扩展指南
 
@@ -377,6 +391,7 @@ static void exportFoo(Job j, int i) throws Exception {
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.11.0 | 2026-11-26 | 新增 `99_求解器历史记录导出` 配方及 `solverlog` 模块，支持读取已存求解日志、研究耗时和本作业原始批处理日志。 |
 | v1.10.1 | 2026-11-26 | 修复波长扫描进度停在 9%。监视显示求解报错，记录原生退出码，失败作业跳过导出并写明原因。 |
 | v1.10.0 | 2026-11-26 | 启动驱动预检只加载必要库。多窗口共享队列和资源预算，可并行求解、独立取消及续跑。慢进度与重开窗口使用阶段累计估时。补充 GPU 批处理口径。 |
 | v1.9.4 | 2026-11-26 | 阶段序号与名称之间使用中文冒号。 |
@@ -427,6 +442,10 @@ static void exportFoo(Job j, int i) throws Exception {
 - COMSOL 6.2 音叉模型已有三个特征解节点，各含一个解。modes 限取前两行，eigenslice 的三个平面共交付 9 张 PNG。单节点包含多个特征模态的切片仍待独立样本验证。
 - `spectrum` 曲线图横轴取默认（未强制设为波长），多条解曲线会画在同一张图上。
 - 六作业并发、单项取消和旧队列恢复已通过 Windows PowerShell 5.1 替身进程测试。真实模型同时运行仍取决于公共电脑的许可和资源。
+
+### v1.11.0 日志导出验收（2026-11-26）
+
+Windows PowerShell 5.1 从 `run.bat` 只导出已有模型，逐段对照保存的日志原文。6.4 波长扫描模型导出 6 个节点和研究耗时 206.852 秒。6.2 瞬态模型导出 3 个节点和研究耗时 0.303 秒。6.2 教程模型清除了场解，仍成功导出 3 个日志节点。无运行日志的模型返回退出码 4，交接清单记录原因。复用一个已完成的批处理作业时，导出的 58,962 字节批处理日志与该作业原件逐字节一致。
 
 ### v1.9.0 本地验收（2026-11-25）
 

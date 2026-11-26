@@ -55,6 +55,51 @@ public class ExportContractTest {
         });
     }
 
+    static void checkSolverHistory(Path temp) throws Exception {
+        ExportDriver.Job j = new ExportDriver.Job();
+        j.jobDir = temp;
+        j.outdir = temp;
+        j.outname = "sample";
+        j.study = "studyA";
+        j.p = new HashMap<>();
+        j.p.put("solscope", "all");
+        j.p.put("block.1.type", "solverlog");
+        j.p.put("block.1.name", "timing");
+        j.blocks = 1;
+        Study study = stub(Study.class, (n, a) -> {
+            switch (n) {
+                case "label": return "A";
+                case "getLastComputationTime": return 1234L;
+                case "getLastComputationDate": return 1696063196661L;
+                case "getLastComputationVersion": return "fixture version";
+                default: throw new UnsupportedOperationException(n);
+            }
+        });
+        j.model = stub(Model.class, (n, a) -> {
+            switch (n) {
+                case "study": return a.length > 0 ? study : stub(StudyList.class, (m, b) -> new String[]{"studyA"});
+                case "sol": return stub(SolverSequenceList.class, (m, b) -> new String[0]);
+                case "batch": return stub(BatchList.class, (m, b) -> new String[0]);
+                default: throw new UnsupportedOperationException(n);
+            }
+        });
+        // A file found next to a pure export does not establish that it belongs to the model.
+        Path raw = temp.resolve("solve.log");
+        byte[] original = "Solver\r\n时间 1.234 s\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_16LE);
+        Files.write(raw, original);
+        Path report = temp.resolve("sample_timing.txt");
+        boolean missing = false;
+        try { ExportDriver.exportSolverLog(j, 1); }
+        catch (ExportDriver.JobFailure e) { missing = e.code == 4 && e.getMessage().contains("没有保存"); }
+        check(missing && !Files.exists(report), "no model messages or bound batch log fails without an empty report");
+        j.batchLog = raw;  // The caller established the completed batch job.
+        ExportDriver.planArtifacts(j);
+        ExportDriver.exportSolverLog(j, 1);
+        check(Files.readString(report).contains("上次计算耗时 1.234 s")
+                && Arrays.equals(original, Files.readAllBytes(temp.resolve("sample_timing_batch.log")))
+                && j.artifacts.keySet().equals(j.expected), "study timing and exact batch log bytes match the planned custom names");
+    }
+
     public static void main(String[] args) throws Exception {
         ExportDriver.Job j = new ExportDriver.Job();
         j.p = new LinkedHashMap<>();
@@ -71,6 +116,7 @@ public class ExportContractTest {
               "zero incident power yields undefined percentage");
         j.outdir=Files.createTempDirectory("TEMP_comsol_contract_");
         try {
+            checkSolverHistory(j.outdir);
             Path file=j.outdir.resolve("rows.csv");
             try (ExportDriver.CsvStream csv=new ExportDriver.CsvStream(j,file,new String[]{"value","Pin_W","A_pct","lambda_nm"})) {
                 double[] row={1.000000000000001,0,Double.NaN,866.000000000001};

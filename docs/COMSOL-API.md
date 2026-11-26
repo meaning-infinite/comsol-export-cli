@@ -124,6 +124,12 @@ ModelUtil.clear();
 | 单步控制 | 研究里的步骤无法用 `set("activate", false)` 关掉（报 `Invalid_property_value` / `Unknown_property`），只能整研究跑 | 已验证 |
 | 已求解模型复用 | `save()` 出的模型可再 `load()` 后直接导出，跳过求解（315 s → 11 s） | 已验证 |
 
+### 已保存的运行日志
+
+`study.getLastComputationTime()` 返回最近一次研究计算的毫秒数。`getLastComputationDate()` 和 `getLastComputationVersion()` 分别给出计算时间和求解时的版本。[COMSOL Study API](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/api/com/comsol/model/Study.html)
+
+在 6.2 和 6.4 的已有模型上，逐层遍历 `model.sol(tag).feature()`，并从 `model.batch(tag)` 开始遍历作业节点。节点有 `message` 属性时用 `getString("message")` 读取原文。实测 6.4 的参数扫描在 `batch/p1` 单独保留了日志，即使 `study.getSolverSequences("jobs")` 返回空数组，也需检查 `model.batch().tags()`。
+
 ## 6. 编译与类路径
 
 - 用 COMSOL 自带 JDK：`D:\COMSOL\COMSOL62\Multiphysics\java\win64\jre\bin\javac.exe`

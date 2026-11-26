@@ -3,7 +3,7 @@
 <p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
 <p align="center">
-  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.10.1-2AA0B0"></a>
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.11.0-2AA0B0"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
   <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
   <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.1~6.4-368CCB">
@@ -55,6 +55,8 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 
 **GPU 求解**　CLI 使用模型中启用的求解器，沿用运行账户和 COMSOL 版本的默认首选项。6.4 电磁频域或特征频率模型需要在实际使用的直接线性求解器中选择 **NVIDIA cuDSS**，才能用 GPU 加速该步。图形渲染加速只作用于显示。运行时可在作业目录核对 `launch-solve.txt` 的命令和 `solve.log` 的求解器信息。[COMSOL 批处理说明](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_running.38.31.html) · [GPU 求解器说明](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_solver.36.173.html)
 
+对比 PARDISO 和 cuDSS 时，分别保存两份已求解模型，运行 `run.bat -Mode export -Recipe "99_求解器历史记录导出"`。在各自的 `*_solver_history.txt` 查同一研究的“上次计算耗时”，再按节点核对自由度、求解阶段和内存。同一台机器上应保持网格、扫描点和核数相同，并记录同期 CPU 负载。使用“求解并导出”时，配方也会带出本作业的原始 `*_solver_history_batch.log`。
+
 ## 配方
 
 导出内容全在 `recipes/*.psd1`。配方声明用哪些模块、覆盖哪些参数：
@@ -79,6 +81,7 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 | `modes` | 特征频率等模态数据 |
 | `integral` | 线、面积分 |
 | `bigtable` | 全局参数、谱线、分域吸收合成一张大表 |
+| `solverlog` | 研究耗时、模型保留的求解器与扫描日志 |
 
 模块位于 `script/modules/`，新增能力只需在 `driver/ExportDriver.java` 的 `HANDLERS` 中注册。
 
