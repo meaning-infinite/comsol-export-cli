@@ -1,7 +1,7 @@
 ﻿@{
     Files = @('run.bat','cli.ps1','update.bat','update.ps1','pack.ps1','release.psd1','README.md','AGENTS.md')
     Directories = @('driver','modules','recipes','docs','assets')
-    Required = @('driver/ExportDriver.java','driver/ExportDriver.class','driver/ExportDriver$Handler.class',
+    Required = @('driver/Invoke-BatchSolve.ps1','driver/ExportDriver.java','driver/ExportDriver.class','driver/ExportDriver$Handler.class',
         'driver/ExportDriver$Job.class','driver/ExportDriver$SolUse.class','driver/ExportDriver$CsvStream.class',
         'driver/ExportDriver$SliceSink.class','driver/ExportDriver$JobFailure.class',
         'modules/table.psd1','modules/spectrum.psd1','modules/bigtable.psd1','modules/image.psd1',

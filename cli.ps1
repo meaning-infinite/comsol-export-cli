@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.10.0'
+$script:CliVersion = 'v1.10.1'
 $script:CliExit = 0
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
@@ -1281,6 +1281,10 @@ function Test-JobCommand($process, [string]$dir) {
     if ($process.Name -like 'comsol*') {
         $switch = '-batchlog'
         $file = 'solve.log'
+    } elseif ($process.Name -eq 'powershell.exe' -and
+              $process.CommandLine -match '(?:^|\s)-File\s+"[^"]*\\driver\\Invoke-BatchSolve\.ps1"(?=\s)') {
+        $switch = '-LaunchFile'
+        $file = 'launch-solve.txt'
     } elseif ($process.Name -like 'java*') {
         $switch = 'ExportDriver'
         $file = 'job.properties'
@@ -1292,7 +1296,7 @@ function Test-JobCommand($process, [string]$dir) {
 function Test-JobAlive($procId, $jobDir, $expectedStart) {
     if (-not $procId) { return $false }
     $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
-    if (-not $proc -or ($proc.ProcessName -notlike 'comsol*' -and $proc.ProcessName -notlike 'java*')) { return $false }
+    if (-not $proc -or ($proc.ProcessName -notlike 'comsol*' -and $proc.ProcessName -notlike 'java*' -and $proc.ProcessName -ne 'powershell')) { return $false }
     if ($expectedStart) {
         try {
             $start = [datetimeoffset]::Parse([string]$expectedStart).UtcDateTime
@@ -1486,7 +1490,7 @@ function Get-JobPhase($job) {
     return 'solve'
 }
 
-function Read-FileTailText([string]$path, [int]$maxBytes = 65536) {
+function Read-FileTailText([string]$path, [int]$maxBytes = 65536, [switch]$Native) {
     # 读正在增长的文件末尾：必须用 FileShare.ReadWrite，否则会撞上写锁
     if (-not (Test-Path -LiteralPath $path)) { return '' }
     try {
@@ -1498,7 +1502,12 @@ function Read-FileTailText([string]$path, [int]$maxBytes = 65536) {
             $fs.Seek(($len - $room), [System.IO.SeekOrigin]::Begin) | Out-Null
             $buf = New-Object byte[] ([int]$room)
             $got = $fs.Read($buf, 0, [int]$room)
-            return [System.Text.Encoding]::UTF8.GetString($buf, 0, $got)
+            $text = [Text.Encoding]::UTF8.GetString($buf, 0, $got)
+            # A sliced leading character may be incomplete even in a UTF-8 file.
+            if ($Native -and $text.TrimStart([char]0xfffd).Contains([char]0xfffd)) {
+                return [Text.Encoding]::Default.GetString($buf, 0, $got)
+            }
+            return $text.TrimStart([char]0xfeff)
         } finally { $fs.Close() }
     } catch { return '' }
 }
@@ -1539,13 +1548,17 @@ function Get-StudyProgressKind([string]$modelPath, [string]$studyTag) {
 }
 
 $script:SolveKinds = @{}
+$script:SolveMessages = @{}
 function Get-SolveLogState($job) {
     $o = @{ Pct = -1; Stage = ''; Param = ''; Eigen = $false; Iteration = ''; Opened = $false; Running = $false }
     $txt = Read-FileTailText (Join-Path $job.jobDir 'solve.log') 131072
+    $o.Error = Get-SolveErrorLine $job -RecentLog $txt
+    if ($o.Error) { $script:SolveMessages[$job.jobDir] = $o.Error }
+    elseif ($script:SolveMessages) { $o.Error = $script:SolveMessages[$job.jobDir] }
     if ([string]::IsNullOrWhiteSpace($txt)) { return $o }
     if ($txt -match '正在打开文件|Opening file') { $o.Opened = $true }
     if ($txt -match '正在运行|研究\d|参数化扫描|Running:') { $o.Running = $true }
-    $ms = [regex]::Matches($txt, '(?im)^[ \t]*(?:当前进度|Current progress)[:：]\s*(\d+)\s*%[^\S\r\n]*-[^\S\r\n]*([^\r\n]*)')
+    $ms = [regex]::Matches($txt, '(?im)^[ \t-]*(?:当前进度|Current progress)[ \t]*[:：][ \t]*(100|\d{1,2})[ \t]*%[ \t]*-[ \t]*([^\r\n]*)')
     if ($ms.Count -gt 0) {
         $last = $ms[$ms.Count - 1]
         $o.Pct = [int]$last.Groups[1].Value
@@ -1580,7 +1593,7 @@ function Get-SolveLogState($job) {
             $o.Running = $true
         }
     }
-    $mp = [regex]::Matches($txt, '参数\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\r\n。]{1,40})')
+    $mp = [regex]::Matches($txt, '(?i)(?:参数|\bParameter)[ \t]+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\r\n。]{1,40})')
     if ($mp.Count -gt 0) {
         $x = $mp[$mp.Count - 1]
         $o.Param = ($x.Groups[1].Value + '=' + $x.Groups[2].Value.Trim())
@@ -1591,8 +1604,9 @@ function Get-SolveLogState($job) {
 function Get-StageLabel([string]$stage) {
     if ([string]::IsNullOrWhiteSpace($stage)) { return '准备' }
     $s = $stage.Trim()
-    if ($s -match '矩阵分解') { return '矩阵分解' }
-    if ($s -match '组装') { return '组装矩阵' }
+    if ($s -match '约束处理|constraint handling') { return '约束处理' }
+    if ($s -match '矩阵分解|(?:matrix |LU )?factorization') { return '矩阵分解' }
+    if ($s -match '组装|assembling|assembly') { return '组装矩阵' }
     if ($s -match '线性方程组|解方程') { return '解方程' }
     if ($s -match '编译') { return '编译方程' }
     if ($s -match '稳态求解器|求解器') { return '建立求解器' }
@@ -1698,6 +1712,7 @@ function Get-ProgressInfo($job) {
     $solDone = -1; $solTotal = -1
     $exportDone = -1.0; $exportTotal = 0.0
     $stageOnly = $false
+    $solveError = ''
     $phaseLabel = '导出'
     if ($phase -eq 'solve') {
         $s = Get-SolveLogState $job
@@ -1725,6 +1740,8 @@ function Get-ProgressInfo($job) {
             $detail += ' · ' + $s.Iteration
         }
         if ($s.Param) { $detail = $detail + ' · ' + $s.Param }
+        $solveError = $s.Error
+        if ($solveError) { $detail = '求解报错 · ' + $solveError }
     } else {
         $e = Get-ExportState $job
         $solDone = $e.Done; $solTotal = $e.Total
@@ -1745,7 +1762,7 @@ function Get-ProgressInfo($job) {
         $stageName = '导出'
     }
 
-    if ($stageOnly) { $eta = -1 }
+    if ($stageOnly -or $solveError) { $eta = -1 }
     elseif ($phase -eq 'solve') { $eta = Get-RecentEta $job 'solve' $pct 100 $now $phaseStart }
     else { $eta = Get-RecentEta $job 'export-blocks' $exportDone $exportTotal $now $phaseStart }
 
@@ -1758,6 +1775,7 @@ function Get-ProgressInfo($job) {
     return [pscustomobject]@{
         Phase = $phase
         PhaseLabel = $phaseLabel
+        SolveError = $solveError
         StageOnly = $stageOnly
         PhaseNo = $phaseNo
         PhaseAll = $phaseAll
@@ -1778,6 +1796,7 @@ function Get-ProgressInfo($job) {
 
 function Format-TimeLine($info) {
     # 只留剩余时间：已用/总时长由调用方各写一次，不再重复
+    if ($info.SolveError) { return '等待求解进程退出' }
     if ($info.StageOnly) { return '剩余时间不可估' }
     if ($info.Phase -eq 'export') { return ('导出剩 ' + (Format-Eta $info.Eta)) }
     return ('求解剩 ' + (Format-Eta $info.Eta))
@@ -1882,7 +1901,7 @@ function Render-Progress3($info, [string]$jobName, $ord, $total) {
 
 function Write-JobProgressLog($job, $info) {
     $sig = $info.Phase + '|' + [math]::Floor($info.Pct / 10)
-    if ($info.StageOnly) { $sig = $info.PhaseLabel + '|' + $info.Detail }
+    if ($info.StageOnly -or $info.SolveError) { $sig = $info.PhaseLabel + '|' + $info.Detail }
     if ($script:JobLogSig[$job.jobDir] -eq $sig) { return }
     $script:JobLogSig[$job.jobDir] = $sig
     Write-Host ('  [' + (Split-Path -Leaf $job.jobDir) + '] ' + (Get-PhaseTag $info) + ' ' + (Get-PctText $info) + ' · ' + $info.Detail)
@@ -1914,12 +1933,18 @@ function Show-BatchProgress($jobs) {
             $detail = $info.Detail
             if ($job.cancelMessage) { $status = $job.cancelMessage; $color = 'Yellow' }
         } else {
-            if ($textMode) { continue }
             switch ($job.status) {
                 'done'   { $status = '已完成'; $color = 'Green' }
-                'failed' { $status = '失败 · ' + $job.exitcode; $color = 'Red' }
+                'failed' { $status = '失败 · ' + $job.exitcode; $detail = $job.solveError; $color = 'Red' }
                 'killed' { $status = '已终止'; $color = 'Yellow' }
                 default  { $status = '启动中' }
+            }
+            if ($textMode) {
+                if ($script:WatchOnly -and $job.status -ne 'pending' -and $script:JobLogSig[$job.jobDir] -ne $job.status) {
+                    Write-Host ('  [' + (Split-Path -Leaf $job.jobDir) + '] ' + $status + ' ' + $detail)
+                    $script:JobLogSig[$job.jobDir] = $job.status
+                }
+                continue
             }
         }
         if ($i -lt $first -or $i -ge ($first + $perPage)) { continue }
@@ -1962,52 +1987,96 @@ function Show-ProgressJob($job, $ord, $total) {
     else { Render-Progress2 $info $nm $ord $total }
 }
 
-function Get-SolveErrorLine($job) {
-    # 从 solve.log 里抠出 comsolbatch 的报错正文。它的格式是方框 + 后续行：
-    #   /***************/  /*****错误********/  /***************/
-    #   未知解。
-    #    - 标记: all
-    $p = Join-Path $job.jobDir 'solve.log'
-    if (-not (Test-Path -LiteralPath $p)) { return '' }
-    $lines = @((Read-FileTailText $p 32768) -split "`r?`n")
-    $start = -1
-    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-        if ($lines[$i] -match '错误') { $start = $i; break }
+function Get-SolveErrorLine($job, [string]$RecentLog, [switch]$Final) {
+    # Match diagnostic headers, never model names, estimates, or LinErr table columns.
+    $pattern = '^[ \t]*(?:/\*+[ \t]*(?:错误|error)[ \t]*\*+/|(?:fatal error|error|exception|错误|异常)[ \t]*[:：]|(?:java\.[\w.]+(?:Exception|Error)|com\.comsol\.[\w.]+Exception)\b|Failed to find a solution\b|Out of memory\b|未能找到解|内存不足)'
+    if ($Final) {
+        # Stream from the beginning: COMSOL can save a partial solution and write a long trailer.
+        foreach ($name in 'solve.log','solve.err','solve.out') {
+            $path = Join-Path $job.jobDir $name
+            if (-not [IO.File]::Exists($path)) { continue }
+            $encodings = @('UTF8')
+            if ($name -ne 'solve.log' -and [Text.Encoding]::Default.CodePage -ne 65001) { $encodings += 'Default' }
+            foreach ($encoding in $encodings) {
+                $hit = Select-String -LiteralPath $path -Encoding $encoding -Pattern $pattern -Context 0,6 | Select-Object -First 1
+                if ($hit) {
+                    $lines = @($hit.Line) + @($hit.Context.PostContext)
+                    # A native diagnostic may have an ASCII header and localized ANSI body.
+                    if ($encoding -eq 'UTF8' -and $encodings.Count -gt 1 -and ($lines -join '').Contains([char]0xfffd)) { continue }
+                    return (Format-SolveError $lines)
+                }
+            }
+        }
+    } else {
+        $sources = @($RecentLog, (Read-FileTailText (Join-Path $job.jobDir 'solve.err') 8192 -Native))
+        if (-not $RecentLog) { $sources += Read-FileTailText (Join-Path $job.jobDir 'solve.out') 16384 -Native }
+        foreach ($source in $sources) {
+            if (-not $source) { continue }
+            $hit = [regex]::Match($source,'(?im)' + $pattern)
+            if ($hit.Success) {
+                $lines = $source.Substring($hit.Index) -split '\r?\n',8
+                return (Format-SolveError $lines)
+            }
+        }
     }
-    if ($start -lt 0) { return '' }
-    $msg = @()
-    for ($j = $start + 1; $j -lt $lines.Count; $j++) {
-        $s = ([string]$lines[$j]).Trim()
-        if ($s -eq '') { if ($msg.Count -gt 0) { break } else { continue } }
-        if ($s -match '^/+\*+/+$') { continue }
-        if ($s -match '^(正在|保存时间|总时间)') { break }
-        $msg += $s
-        if ($msg.Count -ge 3) { break }
+    return ''
+}
+
+function Format-SolveError($lines) {
+    $message = @()
+    foreach ($line in $lines) {
+        $value = ([string]$line).Trim()
+        if (-not $value) { if ($message.Count) { break }; continue }
+        if ($value -match '^/\*+.*\*+/$') { continue }
+        if ($value -match '^(?:正在保存|保存时间|总时间|Saving |Save time|Total time|[- \t]*(?:当前进度|Current progress)[:：])') { break }
+        $message += $value
+        if ($message.Count -ge 3) { break }
     }
-    if ($msg.Count -eq 0) {
-        $s = ([string]$lines[$start]).Trim()
-        $k = $s.LastIndexOf('/')
-        if ($k -ge 0 -and $k -lt ($s.Length - 1)) { $s = $s.Substring($k + 1).Trim() }
-        $msg = @($s)
-    }
-    $out = ($msg -join ' ')
-    if ($out.Length -gt 160) { $out = $out.Substring(0, 160) }
-    return $out
+    if (-not $message.Count) { return 'COMSOL 报错，详见求解日志' }
+    $text = $message -join ' '
+    if ($text.Length -le 512) { return $text }
+    # Native exceptions often put the OS explanation after a long file path.
+    return ($text.Substring(0,252) + ' … ' + $text.Substring($text.Length - 256))
 }
 
 function Test-SolveOk($job) {
-    # 求解阶段结束的判据：comsolbatch 写出 <outname>.mph 且状态文件写到 Done（或日志里有总时间）
-    $solved = Get-JobSolvedPath $job
-    if (-not $solved) { return 'solve-no-spec' }
-    if (-not (Test-Path -LiteralPath $solved)) { return 'solve-no-output' }
-    $logTail = Read-FileTailText (Join-Path $job.jobDir 'solve.log') 8192
-    if ($logTail -match '错误|\*\*\*\*\*错误') { return 'solve-error' }
-    $stF = $solved + '.status'
-    if (Test-Path -LiteralPath $stF) {
-        $st = Read-FileTailText $stF 256
-        if ($st -match 'Done') { return '' }
+    $dir = $job.jobDir
+    $marker = Join-Path $dir 'solve.exit'
+    $code = $null
+    if ([IO.File]::Exists($marker)) {
+        $value = 0
+        if ([int]::TryParse([IO.File]::ReadAllText($marker).Trim(),[ref]$value)) {
+            $code = $value
+            Set-JobProp $job 'solveExitCode' $code
+        }
     }
-    if ($logTail -match '总时间:') { return '' }
+    $diagnostic = Get-SolveErrorLine $job -Final
+    $solved = Get-JobSolvedPath $job
+    $state = if ($solved) { Read-FileTailText ($solved + '.status') 4096 } else { '' }
+    if (-not $diagnostic -and $state -match '(?im)^[ \t]*(?:(?:status|状态)[ \t]*[:：=][ \t]*)?(?:failed|failure|error|aborted|cancelled|canceled|失败|错误|已取消)\b[^\r\n]*') {
+        $diagnostic = $Matches[0].Trim()
+    }
+    $monitorError = Join-Path $dir 'solve.monitor-error'
+    if (-not $diagnostic -and [IO.File]::Exists($monitorError)) { $diagnostic = [IO.File]::ReadAllText($monitorError).Trim() }
+    if ($null -ne $code -and $code -ne 0 -and -not $diagnostic) {
+        $diagnostic = (Read-FileTailText (Join-Path $dir 'solve.err') 2048 -Native).Trim()
+        if ($diagnostic) { $diagnostic = ($diagnostic -split '\r?\n')[-1] }
+        else { $diagnostic = 'comsolbatch 异常退出' }
+    }
+    if ($diagnostic) {
+        Set-JobProp $job 'solveError' $diagnostic
+        return 'solve-error'
+    }
+    # Old workers have no exit recorder. Only their original completion evidence is available.
+    if ($null -eq $code -and ($job.solveExitExpected -or [IO.File]::Exists($marker) -or
+        (Select-String -LiteralPath (Join-Path $dir 'launch-solve.txt') -Pattern '^exitfile=solve\.exit$' -Quiet -ErrorAction SilentlyContinue))) {
+        Set-JobProp $job 'solveError' '缺少有效的 comsolbatch 退出码，无法确认求解完成'
+        return 'solve-error'
+    }
+    if (-not $solved) { return 'solve-no-spec' }
+    if (-not [IO.File]::Exists($solved) -or ([IO.FileInfo]::new($solved)).Length -eq 0) { return 'solve-no-output' }
+    $tail = Read-FileTailText (Join-Path $dir 'solve.log') 8192
+    if ($state -match '(?im)^[ \t]*(?:(?:status|状态)[ \t]*[:：=][ \t]*)?Done\b' -or $tail -match '(?im)^[ \t]*(?:总时间|Total time)[ \t]*[:：]') { return '' }
     return 'solve-incomplete'
 }
 
@@ -2025,12 +2094,7 @@ function Start-SolvePhase($job) {
         Set-JobProp $job 'exitcode' 'solve-output-exists'
         return
     }
-    foreach ($f in @((Join-Path $job.jobDir 'solve.log'), (Join-Path $job.jobDir 'solve.out'), (Join-Path $job.jobDir 'solve.err'))) {
-        try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { }
-    }
     $logF = Join-Path $job.jobDir 'solve.log'
-    $outF = Join-Path $job.jobDir 'solve.out'
-    $errF = Join-Path $job.jobDir 'solve.err'
     $argList = @('-inputfile', ('"' + $model + '"'), '-outputfile', ('"' + $solved + '"'),
                  '-batchlog', ('"' + $logF + '"'), '-batchlogout', '-alivetime', '5')
     if (-not [string]::IsNullOrWhiteSpace($study)) { $argList += @('-study', ('"' + $study + '"')) }
@@ -2039,19 +2103,26 @@ function Start-SolvePhase($job) {
         ('time=' + (Get-Date).ToString('o'))
         ('comsolbatch=' + $comsolBatch)
         ('args=' + ($argList -join ' '))
+        'exitfile=solve.exit'
         ('driver_version=' + $script:ExpectedDriverVersion)
         ('jobdir=' + $job.jobDir)
     ) -join "`r`n"
-    try { [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'launch-solve.txt'), $launchInfo, (New-Object System.Text.UTF8Encoding($false))) } catch { }
+    $launchFile = Join-Path $job.jobDir 'launch-solve.txt'
     if (-not (Test-Path -LiteralPath $comsolBatch)) {
         $job.status = 'failed'
         Set-JobProp $job 'exitcode' 'no-comsolbatch'
         return
     }
     try {
-        $proc = Start-Process -FilePath $comsolBatch -ArgumentList $argList `
-                              -RedirectStandardOutput $outF -RedirectStandardError $errF `
-                              -WindowStyle Hidden -WorkingDirectory $job.jobDir -PassThru
+        foreach ($name in 'solve.log','solve.out','solve.err','solve.exit','solve.exit.tmp','solve.monitor-error') {
+            [IO.File]::Delete((Join-Path $job.jobDir $name))
+        }
+        [IO.File]::WriteAllText($launchFile,$launchInfo)
+        $runner = Join-Path $ScriptDir 'driver\Invoke-BatchSolve.ps1'
+        $shell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $options = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"' + $runner + '"'),'-LaunchFile',('"' + $launchFile + '"'))
+        $proc = Start-Process -FilePath $shell -ArgumentList $options -WindowStyle Hidden -WorkingDirectory $job.jobDir -PassThru
+        Set-JobProp $job 'solveExitExpected' $true
     } catch {
         try { Add-Content -LiteralPath (Join-Path $job.jobDir 'launch-solve.txt') -Value ('start-error=' + $_.Exception.Message) -Encoding UTF8 } catch { }
         Set-JobProp $job 'exitcode' 'launch-error'
@@ -2136,7 +2207,10 @@ function Write-Handoff($q) {
             [IO.Directory]::CreateDirectory($dir) | Out-Null
             $lines = @('# Export manifest', '', ('- 状态 ' + $job.status), ('- 作业 ' + (Split-Path -Leaf $job.jobDir)),
                        ('- 模型 ' + $job.model), ('- 配方 ' + $job.recipe), ('- 阶段 ' + $job.phase),
-                       ('- 退出原因 ' + $job.exitcode), ('- 诊断目录 ' + $job.jobDir), '', '## 已落盘文件', '')
+                       ('- 退出原因 ' + $job.exitcode), ('- 诊断目录 ' + $job.jobDir))
+            if ($null -ne $job.solveExitCode) { $lines += '- comsolbatch 退出码 ' + $job.solveExitCode }
+            if ($job.solveError) { $lines += '- 求解报错 ' + $job.solveError }
+            $lines += @('', '## 已落盘文件', '')
             $files = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Extension -in @('.csv','.png') })
             if ($files.Count) { $lines += @($files | ForEach-Object { '- ' + $_.Name + ' · ' + $_.Length + ' bytes' }) }
             else { $lines += '- 无已完成产物' }
@@ -2265,22 +2339,31 @@ function Start-ExportPhase($job) {
 }
 
 function Get-JobProcIds($job) {
-    $workers = Get-CimInstance Win32_Process -Filter "Name LIKE 'comsol%' OR Name LIKE 'java%'" -ErrorAction Stop
-    foreach ($worker in $workers) {
+    $workers = Get-CimInstance Win32_Process -Filter "Name LIKE 'comsol%' OR Name LIKE 'java%' OR Name='powershell.exe'" -ErrorAction Stop
+    $matched = @(foreach ($worker in $workers) {
         if (-not (Test-JobCommand $worker $job.jobDir)) { continue }
         if ([int]$worker.ProcessId -eq [int]$job.pid -and $job.workerStartUtc) {
             $expected = [datetimeoffset]::Parse([string]$job.workerStartUtc).UtcDateTime
             if (-not $worker.CreationDate -or [math]::Abs(($worker.CreationDate.ToUniversalTime()-$expected).TotalMilliseconds) -gt 2) { continue }
         }
         $worker
-    }
+    })
+    # The exit recorder and its native child form one worker tree. A surviving orphan can be reattached.
+    $recorders = @($matched | Where-Object { $_.Name -eq 'powershell.exe' } | ForEach-Object { $_.ProcessId })
+    $matched | Where-Object { $_.Name -notlike 'comsol*' -or $recorders -notcontains $_.ParentProcessId }
 }
 
 function Stop-OneJob($job) {
     [IO.File]::WriteAllText((Join-Path $job.jobDir 'killed'), (Get-Date).ToString('o'))
     try {
         $candidates = @(Get-JobProcIds $job)
-        if ($job.pid) { $candidates = @($candidates | Where-Object { $_.ProcessId -eq $job.pid }) }
+        if ($job.pid) {
+            $recorded = @($candidates | Where-Object { $_.ProcessId -eq $job.pid })
+            if (-not $recorded.Count -and $job.solveExitExpected) {
+                $recorded = @($candidates | Where-Object { $_.Name -like 'comsol*' -and $_.ParentProcessId -eq $job.pid })
+            }
+            $candidates = $recorded
+        }
         if ($candidates.Count -gt 1) { return '终止待确认：存在多个匹配进程' }
         foreach ($candidate in $candidates) {
             $procId = [int]$candidate.ProcessId
@@ -2521,6 +2604,10 @@ function Invoke-Scheduler($submitted, $budget) {
                             Start-Sleep -Milliseconds 400
                             $phaseNow = Get-JobPhase $job
                             if ($phaseNow -eq 'solve' -and -not (Test-Path -LiteralPath (Join-Path $job.jobDir 'killed'))) {
+                                if (-not [IO.File]::Exists((Join-Path $job.jobDir 'solve.exit'))) {
+                                    Restore-JobWorker $job
+                                    if (Test-JobAlive $job.pid $job.jobDir $job.workerStartUtc) { continue }
+                                }
                                 $why = Test-SolveOk $job
                                 if ($why -eq '') {
                                     # 求解成功：写 solved 标记（驱动据此走 resume），接着起导出
@@ -2676,7 +2763,9 @@ function Invoke-Scheduler($submitted, $budget) {
                 } elseif ($code -eq 'launch-error') {
                     Write-Host ('  [失败] ' + $leaf + '  启动进程失败（见 launch.txt / launch-solve.txt 的 start-error）') -ForegroundColor Red
                 } elseif ($code -eq 'solve-error') {
-                    $el = Get-SolveErrorLine $job
+                    $el = $job.solveError
+                    if (-not $el) { $el = Get-SolveErrorLine $job -Final }
+                    if ($null -ne $job.solveExitCode) { $el = ($el + '（comsolbatch 退出码 ' + $job.solveExitCode + '）') }
                     if ($el) { Write-Host ('  [失败] ' + $leaf + '  求解报错：' + $el) -ForegroundColor Red }
                     else { Write-Host ('  [失败] ' + $leaf + '  求解报错（细节见 solve.log）') -ForegroundColor Red }
                 } elseif ($code -eq 'solve-no-output' -or $code -eq 'solve-incomplete') {
@@ -2689,7 +2778,7 @@ function Invoke-Scheduler($submitted, $budget) {
                 foreach ($f in @('driver.err', 'driver.log', 'solve.log')) {
                     $fp = Join-Path $job.jobDir $f
                     if (-not (Test-Path -LiteralPath $fp)) { continue }
-                    $tail = @(Get-Content -LiteralPath $fp -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch '^\s+at ' } | Select-Object -Last 3)
+                    $tail = @((Read-FileTailText $fp 8192) -split '\r?\n' | Where-Object { $_ -and $_.Trim() -ne '' -and $_ -notmatch '^\s+at ' } | Select-Object -Last 3)
                     foreach ($ln in $tail) { Write-Host ('      ' + $f + ': ' + $ln.Trim()) -ForegroundColor DarkGray }
                 }
             } elseif ($job.status -eq 'killed') {

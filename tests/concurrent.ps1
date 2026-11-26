@@ -60,7 +60,7 @@ try {
     }
     $recipe = "@{ Task='test'; Study='std1'; NameTemplate='{model}'; Export=@(@{Type='global'; Name='identity'; Expr=@('1'); Cols=@('value')}) }"
     [IO.File]::WriteAllText((Join-Path $scriptDir 'recipes/test.psd1'),$recipe,[Text.Encoding]::UTF8)
-    foreach ($id in 'A','B','C') { [IO.File]::WriteAllText((Join-Path $models ($id + '.mph')),'fixture') }
+    foreach ($id in 'A','B','C','D') { [IO.File]::WriteAllText((Join-Path $models ($id + '.mph')),'fixture') }
 
     $batch = Join-Path $box 'installation/bin/win64/comsolbatch.exe'
     $java = Join-Path $box 'installation/java/win64/jre/bin/java.exe'
@@ -85,6 +85,7 @@ class Worker {
             if (!File.Exists("TEMP_finish_solve")) return 8;
             string dest = a[Array.IndexOf(a,"-outputfile")+1];
             File.WriteAllText(dest,"fixture"); File.WriteAllText(dest+".status","Done");
+            if (Path.GetFileName(a[Array.IndexOf(a,"-inputfile")+1]) == "D.mph") return 17;
         } else {
             File.WriteAllText("started","test");
             string dir = File.ReadAllLines("job.properties").First(x => x.StartsWith("resultdir=")).Substring(10);
@@ -143,6 +144,25 @@ class Worker {
     $stats = [IO.File]::ReadAllText((Join-Path $local 'comsol-export/state/stats.json')) | ConvertFrom-Json
     if ($stats.exported -ne 2) { throw 'Concurrent completions miscounted' }
     Write-Output 'PASS closing one window, overlapping resume, targeted cancel, once-only exports and persistent final states'
+    $d = Start-Controller ($common + '4 -Heap 64m -Cores 1') -Direct
+    $controllers += $d
+    $jd = Wait-State 'D' 'running' $d
+    $d.Proc.Kill(); $d.Proc.WaitForExit()
+    [IO.File]::WriteAllText((Join-Path $jd.jobDir 'TEMP_finish_solve'),'ok')
+    $exitFile = Join-Path $jd.jobDir 'solve.exit'
+    $limit = [datetime]::UtcNow.AddSeconds(20)
+    while (-not [IO.File]::Exists($exitFile) -and [datetime]::UtcNow -lt $limit) { Start-Sleep -Milliseconds 80 }
+    if ([IO.File]::ReadAllText($exitFile) -ne '17') { throw 'Native failure was lost after closing the controller' }
+    $resumeD = Start-Controller ('-ComsolPath "' + $batch + '" -Resume')
+    $controllers += $resumeD
+    Wait-ExitCode $resumeD 3
+    $failed = @(Read-Jobs | Where-Object id -eq 'D')[0]
+    $manifest = [IO.File]::ReadAllText((Join-Path $failed.resultDir 'EXPORT_MANIFEST.md'))
+    if ($failed.status -ne 'failed' -or $failed.exitcode -ne 'solve-error' -or $failed.solveExitCode -ne 17 -or
+        $manifest -notmatch 'comsolbatch 退出码 17' -or [IO.File]::Exists((Join-Path $jd.jobDir 'TEMP_export_count'))) {
+        throw 'Nonzero solver exit was accepted as a completed job'
+    }
+    Write-Output 'PASS native exit 17 persists with no controller and blocks export despite a saved partial result and Done'
     $success = $true
 } finally {
     # Release any fixture worker on assertion failure without touching other processes.

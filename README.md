@@ -3,7 +3,7 @@
 <p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
 <p align="center">
-  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.10.0-2AA0B0"></a>
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.10.1-2AA0B0"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
   <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
   <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.1~6.4-368CCB">
@@ -50,6 +50,8 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 可以多次打开 `run.bat`，每个窗口选自己的模型。所有窗口共用一份队列和核数、内存预算。资源足够时，单模型默认最多分到一半逻辑核和一半 Java 堆预算，留出第二个作业的空间。需要更多作业同时运行时，可用 `-Cores` 和 `-Heap` 指定每个作业的份额。资源不足的作业自动排队。`-Mode watch` 可查看活动作业，`-Resume` 可接回后台作业。
 
 波长域、频域求解和导出在进度变化较快时用近期速度估时，变化慢时用当前阶段的累计完成量和耗时。重开窗口也能用已记录的阶段起点估时。特征频率求解仍显示阶段、已用时间及日志提供的迭代信息。
+
+波长扫描的进度取自 COMSOL 日志。若窗口长时间停在同一百分比，运行 `update.bat` 后另开窗口执行 `run.bat -Mode watch`，即可查看原作业的最新进度和扫描参数。求解器报错时窗口显示原因。新作业还会记录 `comsolbatch` 的退出码，求解失败时跳过导出，原因写入 `EXPORT_MANIFEST.md`。
 
 **GPU 求解**　CLI 使用模型中启用的求解器，沿用运行账户和 COMSOL 版本的默认首选项。6.4 电磁频域或特征频率模型需要在实际使用的直接线性求解器中选择 **NVIDIA cuDSS**，才能用 GPU 加速该步。图形渲染加速只作用于显示。运行时可在作业目录核对 `launch-solve.txt` 的命令和 `solve.log` 的求解器信息。[COMSOL 批处理说明](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_running.38.31.html) · [GPU 求解器说明](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_solver.36.173.html)
 

@@ -81,6 +81,51 @@ try {
     $eigenInfo=Get-ProgressInfo $eigenJob
     Assert ($eigenInfo.StageOnly -and $eigenInfo.Eta -lt 0) 'eigen stages do not generate an artificial ETA'
 
+    $sweep = [pscustomobject]@{jobDir=$jobDir; phase='solve'; mode='solve'; solveKind='sweep'; started=''}
+    $script:SolveMessages=@{}
+    $log = Join-Path $jobDir 'solve.log'
+    $solved = Join-Path $jobDir 'result.txt'
+    $spec = Join-Path $jobDir 'job.properties'
+    [IO.File]::WriteAllText($spec,('solvedfile='+$solved))
+    [IO.File]::WriteAllLines($log,@('           当前进度:   9 % - 矩阵分解','-          当前进度:  10 % - 矩阵分解'))
+    Assert ((Get-SolveLogState $sweep).Pct -eq 10) 'first COMSOL progress-bar dash at ten percent'
+    [IO.File]::AppendAllLines($log,[string[]]@('参数 lambda0 = 8.19e-07。','----       当前进度:  48 % - 约束处理'))
+    $info = Get-SolveLogState $sweep
+    Assert ($info.Pct -eq 48 -and $info.Stage -eq '约束处理' -and $info.Param -eq 'lambda0=8.19e-07') 'public wavelength log reaches 48 percent at 819 nm'
+    [IO.File]::AppendAllLines($log,[string[]]@(('x'*135168),'---------- Current progress: 100 % - Saving model','---------- Current progress: 100 % - '))
+    $info = Get-SolveLogState $sweep
+    Assert ($info.Pct -eq 100 -and $info.Stage -eq 'Saving model') 'English bar-only tail preserves last non-empty stage'
+
+    $fatal = @('/***************/','/*****错误********/','/***************/','未知解。',' - 标记: all','正在保存模型: partial.mph')
+    [IO.File]::WriteAllLines($log,$fatal)
+    $script:SolveKinds=@{}
+    $live = Get-ProgressInfo $sweep
+    Assert ($live.SolveError -match '未知解。 - 标记: all' -and $live.Detail -match '求解报错' -and $live.Eta -lt 0) 'live fatal diagnostic takes precedence over ETA'
+    [IO.File]::AppendAllLines($log,[string[]]@(('x'*135168),'总时间: 49 s.'))
+    Assert ((Get-SolveLogState $sweep).Error -match '未知解' -and (Test-SolveOk $sweep) -eq 'solve-error' -and $sweep.solveError -match '未知解') 'long trailer and missing output preserve a legacy solve error'
+    [IO.File]::WriteAllText($solved,'fixture')
+    [IO.File]::WriteAllText(($solved+'.status'),'Done')
+    [IO.File]::WriteAllLines($log,@('Opening file: D:\错误模型.mph','Warning: Error estimate is high','LinErr LinRes','Total time: 2 s.'))
+    Assert ((Test-SolveOk $sweep) -eq '') 'old completed job accepts benign error metrics and filenames'
+    [IO.File]::WriteAllText(($solved+'.status'),'Failed')
+    Assert ((Test-SolveOk $sweep) -eq 'solve-error') 'failed status overrides total time and partial output'
+    [IO.File]::WriteAllText(($solved+'.status'),'Done')
+    $sweep | Add-Member NoteProperty solveExitExpected $true
+    $exitFile=Join-Path $jobDir 'solve.exit'
+    Assert ((Test-SolveOk $sweep) -eq 'solve-error' -and $sweep.solveError -match '退出码') 'new solve requires durable exit evidence'
+    [IO.File]::WriteAllText($exitFile,'invalid')
+    Assert ((Test-SolveOk $sweep) -eq 'solve-error') 'malformed exit evidence is rejected'
+    [IO.File]::WriteAllText($exitFile,'0')
+    [IO.File]::WriteAllLines((Join-Path $jobDir 'solve.err'),@('/*****Error*****/','Failed to find a solution.'))
+    Assert ((Test-SolveOk $sweep) -eq 'solve-error' -and $sweep.solveError -match 'Failed to find a solution') 'explicit stderr diagnostic overrides even native exit zero and Done'
+    $longException = 'java.io.FileNotFoundException: ' + ('x'*540) + ' (系统找不到指定的文件。)'
+    [IO.File]::WriteAllText((Join-Path $jobDir 'solve.err'),$longException)
+    Assert ((Test-SolveOk $sweep) -eq 'solve-error' -and $sweep.solveError -match '^java.io.FileNotFoundException.*系统找不到指定的文件。') 'long Java exception retains its type and trailing OS explanation'
+    [IO.File]::Delete((Join-Path $jobDir 'solve.err'))
+    Assert ((Test-SolveOk $sweep) -eq '') 'native success and a complete output may enter export'
+    [IO.File]::WriteAllText($solved,'')
+    Assert ((Test-SolveOk $sweep) -eq 'solve-no-output') 'zero-byte output never enters export'
+
     $start = [datetime]::UtcNow
     $job.pid=4242
     $job | Add-Member NoteProperty workerStartUtc $start.ToString('o')
