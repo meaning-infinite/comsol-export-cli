@@ -30,7 +30,9 @@ public class ExportDriver {
         Map<String, String> p;
         Path jobDir, outdir, modelsDir, tmpdir, batchLog;
         String outname, dataset, study, component = "";
-        int blocks, currentBlock, skipped;
+        int blocks, firstBlock = 1, currentBlock, skipped;
+        String recipePrefix = "", activeRecipe = "";
+        String setting(String key, String def) { return p.getOrDefault(recipePrefix + key, def); }
         final Map<Integer,Integer> blockFiles = new HashMap<>();
         String runtime = "", loadedModel = "";
         final Set<Path> expected = new LinkedHashSet<>();
@@ -109,7 +111,7 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.11.0";
+    static final String DRIVER_VERSION = "v1.13.0";
 
     static int progressBlock, progressBlocks, progressTotal, progressDone;
     static boolean progressFiles;
@@ -181,7 +183,7 @@ public class ExportDriver {
             execute(j);
         } catch (Throwable e) {
             code = e instanceof JobFailure ? ((JobFailure)e).code : 4;
-            error = errText(e);
+            error = (j.activeRecipe.isEmpty() ? "" : "配方 " + j.activeRecipe + " · ") + errText(e);
             log("[driver] " + error);
             log(stackOf(e));
             System.err.println(error);
@@ -234,8 +236,8 @@ public class ExportDriver {
         j.runtime = ModelUtil.getComsolVersion();
         log("[driver] COMSOL " + j.runtime + " 读取 " + load);
         j.model = ModelUtil.loadCopy("m_export", load.toString());
-        j.study = resolveStudy(j.model, j.p.getOrDefault("study", ""));
         if (solve && !resume) {
+            j.study = resolveStudy(j.model, j.p.getOrDefault("study", ""));
             try { j.model.study(j.study).run(); }
             catch (Exception e) { throw new JobFailure(3, errText(e)); }
             Files.createDirectories(solved.getParent());
@@ -243,23 +245,94 @@ public class ExportDriver {
             Files.writeString(j.jobDir.resolve("solved"), "ok");
         }
         Files.writeString(j.jobDir.resolve("exporting"), "ok");
-        j.chunk = chunkSize(j);
-        boolean needsSolutions = false;
-        boolean wantsLog = false;
-        for (int i = 1; i <= j.blocks; i++) {
-            if ("solverlog".equalsIgnoreCase(j.block(i, "type", "global").trim())) wantsLog = true;
-            else needsSolutions = true;
-        }
-        if (wantsLog && resume && "batch".equals(j.p.get("solver"))) {
+        if (resume && "batch".equals(j.p.get("solver"))) {
             Path raw = j.jobDir.resolve("solve.log");
             if (Files.isRegularFile(raw) && Files.size(raw) > 0) j.batchLog = raw;
         }
-        String wanted = j.p.getOrDefault("solution", "").trim();
-        int total = 0;
+        List<Job> recipes = recipeJobs(j);
+        Set<Path> reserved = new HashSet<>();
+        progressBlocks = j.blocks;
+        try {
+            for (Job part : recipes) {
+                j.activeRecipe = part.setting("name", "");
+                j.currentBlock = part.firstBlock;
+                prepareRecipe(part);
+                planRecipeOutputs(part, reserved);
+            }
+            for (Job part : recipes) {
+                j.activeRecipe = part.setting("name", "");
+                exportRecipe(j, part);
+            }
+        } finally {
+            // Keep partial results and their recipe-specific solution ranges even when a later block fails.
+            for (Job part : recipes) {
+                if (part == j) continue;
+                if (part.tmpdir != null) j.tmpdir = part.tmpdir;
+                j.expected.addAll(part.expected);
+                j.blockFiles.putAll(part.blockFiles);
+                j.artifacts.putAll(part.artifacts);
+                j.skipped += part.skipped;
+                j.details.add("配方 " + part.setting("name", "") + " · 研究 " + (part.study == null ? part.setting("study", "默认") : part.study) + " · 解范围 " + part.setting("solscope", "study")
+                        + " · 文件名前缀 " + part.outname);
+                for (SolUse u : part.sols) j.details.add("  " + u.study + " / " + u.tag + " · 解 1–" + u.n);
+                j.details.addAll(part.details);
+            }
+        }
+    }
+
+    static List<Job> recipeJobs(Job job) {
+        if (!job.p.containsKey("recipes")) return Collections.singletonList(job);
+        int count = Integer.parseInt(job.p.get("recipes"));
+        List<Job> parts = new ArrayList<>();
+        int first = 1;
+        for (int n = 1; n <= count; n++) {
+            Job part = new Job();
+            part.p = job.p;
+            part.recipePrefix = "recipe." + n + ".";
+            part.firstBlock = first;
+            part.blocks = Integer.parseInt(part.setting("blocks", "0"));
+            part.outname = part.setting("outname", "");
+            if (part.blocks < 1 || part.outname.isEmpty() || part.setting("name", "").isEmpty())
+                throw new JobFailure(2, "多配方规格不完整 " + n);
+            part.model = job.model;
+            part.loadedModel = job.loadedModel;
+            part.runtime = job.runtime;
+            part.jobDir = job.jobDir;
+            part.outdir = job.outdir;
+            part.batchLog = job.batchLog;
+            parts.add(part);
+            first += part.blocks;
+        }
+        if (parts.isEmpty() || first - 1 != job.blocks) throw new JobFailure(2, "多配方导出块数量不符");
+        return parts;
+    }
+
+    static void planRecipeOutputs(Job j, Set<Path> reserved) {
+        String original = j.outname;
+        for (int attempt = 0; ; attempt++) {
+            if (attempt > 0) {
+                j.expected.clear();
+                j.outname = original + "_" + j.setting("name", "") + (attempt == 1 ? "" : " (" + attempt + ")");
+            }
+            planArtifacts(j);
+            if (Collections.disjoint(reserved, j.expected)) {
+                reserved.addAll(j.expected);
+                return;
+            }
+        }
+    }
+
+    static void prepareRecipe(Job j) {
+        j.study = resolveStudy(j.model, j.setting("study", ""));
+        j.chunk = chunkSize(j);
+        boolean needsSolutions = false;
+        for (int i = j.firstBlock; i < j.firstBlock + j.blocks; i++) {
+            if (!"solverlog".equalsIgnoreCase(j.block(i, "type", "global").trim())) needsSolutions = true;
+        }
+        String wanted = j.setting("solution", "").trim();
         if (needsSolutions) {
             j.sols = listSols(j);
-            total = j.sols.stream().mapToInt(u -> u.n).sum();
-            if (total == 0) throw new JobFailure(4, "所选研究 " + j.study + " 没有已存解，请选择含有所需解的模型");
+            if (j.sols.isEmpty()) throw new JobFailure(4, "所选研究 " + j.study + " 没有已存解，请选择含有所需解的模型");
             if (!wanted.isEmpty() && (!hasDataset(j, wanted) || j.sols.stream().noneMatch(
                     u -> u.tag.equals(j.model.result().dataset(wanted).getString("solution")))))
                 throw new JobFailure(2, "指定数据集不属于所选解范围 " + wanted);
@@ -275,18 +348,22 @@ public class ExportDriver {
                 }
             }
         }
-        planArtifacts(j);
         j.details.add("扫描参数 " + (j.pnames.length == 0 ? "无" : String.join(", ", j.pnames)));
-        progressBlocks = j.blocks;
-        for (int i = 1; i <= j.blocks; i++) {
+    }
+
+    static void exportRecipe(Job root, Job j) throws Exception {
+        String wanted = j.setting("solution", "").trim();
+        int total = j.sols.stream().mapToInt(u -> u.n).sum();
+        for (int i = j.firstBlock; i < j.firstBlock + j.blocks; i++) {
             j.component = "";
-            j.currentBlock = i;
+            root.currentBlock = i;
             progressBlock = i;
             String type = j.block(i, "type", "global").trim().toLowerCase(Locale.ROOT);
             Handler handler = HANDLERS.get(type);
             if (handler == null) throw new JobFailure(2, "未知导出类型 " + type);
             if (!"solverlog".equals(type)) j.dataset = wanted.isEmpty() ? datasetFor(j, j.sols.get(0).tag) : wanted;
-            PROGRESS_LABEL = "导出块 " + i + "/" + j.blocks + " " + j.block(i, "name", type);
+            PROGRESS_LABEL = (root.activeRecipe.isEmpty() ? "" : root.activeRecipe + " · ")
+                    + "导出块 " + i + "/" + root.blocks + " " + j.block(i, "name", type);
             progressFiles = Arrays.asList("eigenslice", "slice2d", "image", "solverlog").contains(type);
             progress(0, progressFiles ? j.blockFiles.get(i) : total, PROGRESS_LABEL);
             handler.run(j, i);
@@ -301,10 +378,11 @@ public class ExportDriver {
     }
 
     static void planArtifacts(Job j) {
-        for (int i = 1; i <= j.blocks; i++) {
+        for (int i = j.firstBlock; i < j.firstBlock + j.blocks; i++) {
             String kind = j.block(i, "type", "global").trim().toLowerCase(Locale.ROOT);
             if (!HANDLERS.containsKey(kind)) throw new JobFailure(2, "未知导出类型 " + kind);
-            String fallback = "global".equals(kind) ? "export" + i : ("eigenslice".equals(kind) ? "eigen" + i : kind);
+            int localIndex = i - j.firstBlock + 1;
+            String fallback = "global".equals(kind) ? "export" + localIndex : ("eigenslice".equals(kind) ? "eigen" + localIndex : kind);
             String name = j.block(i, "name", fallback);
             j.p.putIfAbsent("block." + i + ".name", name);
             String prefix = j.outname + "_" + name;
@@ -357,7 +435,7 @@ public class ExportDriver {
         Path report = j.outdir.resolve(prefix + ".txt");
         Path part = Files.createTempFile(j.outdir, "solver-history-", ".part");
         try {
-            boolean all = "all".equalsIgnoreCase(j.p.getOrDefault("solscope", "study"));
+            boolean all = "all".equalsIgnoreCase(j.setting("solscope", "study"));
             int count;
             try (BufferedWriter out = Files.newBufferedWriter(part, StandardCharsets.UTF_8)) {
                 out.write("COMSOL 求解器运行日志\n模型 " + j.loadedModel + "\n导出使用 COMSOL " + j.runtime);
@@ -446,7 +524,8 @@ public class ExportDriver {
         Collections.addAll(lines, "# Export manifest", "", "- 状态 " + (code == 0 ? "完成" : "失败 · " + error),
                 "- 作业 " + j.jobDir.getFileName(), "- 导出时间 " + java.time.OffsetDateTime.now(),
                 "- 输入模型 " + j.p.get("model"), "- 实际读取 " + j.loadedModel,
-                "- 研究 " + (j.study == null ? j.p.get("study") : j.study) + " · 解范围 " + j.p.getOrDefault("solscope", "study"),
+                j.p.containsKey("recipes") ? "- 各配方的研究与解范围见下方明细" :
+                        "- 研究 " + (j.study == null ? j.p.get("study") : j.study) + " · 解范围 " + j.setting("solscope", "study"),
                 "- 配方 " + j.p.getOrDefault("recipe", "job.properties"),
                 "- CLI " + j.p.getOrDefault("cli", "未记录") + " · driver " + DRIVER_VERSION + " · COMSOL " + j.runtime,
                 "- 配置块 " + j.blocks + " · 计划产物 " + (j.blockFiles.isEmpty() ? "未展开" : Integer.toString(j.expected.size())) + " · 完成产物 " + j.artifacts.size() + " · 跳过非有限行 " + j.skipped,
@@ -508,7 +587,7 @@ public class ExportDriver {
 
     static int chunkSize(Job j) {
         int c = 200;
-        String s = j.p.getOrDefault("chunk", "").trim();
+        String s = j.setting("chunk", "").trim();
         if (!s.isEmpty()) {
             try { c = Integer.parseInt(s); } catch (Exception ignore) { }
         }
@@ -558,7 +637,7 @@ public class ExportDriver {
 
     static List<SolUse> listSols(Job j) {
         List<SolUse> list = new ArrayList<>();
-        boolean all = "all".equalsIgnoreCase(j.p.getOrDefault("solscope", "study"));
+        boolean all = "all".equalsIgnoreCase(j.setting("solscope", "study"));
         int offset = 0;
         Set<String> related = new HashSet<>(Arrays.asList(j.model.study(j.study).getSolverSequences("All")));
         for (String t : j.model.sol().tags()) {

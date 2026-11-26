@@ -55,6 +55,43 @@ public class ExportContractTest {
         });
     }
 
+    static void checkRecipeSelection(Path temp) {
+        ExportDriver.Job root = new ExportDriver.Job();
+        root.p = new LinkedHashMap<>();
+        root.model = model(false);
+        root.outdir = temp;
+        root.blocks = 3;
+        root.p.put("recipes", "2");
+        for (int i = 1; i <= 2; i++) {
+            String prefix = "recipe." + i + ".";
+            root.p.put(prefix + "name", i == 1 ? "first" : "second");
+            root.p.put(prefix + "outname", "sample");
+            root.p.put(prefix + "blocks", i == 1 ? "2" : "1");
+            root.p.put(prefix + "solscope", i == 1 ? "study" : "all");
+            root.p.put(prefix + "chunk", i == 1 ? "4" : "7");
+        }
+        root.p.put("block.1.type", "global");
+        root.p.put("block.2.type", "solverlog");
+        root.p.put("block.3.type", "solverlog");
+        List<ExportDriver.Job> parts = ExportDriver.recipeJobs(root);
+        Set<Path> reserved = new HashSet<>();
+        for (ExportDriver.Job part : parts) {
+            part.study = "std1";
+            part.sols = ExportDriver.listSols(part);
+            ExportDriver.planRecipeOutputs(part, reserved);
+        }
+        ExportDriver.Job a = parts.get(0), b = parts.get(1);
+        check(a.firstBlock == 1 && b.firstBlock == 3 && a.sols.size() == 1 && b.sols.size() == 4 &&
+                ExportDriver.chunkSize(a) == 4 && ExportDriver.chunkSize(b) == 7,
+                "one model uses independent solution scopes, chunk sizes and global block numbers per recipe");
+        check(reserved.size() == 3 && reserved.contains(temp.resolve("sample_solverlog.txt")) &&
+                b.expected.contains(temp.resolve("sample_second_solverlog.txt")), "overlapping recipes keep both flat outputs");
+        root.blocks++;
+        boolean rejected = false;
+        try { ExportDriver.recipeJobs(root); } catch (ExportDriver.JobFailure expected) { rejected = true; }
+        check(rejected, "a truncated multi-recipe specification fails before exporting");
+    }
+
     static void checkSolverHistory(Path temp) throws Exception {
         ExportDriver.Job j = new ExportDriver.Job();
         j.jobDir = temp;
@@ -117,6 +154,7 @@ public class ExportContractTest {
         j.outdir=Files.createTempDirectory("TEMP_comsol_contract_");
         try {
             checkSolverHistory(j.outdir);
+            checkRecipeSelection(j.outdir);
             Path file=j.outdir.resolve("rows.csv");
             try (ExportDriver.CsvStream csv=new ExportDriver.CsvStream(j,file,new String[]{"value","Pin_W","A_pct","lambda_nm"})) {
                 double[] row={1.000000000000001,0,Double.NaN,866.000000000001};

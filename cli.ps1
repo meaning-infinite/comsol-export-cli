@@ -24,7 +24,7 @@ param(
     [switch]$Resume,
     [switch]$Diag,
     [string]$Models,
-    [string]$Recipe,
+    [string[]]$Recipe,
     [string]$ModelIndex = '',
     [string]$ComsolPath,
     [ValidateSet('solve','export','watch','')]
@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.12.0'
+$script:CliVersion = 'v1.13.0'
 $script:CliExit = 0
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
@@ -752,7 +752,7 @@ function Show-Help {
     Write-Host ''
     Write-Host '  参数:'
     Write-Host '    -Models <dir>    模型目录'
-    Write-Host '    -Recipe <name>   直接指定配方（不交互）'
+    Write-Host '    -Recipe "A,B"    指定一个或多个配方，多个名称用逗号分隔'
     Write-Host '    -ModelIndex <n>  直接指定第 n 个模型（从 1 开始；列表最后一项是 solved\ 目录）'
     Write-Host '    -DryRun          只打印计划，不写队列、不启动计算'
     Write-Host '    -Mode <solve|export|watch>  求解并导出 / 导出模式 / 监视模式'
@@ -1365,7 +1365,7 @@ function Get-JobStates {
 
 # 驱动 class 里的版本串（DRIVER_VERSION 常量），用来发现「只更新了脚本、没更新 driver」的情况：
 # 远程出现过 cli.ps1 是新的、driver 还是旧 class，于是同样的 bug 反复报。
-$script:ExpectedDriverVersion = 'v1.11.0'
+$script:ExpectedDriverVersion = 'v1.13.0'
 
 function Get-DriverClassVersion([string]$dir) {
     $p = Join-Path $dir 'ExportDriver.class'
@@ -1848,60 +1848,74 @@ function Get-PctText($info) {
     return ((('{0,3}' -f $info.Pct)) + '%')
 }
 
-# 样式 1：单行（窄窗口/最省屏）
-function Render-Progress1($info, [string]$jobName, $ord, $total) {
-    $bar = '[' + (Get-Bar $info.Pct 18) + ']'
-    $etaTxt = Format-TimeLine $info
-    $tail = 'Q退出 K终止'
-    if ([int]$total -gt 1) { $tail = ('作业 ' + $ord + '/' + $total + ' · ' + $tail) }
-    $txt = '▌【' + (Get-PhaseTag $info) + '】' + $bar + ' ' + (Get-PctText $info) + ' ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + $etaTxt + ' · ' + $info.Detail + ' · ' + $tail
-    Show-StatusLine $txt $info.Fg $info.Bg
+# 单作业显式选择样式 1 时，保留单行状态条。
+function Show-ProgressLine($info, [string]$keys) {
+    $progress = if ($info.StageOnly) { '阶段监视' } else { '[' + (Get-Bar $info.Pct 18) + '] ' + (Get-PctText $info) }
+    $text = (Get-PhaseTag $info) + ' ' + $progress + ' · 已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info) + ' · ' + $info.Detail + ' · ' + $keys
+    Show-StatusLine $text $info.Fg $info.Bg
 }
 
-# 样式 2：方框仪表（与 CLI 其它框一致）
-function Render-Progress2($info, [string]$jobName, $ord, $total) {
-    $seg = (Get-BarSeg $info.Pct 30)
-    # 固定内宽（$script:BoxW - 2）：避免每秒刷新时框线抖动；进度条两段同字形，靠颜色区分
-    $rows = @(
-        (Pad-Row @(@{ Text = ('作业   ' + $ord + '/' + [math]::Max(1, $total) + '   ' + $jobName); Color = $info.Bg }) ($script:BoxW - 2)),
-        (Pad-Row @(
-                @{ Text = '进度   '; Color = $info.Bg },
-                $seg[0], $seg[1],
-                @{ Text = ('   ' + (Get-PctText $info)); Color = $info.Bg }
-            ) ($script:BoxW - 2)),
-        (Pad-Row @(@{ Text = ('阶段   ' + (Get-PhaseTag $info) + ' · ' + $info.Detail); Color = $info.Bg }) ($script:BoxW - 2)),
-        (Pad-Row @(@{ Text = ('时间   ' + (Format-Elapsed $info.TotalElapsed) + '   ·   ' + (Format-TimeLine $info)); Color = $info.Bg }) ($script:BoxW - 2)),
-        (Pad-Row @(@{ Text = '按键   Q 退出监视   K 终止作业'; Color = $info.Bg }) ($script:BoxW - 2))
-    )
-    Show-LiveBox 'COMSOL 计算进度' $rows $info.Bg
-}
-
-# 样式 3：阶段链（看得出走到哪一步了）
-function Render-Progress3($info, [string]$jobName, $ord, $total) {
-    $seg = (Get-BarSeg $info.Pct 34)
+# 单作业、批量和只读监视共用同一面板。每个模型保留自己的进度、时间和按键行。
+function New-JobProgressPanel($job, [int]$ord, [int]$total, [string]$keys) {
+    $name = [string]$job.displayName
+    if (-not $name) { $name = [IO.Path]::GetFileNameWithoutExtension([string]$job.model) }
+    $color = 'Gray'
+    $time = '—'
+    $progress = @()
     $chain = ''
-    if ($info.Phase -eq 'solve') {
-        $names = @('准备', '网格', '编译', '求解器', '组装', '分解', '解方程', '收尾')
-        for ($q = 0; $q -lt $names.Count; $q++) {
-            $mark = '·'
-            if ($q -lt $info.StageIdx) { $mark = '√' }
-            elseif ($q -eq $info.StageIdx) { $mark = '▸' }
-            $chain = $chain + $mark + $names[$q] + '  '
+    if ($job.status -eq 'running') {
+        $info = Get-ProgressInfo $job
+        $color = $info.Bg
+        if (-not $info.StageOnly) {
+            $barWidth = [math]::Min(30, (Get-BoxWidth 0) - 19)
+            $progress = @(Get-BarSeg $info.Pct $barWidth)
+        }
+        $pct = Get-PctText $info
+        if ($progress.Count) { $pct = '  ' + $pct }
+        $progress += @{ Text = $pct; Color = $color }
+        $stage = (Get-PhaseTag $info) + ' · ' + $info.Detail
+        if ($job.cancelMessage) { $stage = $job.cancelMessage + ' · ' + $stage; $color = 'Yellow' }
+        if ($info.SolveError) { $color = 'Red' }
+        $time = '已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info)
+        if ($script:PStyle -eq '3' -and $info.Phase -eq 'solve' -and -not $info.StageOnly) {
+            $names = @('准备','网格','编译','求解器','组装','分解','解方程','收尾')
+            $steps = for ($i = 0; $i -lt $names.Count; $i++) {
+                $mark = if ($i -lt $info.StageIdx) { '√' } elseif ($i -eq $info.StageIdx) { '▸' } else { '·' }
+                $mark + $names[$i]
+            }
+            $chain = '       ' + ($steps -join '  ')
         }
     } else {
-        $chain = ('第 ' + $ord + '/' + [math]::Max(1, $total) + ' 个作业   ' + $jobName)
+        switch ($job.status) {
+            'done'   { $stage = '已完成'; $color = 'Green' }
+            'failed' { $stage = ('失败 · ' + $job.exitcode + ' ' + $job.solveError).Trim(); $color = 'Red' }
+            'killed' { $stage = '已终止'; $color = 'Yellow' }
+            default  { $stage = '等待调度' }
+        }
+        $progress = @(@{ Text = $(if ($job.status -eq 'done') { '100%' } else { '—' }); Color = $color })
+        if ($null -ne $job.duration) { $time = '已用 ' + (Format-Elapsed $job.duration) }
     }
-    $rows = @(
-        (Pad-Row @(
-                @{ Text = ((Get-PhaseTag $info) + '  '); Color = $info.Bg },
-                $seg[0], $seg[1],
-                @{ Text = ('  ' + (Get-PctText $info)); Color = $info.Bg }
-            ) ($script:BoxW - 2)),
-        (Pad-Row @(@{ Text = $chain; Color = $info.Bg }) ($script:BoxW - 2)),
-        (Pad-Row @(@{ Text = $info.Detail; Color = $info.Bg }) ($script:BoxW - 2)),
-        (Pad-Row @(@{ Text = ((Format-Elapsed $info.TotalElapsed) + '   ·   ' + (Format-TimeLine $info) + '   ·   Q 退出监视  K 终止'); Color = $info.Bg }) ($script:BoxW - 2))
-    )
-    Show-LiveBox $jobName $rows $info.Bg
+    $rows = @(@{ Text = ('作业   {0}/{1}   {2}' -f $ord,$total,$name); Color = $color })
+    $rows += ,(@(@{ Text = '进度   '; Color = $color }) + $progress)
+    $rows += @{ Text = ('阶段   ' + $stage); Color = $color }
+    if ($chain) { $rows += @{ Text = $chain; Color = $color } }
+    $rows += @{ Text = ('时间   ' + $time); Color = $color }
+    $rows += @{ Text = ('按键   ' + $keys); Color = $color }
+    return ,(New-BoxDisplay 'COMSOL 计算进度' $rows $color)
+}
+
+function New-ProgressPage($jobs, [int]$height, [string]$keys) {
+    $panelHeight = if ($script:PStyle -eq '3') { 8 } else { 7 }
+    $perPage = [int][math]::Max(1, [math]::Floor(($height - 1) / $panelHeight))
+    $pages = [int][math]::Ceiling($jobs.Count / $perPage)
+    $script:BatchPage = [math]::Max(0,[math]::Min($pages - 1, $script:BatchPage))
+    if ($pages -gt 1) { $keys = ('PgUp/PgDn 翻页 {0}/{1}   ' -f ($script:BatchPage + 1),$pages) + $keys }
+    $first = $script:BatchPage * $perPage
+    $frame = @()
+    for ($i = $first; $i -lt [math]::Min($jobs.Count, $first + $perPage); $i++) {
+        $frame += (New-JobProgressPanel $jobs[$i] ($i + 1) $jobs.Count $keys)
+    }
+    return ,$frame
 }
 
 function Write-JobProgressLog($job, $info) {
@@ -1909,87 +1923,34 @@ function Write-JobProgressLog($job, $info) {
     if ($info.StageOnly -or $info.SolveError) { $sig = $info.PhaseLabel + '|' + $info.Detail }
     if ($script:JobLogSig[$job.jobDir] -eq $sig) { return }
     $script:JobLogSig[$job.jobDir] = $sig
-    Write-Host ('  [' + (Split-Path -Leaf $job.jobDir) + '] ' + (Get-PhaseTag $info) + ' ' + (Get-PctText $info) + ' · ' + $info.Detail)
+    Write-Host ('  [' + (Split-Path -Leaf $job.jobDir) + '] ' + (Get-PhaseTag $info) + ' ' + (Get-PctText $info) + ' · ' + $info.Detail + ' · 已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info))
 }
 
 function Show-BatchProgress($jobs) {
-    $textMode = $script:IsRedirected -or $script:BatchTextMode
-    if (-not $textMode) {
-        # 每框至少三行；预留一行提示和一行光标，矮窗口可翻页。
-        $height = [math]::Min([Console]::WindowHeight, [Console]::BufferHeight)
-        $room = [math]::Max(3, $height - 2)
-        $expanded = ($jobs.Count * 4 -le $room)
-        $perPage = [math]::Max(1, [math]::Floor($room / 3))
-        if ($expanded) { $perPage = $jobs.Count }
-        $pages = [int][math]::Ceiling($jobs.Count / $perPage)
-        $script:BatchPage = [math]::Min($pages - 1, [math]::Max(0, $script:BatchPage))
-        $first = $script:BatchPage * $perPage
-        $frame = @()
-    }
-    for ($i = 0; $i -lt $jobs.Count; $i++) {
-        $job = $jobs[$i]
-        $detail = ''
-        $color = 'Gray'
-        if ($job.status -eq 'running') {
-            $info = Get-ProgressInfo $job
-            if ($textMode) { Write-JobProgressLog $job $info; continue }
-            $status = (Get-PhaseTag $info) + '  ' + (Get-PctText $info) + ' · ' + (Format-TimeLine $info)
-            if ($info.StageOnly) { $status = (Get-PhaseTag $info) + ' · 已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info) }
-            $detail = $info.Detail
-            if ($job.cancelMessage) { $status = $job.cancelMessage; $color = 'Yellow' }
-        } else {
-            switch ($job.status) {
-                'done'   { $status = '已完成'; $color = 'Green' }
-                'failed' { $status = '失败 · ' + $job.exitcode; $detail = $job.solveError; $color = 'Red' }
-                'killed' { $status = '已终止'; $color = 'Yellow' }
-                default  { $status = '启动中' }
+    $keys = if ($script:WatchOnly) { 'Q 退出只读监视' } else { 'Q 退出监视   K 终止作业' }
+    if (-not ($script:IsRedirected -or $script:BatchTextMode)) {
+        try {
+            if ($jobs.Count -eq 1 -and $jobs[0].status -eq 'running' -and $script:PStyle -eq '1') {
+                Show-ProgressLine (Get-ProgressInfo $jobs[0]) $keys
+            } else {
+                $height = [math]::Min([Console]::WindowHeight, [Console]::BufferHeight)
+                Write-LiveFrame (New-ProgressPage $jobs $height $keys)
             }
-            if ($textMode) {
-                if ($script:WatchOnly -and $job.status -ne 'pending' -and $script:JobLogSig[$job.jobDir] -ne $job.status) {
-                    Write-Host ('  [' + (Split-Path -Leaf $job.jobDir) + '] ' + $status + ' ' + $detail)
-                    $script:JobLogSig[$job.jobDir] = $job.status
-                }
-                continue
-            }
+            return
+        } catch {
+            Clear-LiveBox
+            $script:BatchTextMode = $true
+            Write-Host '  控制台无法定位光标，改用作业状态日志。'
         }
-        if ($i -lt $first -or $i -ge ($first + $perPage)) { continue }
-        $name = [IO.Path]::GetFileNameWithoutExtension([string]$job.model)
-        $title = ('{0}/{1}  {2}' -f ($i + 1), $jobs.Count, $name)
-        if (-not $expanded -and $detail) { $status += ' · ' + $detail }
-        $rows = @(@{ Text = $status; Color = $color })
-        if ($expanded) { $rows += @{ Text = $detail; Color = 'DarkGray' } }
-        $frame += (New-BoxDisplay $title $rows 'Cyan')
     }
-    if ($textMode) { return }
-    $hint = if ($script:WatchOnly) { 'Q 退出只读监视' } else { 'Q 退出监视   K 终止作业' }
-    if ($pages -gt 1) { $hint = ('PgUp/PgDn 翻页 {0}/{1}   ' -f ($script:BatchPage + 1), $pages) + $hint }
-    $width = Get-BoxWidth 0
-    $frame += @{ Segs = @(@{ Text = '  ' + (Pad-Text (Cut-Text $hint $width) $width); Color = 'DarkGray' }) }
-    try { Write-LiveFrame $frame }
-    catch {
-        Clear-LiveBox
-        $script:BatchTextMode = $true
-        Write-Host '  控制台无法定位光标，改用作业状态日志。'
+    foreach ($job in $jobs) {
+        if ($job.status -eq 'running') { Write-JobProgressLog $job (Get-ProgressInfo $job) }
+        elseif ($script:WatchOnly -and $job.status -ne 'pending' -and $script:JobLogSig[$job.jobDir] -ne $job.status) {
+            $label = @{done='已完成'; failed='失败'; killed='已终止'}[[string]$job.status]
+            Write-Host ('  [' + (Split-Path -Leaf $job.jobDir) + '] ' + $label + ' ' + $job.exitcode + ' ' + $job.solveError)
+            $script:JobLogSig[$job.jobDir] = $job.status
+        }
     }
-}
-
-function Show-ProgressJob($job, $ord, $total) {
-    $info = Get-ProgressInfo $job
-    $leaf = [string](Split-Path -Leaf $job.jobDir)
-    $nm = $leaf -replace '^\d{12}_', ''
-    if ($nm.Length -gt 40) { $nm = $nm.Substring(0, 40) }
-    $style = '2'
-    if ($script:PStyle) { $style = [string]$script:PStyle }
-    if ($script:IsRedirected) { Write-JobProgressLog $job $info; return }
-    if ($info.StageOnly) {
-        $time = '已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info)
-        if ($style -eq '1') { Show-StatusLine ((Get-PhaseTag $info) + ' · ' + $time + ' · ' + $info.Detail) $info.Fg $info.Bg }
-        else { Show-LiveBox ((Get-PhaseTag $info) + ' · ' + $nm) @($info.Detail, $time, 'Q 退出监视   K 终止作业') $info.Bg }
-        return
-    }
-    if ($style -eq '1') { Render-Progress1 $info $nm $ord $total }
-    elseif ($style -eq '3') { Render-Progress3 $info $nm $ord $total }
-    else { Render-Progress2 $info $nm $ord $total }
 }
 
 function Get-SolveErrorLine($job, [string]$RecentLog, [switch]$Final) {
@@ -2705,12 +2666,8 @@ function Invoke-Scheduler($submitted) {
                 }
             }
             if ($open.Count -eq 0) { break }
-            if ($total -gt 1) {
+            if ($total -gt 1 -or $cur.Count -gt 0) {
                 Show-BatchProgress $mine
-            } elseif ($cur.Count -gt 0) {
-                $job = $cur[0]
-                $ord = [array]::IndexOf($sessionIds, $job.jobDir) + 1
-                Show-ProgressJob $job $ord $total
             } else {
                 Clear-LiveBox
                 $body = ('【调度中】已用 ' + (Format-Elapsed $el.TotalSeconds) + ' · 完成 ' + $fin.Count + '/' + [math]::Max(1, $total) + ' · Q 退出监视  K 终止作业')
@@ -2974,36 +2931,52 @@ if (-not ($Resume -or $KillJob -or $Diag)) {
         }
         throw ($msg -join [Environment]::NewLine)
     }
-    $model = $modelList[0]
-
     $recipes = @(Get-Recipes)
-    if (-not [string]::IsNullOrWhiteSpace($Recipe)) {
-        $hit = @($recipes | Where-Object { $_.Name -eq $Recipe })
-        if ($hit.Count -eq 0) {
-            throw ('找不到配方: ' + $Recipe + '（可选: ' + (($recipes | ForEach-Object { $_.Name }) -join ', ') + '）')
-        }
-        $r = $hit[0]
+    $recipeNames = @($recipes | ForEach-Object { $_.Name })
+    if ($Recipe -and ($Recipe -join '').Trim()) {
+        $selected = @(foreach ($argument in $Recipe) {
+            # 完整名称优先，让文件名本身含逗号的已有配方仍可单独指定。
+            $names = if ($recipeNames -contains $argument) { $argument } else { $argument -split '[,，]' }
+            foreach ($name in $names) {
+                $match = $recipes | Where-Object { $_.Name -eq $name.Trim() } | Select-Object -First 1
+                if (-not $match) { throw ('找不到配方 ' + $name + '（可选 ' + ($recipeNames -join '、') + '）') }
+                $match
+            }
+        })
     } else {
-        $items = @($recipes | ForEach-Object { $_.Name })
-        $ri = Read-Menu '选择配方' $items 1
-        if ($ri -le 0) { Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow; exit 0 }
-        $r = $recipes[$ri - 1]
+        $indices = @(Read-Menu '选择配方' $recipeNames 1 -Multi)
+        if (-not $indices.Count) { Write-Host '  已取消，未启动任何作业。' -ForegroundColor Yellow; exit 0 }
+        $selected = @($indices | ForEach-Object { $recipes[$_ - 1] })
     }
-
-    $cfg = $r.Data
-    if (-not $cfg.NameTemplate) { throw ('配方缺少 NameTemplate: ' + $r.Name) }
-    $solScope = if ($cfg.SolScope) { ([string]$cfg.SolScope).ToLowerInvariant() } else { 'study' }
-    if ($solScope -notin @('study','all')) { throw 'SolScope 取 study 或 all' }
+    $chosenNames = @{}
+    $selection = @(foreach ($r in $selected) {
+        if ($chosenNames.ContainsKey($r.Name)) { continue }
+        $chosenNames[$r.Name] = $true
+        $cfg = $r.Data
+        if (-not $cfg.NameTemplate) { throw ('配方缺少 NameTemplate: ' + $r.Name) }
+        $scope = if ($cfg.SolScope) { ([string]$cfg.SolScope).ToLowerInvariant() } else { 'study' }
+        if ($scope -notin @('study','all')) { throw ('配方 ' + $r.Name + ' 的 SolScope 取 study 或 all') }
+        [pscustomobject]@{ Name=$r.Name; Data=$cfg; Scope=$scope; Blocks=@() }
+    })
+    $recipeLabel = ($selection.Name -join '、')
+    $studies = @($selection | ForEach-Object { if ($_.Data.Study) { [string]$_.Data.Study } } | Select-Object -Unique)
+    if ($doSolve -and $studies.Count -gt 1) {
+        throw ('同一求解作业只能运行一个研究。所选配方指定了 ' + ($studies -join '、') + '。请按研究分别提交，已有解可在「只导出」中一起选择。')
+    }
+    $study = if ($studies.Count) { $studies[0] } else { '' }
     if ($Cores -lt 0 -or $Cores -gt [Environment]::ProcessorCount) { throw '核数超出本机范围' }
     $heapMB = Get-RequestedHeapMB
     $plans = @(foreach ($m in $ModelList) {
         $modelName = Get-ResultModelName $m
-        $n = Format-JobName $cfg.NameTemplate @{ task = [string]$cfg.Task; model = $modelName; stamp = $Stamp }
-        foreach ($leaf in $modelName,$n) {
+        $outputNames = @(foreach ($r in $selection) {
+            Format-JobName $r.Data.NameTemplate @{ task=[string]$r.Data.Task; model=$modelName; stamp=$Stamp }
+        })
+        foreach ($leaf in (@($modelName) + $outputNames)) {
             if ([string]::IsNullOrWhiteSpace($leaf) -or $leaf.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
                 $leaf -match '[. ]$|^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw ('作业输出文件名无效 ' + $leaf) }
         }
-        [pscustomobject]@{ model=$m; modelName=$modelName; outName=$n }
+        $n = if ($selection.Count -eq 1) { $outputNames[0] } else { $modelName }
+        [pscustomobject]@{ model=$m; modelName=$modelName; outName=$n; recipeOutputs=$outputNames }
     })
     $seen = @{}
     foreach ($plan in $plans) {
@@ -3013,15 +2986,24 @@ if (-not ($Resume -or $KillJob -or $Diag)) {
     }
 
     Write-Host ''
+    if ($selection.Count -gt 1) { Write-Host ('  所选配方（每个模型） ' + $recipeLabel) }
     if (-not $DryRun) {
         $ans = Read-Confirm ('开始导出？共 ' + $plans.Count + ' 个作业')
         if (-not $ans) { Write-Host '  已取消。' -ForegroundColor Yellow; exit 0 }
     }
-    $moduleDefs = if ($cfg.Use) { Get-ModuleDefs } else { @{} }
-    $blocks = @(Expand-Blocks $cfg $moduleDefs)
-    if ($blocks.Count -eq 0) { throw ('配方没有任何导出内容（Use 或 Export 为空）: ' + $r.Name) }
+    $moduleDefs = @{}
+    $blockCount = 0
+    foreach ($r in $selection) {
+        if ($r.Data.Use -and -not $moduleDefs.Count) { $moduleDefs = Get-ModuleDefs }
+        $r.Blocks = @(Expand-Blocks $r.Data $moduleDefs)
+        if (-not $r.Blocks.Count) { throw ('配方没有任何导出内容（Use 或 Export 为空）: ' + $r.Name) }
+        $blockCount += $r.Blocks.Count
+        if ($DryRun) {
+            Write-Host ('  配方 ' + $r.Name)
+            foreach ($b in $r.Blocks) { Write-Host ('  导出块: ' + $b.Type + ' / ' + $b.Name) }
+        }
+    }
     if ($DryRun) {
-        foreach ($cfgBlock in $blocks) { Write-Host ('  导出块: ' + $cfgBlock.Type + ' / ' + $cfgBlock.Name) }
         Write-Host ('  预览：共 ' + $plans.Count + ' 个作业，未写入队列、未启动计算。')
         exit 0
     }
@@ -3148,42 +3130,50 @@ try {
         $solvedFile = if ($doSolve) { Get-UnusedJobPath $solvedRoot $n '.mph' $reserved }
         $spec = New-Object System.Collections.Generic.List[string]
         $spec.Add('model='    + $m.FullName)
-        $spec.Add('study='    + $cfg.Study)
         $spec.Add('outdir='   + $outDir)
         $spec.Add('modelsdir=' + $Models)
         $spec.Add('outname='  + $n)
         $spec.Add('solver=batch')
         if ($doSolve) { $spec.Add('solvedfile=' + $solvedFile) }
         $spec.Add('cli=' + $script:CliVersion)
-        $spec.Add('recipe=' + $r.Name)
-        $spec.Add('solscope=' + $solScope)
+        $spec.Add('recipe=' + $recipeLabel)
+        $spec.Add('study=' + $study)
         $spec.Add('resultdir=' + $resultDir)
-        if ($cfg.Solution) { $spec.Add('solution=' + $cfg.Solution) }
-        $spec.Add('blocks='   + $blocks.Count)
-        $spec.Add('solve='    + $(if ($doSolve) { '1' } else { '0' }))
-        # 每块取多少个解（默认 200）；解特别多又内存紧张时可在配方里写 Chunk = 100
-        $chunkVal = 200
-        if ($cfg.Chunk) { $chunkVal = [int]$cfg.Chunk }
-        $spec.Add('chunk='    + $chunkVal)
-        for ($i = 0; $i -lt $blocks.Count; $i++) {
-            $b = $blocks[$i]
-            $k = $i + 1
-            # 通用：任何额外字段都原样写入 job.properties（小写键），
-            # 这样新增导出类型不需要再改这里
-            foreach ($key in $b.Keys) {
-                $val = $b[$key]
-                if ($null -eq $val) { continue }
-                if ($val -is [array]) { $val = ($val -join '|') }
-                $name = ([string]$key).ToLowerInvariant()
-                if ($name -eq 'type' -or $name -eq 'name') { $val = [string]$val }
-                $spec.Add('block.' + $k + '.' + $name + '=' + [string]$val)
+        $spec.Add('blocks=' + $blockCount)
+        $spec.Add('solve=' + $(if ($doSolve) { '1' } else { '0' }))
+        if ($selection.Count -gt 1) { $spec.Add('recipes=' + $selection.Count) }
+        $k = 0
+        for ($i = 0; $i -lt $selection.Count; $i++) {
+            $r = $selection[$i]
+            $cfg = $r.Data
+            $prefix = ''
+            if ($selection.Count -gt 1) {
+                $prefix = 'recipe.' + ($i + 1) + '.'
+                $spec.Add($prefix + 'name=' + $r.Name)
+                $spec.Add($prefix + 'outname=' + $plan.recipeOutputs[$i])
+                $recipeStudy = if ($cfg.Study) { $cfg.Study } elseif ($doSolve) { $study } else { '' }
+                $spec.Add($prefix + 'study=' + $recipeStudy)
+                $spec.Add($prefix + 'blocks=' + $r.Blocks.Count)
+            }
+            $spec.Add($prefix + 'solscope=' + $r.Scope)
+            if ($cfg.Solution) { $spec.Add($prefix + 'solution=' + $cfg.Solution) }
+            $chunk = if ($cfg.Chunk) { [int]$cfg.Chunk } else { 200 }
+            $spec.Add($prefix + 'chunk=' + $chunk)
+            foreach ($b in $r.Blocks) {
+                $k++
+                foreach ($key in $b.Keys) {
+                    $val = $b[$key]
+                    if ($null -eq $val) { continue }
+                    if ($val -is [array]) { $val = $val -join '|' }
+                    $spec.Add('block.' + $k + '.' + ([string]$key).ToLowerInvariant() + '=' + [string]$val)
+                }
             }
         }
         [IO.Directory]::CreateDirectory($jobDir) | Out-Null
         $createdDirs.Add($jobDir)
         [IO.File]::WriteAllLines((Join-Path $jobDir 'job.properties'), $spec, [Text.UTF8Encoding]::new($false))
         [pscustomobject]@{
-            id = $n; model = $m.FullName; recipe = $r.Name; comsolBatch = $comsolBatch; driverDir = $driverDir
+            id = $n; model = $m.FullName; displayName = $plan.modelName; recipe = $recipeLabel; comsolBatch = $comsolBatch; driverDir = $driverDir
             pid = 0; jobDir = $jobDir; outDir = $outDir; resultDir = $resultDir; solvedFile = $solvedFile
             cores = $Cores; heapMB = $heapMB
             created = (Get-Date).ToString('o'); started = ''

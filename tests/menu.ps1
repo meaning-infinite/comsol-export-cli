@@ -91,6 +91,19 @@ public class Probe {
     }
     Write-Output 'PASS saved installation and driver checked once before mode, model, and recipe menus'
 
+    $pair = @((Get-ChildItem -LiteralPath (Join-Path $repo 'recipes') -Filter '*.psd1' | Sort-Object Name | Select-Object -First 2).BaseName)
+    $viaMenu = ('2','1','1,2' | & $launcher -DryRun) -join [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0) { throw $viaMenu }
+    $viaFlag = ('' | & $launcher -Mode export -ModelIndex 1 -Recipe (($pair + $pair[0]) -join ',') -DryRun) -join [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0) { throw $viaFlag }
+    foreach ($preview in $viaMenu,$viaFlag) {
+        if ($preview -notmatch '预览：共 1 个作业') { throw $preview }
+        foreach ($name in $pair) {
+            if ([regex]::Matches($preview, '(?m)^  配方 ' + [regex]::Escape($name) + '\r?$').Count -ne 1) { throw $preview }
+        }
+    }
+    Write-Output 'PASS menu and comma-separated names select two recipes once in one model job'
+
     $missingBatch = Join-Path $sandbox 'missing-comsolbatch.exe'
     [IO.File]::WriteAllText((Join-Path ([IO.Path]::GetDirectoryName($exe)) 'TEMP_bad_driver'), '')
     foreach ($path in @($missingBatch, $batch)) {

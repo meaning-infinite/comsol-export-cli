@@ -197,6 +197,34 @@ try {
     Assert (([IO.File]::ReadAllText((Join-Path $legacyBatch 'EXPORT_MANIFEST.md'))) -match 'old_job/EXPORT_MANIFEST.md' -and
             [IO.File]::Exists((Join-Path $legacyDir 'EXPORT_MANIFEST.md'))) 'legacy queue still publishes its recorded batch and model manifests'
 
+    & {
+        function Get-BoxWidth { 76 }
+        function Get-ProgressInfo($job) { $job.info }
+        $script:BatchPage = 0
+        $script:PStyle = '2'
+        $a = @{model='A.mph'; status='running'; info=@{Phase='solve';PhaseLabel='求解';Pct=34;Eta=600;TotalElapsed=180;Detail='矩阵分解';Bg='DarkYellow';StageIdx=5}}
+        $b = @{model='B.mph'; status='running'; info=@{Phase='export';PhaseLabel='导出';Pct=75;Eta=120;TotalElapsed=96;Detail='已取 3/4 个解';Bg='DarkCyan'}}
+        $keys = 'Q 退出监视   K 终止作业'
+        $single = New-ProgressPage @($a) 32 $keys
+        $both = New-ProgressPage @($a,$b) 32 $keys
+        Assert ($single.Count -eq 7 -and $both.Count -eq 14 -and
+            (($both[0..6].Text -join "|").Replace('1/2','1/1') -ceq ($single.Text -join "|"))) 'two full panels use the same rows as an individual job'
+        $rows = $both[7..13].Text -join '|'
+        foreach ($label in '2/2   B','进度','75%','导出','已取 3/4','00:01:36','约 2 min','按键') {
+            if (-not $rows.Contains($label)) { throw ("Missing panel detail " + $label + " in " + $rows) }
+        }
+        $script:BatchPage = 1
+        $page = New-ProgressPage @($a,$b) 10 'Q 退出只读监视'
+        Assert ($page.Count -eq 7 -and $page[1].Text.Contains('2/2   B') -and
+                $page[5].Text.Contains('2/2') -and $page[5].Text.Contains('只读') -and $page[5].Text -notmatch '终止') 'short read-only console pages whole panels with the correct controls'
+        $script:PStyle = '3'
+        $both = New-ProgressPage @($a,$b) 32 $keys
+        Assert (($both.Text -join '|') -match '▸分解') 'parallel solve retains the selected stage-chain style'
+        $a.info.StageOnly = $true
+        $both = New-ProgressPage @($a,$b) 32 $keys
+        Assert ($both[2].Text -match '阶段监视' -and $both[2].Text -notmatch '%|█' -and $both[4].Text -match '剩余时间不可估') 'stage-only job keeps full panel without a guessed percentage'
+    }
+
     $ModuleDir=Join-Path $repo 'modules'
     $map=Get-ModuleDefs
     foreach ($f in (Get-ChildItem -LiteralPath (Join-Path $repo 'recipes') -Filter '*.psd1')) {

@@ -164,12 +164,17 @@ class Worker {
         throw 'Nonzero solver exit was accepted as a completed job'
     }
     Write-Output 'PASS native exit 17 persists with no controller and blocks export despite a saved partial result and Done'
-    $plain = Start-Controller ($common + '5,6')
+    [IO.File]::WriteAllText((Join-Path $scriptDir 'recipes/second.psd1'),$recipe.Replace("Task='test'","Task='second'; SolScope='all'; Chunk=7"),[Text.Encoding]::UTF8)
+    $plain = Start-Controller ($common.Replace('-Recipe test ', '-Recipe "test,second" ') + '5,6')
     $controllers += $plain
     $je = Wait-State 'E' 'running' $plain
     $jf = Wait-State 'F' 'running' $plain
     $output = Join-Path $box 'output'
     foreach ($j in $je,$jf) {
+        $spec = [IO.File]::ReadAllLines((Join-Path $j.jobDir 'job.properties'))
+        foreach ($line in 'recipes=2','blocks=2','recipe.1.name=test','recipe.2.name=second','recipe.2.solscope=all','recipe.2.chunk=7','block.2.type=global') {
+            if ($spec -notcontains $line) { throw ('Missing recipe setting ' + $line) }
+        }
         if ($j.resultDir -ne (Join-Path $output $j.id) -or $j.solvedFile -ne (Join-Path $models ('solved\'+$j.id+'.mph'))) {
             throw 'Unexpected result or solved model name'
         }

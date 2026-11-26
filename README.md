@@ -3,7 +3,7 @@
 <p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
 <p align="center">
-  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.12.0-2AA0B0"></a>
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.13.0-2AA0B0"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
   <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
   <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.1~6.4-368CCB">
@@ -38,6 +38,7 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 |---|---|
 | `run.bat` | 交互启动：选模式、选模型、选配方 |
 | `run.bat -Mode export` | 只导出，跳过求解 |
+| `run.bat -Recipe "配方A,配方B"` | 每个所选模型使用这两份配方 |
 | `run.bat -Mode watch` | 只读监视，可与调度窗口同时打开 |
 | `run.bat -Resume` | 接管未完成作业、衔接导出并启动待办 |
 | `run.bat -KillJob <作业ID>` | 终止该活动作业，ID 见作业列表。数字兼容队列历史序号 |
@@ -47,7 +48,11 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 | `run.bat -Heap 8g` | 每作业 Java 堆上限 |
 | `run.bat -Modules` | 列出预制模块与可覆盖参数 |
 
+模型和配方都可用方向键移动、空格勾选、回车确认，`A` 全选。每个模型只提交一个作业，同一研究求解一次，随后按所选配方依次导出。不同配方产生同名文件时，后一个配方在文件名前缀中加入配方名。
+
 可以多次打开 `run.bat`，每个窗口选自己的模型。选好配方后直接确认。在 Windows 上，COMSOL 使用首选项指定的核数，未指定时默认使用可用物理核。导出用的 Java 堆由 JVM 管理。需要限制单个作业时，可指定 `-Cores` 或 `-Heap`。所有窗口共用队列，`-Mode watch` 查看活动作业，`-Resume` 接回后台作业。[COMSOL 多核说明](https://www.comsol.com/support/knowledgebase/1096)
+
+同时处理多个模型时，每个模型显示完整进度框，包含阶段、进度、已用和剩余时间。窗口较矮时，用 `PgUp` / `PgDn` 整框翻页。
 
 波长域、频域求解和导出在进度变化较快时用近期速度估时，变化慢时用当前阶段的累计完成量和耗时。重开窗口也能用已记录的阶段起点估时。特征频率求解仍显示阶段、已用时间及日志提供的迭代信息。
 
