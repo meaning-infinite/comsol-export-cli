@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.9.4'
+$script:CliVersion = 'v1.10.0'
 $script:CliExit = 0
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
@@ -1040,33 +1040,54 @@ function Get-ComsolFromShortcuts {
     return @($found.Values | Sort-Object)
 }
 
+# 共享状态只在读、改、写事务期间独占，目录由调用方创建。
+function Enter-StateWrite([string]$fileName = 'queue.write.lock') {
+    $path = Join-Path $StateDir $fileName
+    while ($true) {
+        try { return [IO.File]::Open($path,'OpenOrCreate','ReadWrite','None') }
+        catch [IO.IOException] {
+            if (($_.Exception.GetBaseException().HResult -band 0xffff) -notin @(32,33)) { throw }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+}
+
 function Read-Config {
-    $cfg = @{ ComsolBatch = ''; Models = '' }
+    $cfg = @{ ComsolBatch = ''; Models = ''; ProgressStyle = '' }
     if (Test-Path -LiteralPath $ConfigFile) {
         try {
             $c = Import-PowerShellDataFile -LiteralPath $ConfigFile
-            foreach ($k in @('ComsolBatch', 'Models')) {
-                if ($null -ne $c[$k]) { $cfg[$k] = $c[$k] }
+            foreach ($k in @('ComsolBatch', 'Models', 'ProgressStyle')) {
+                if ($null -ne $c[$k]) { $cfg[$k] = [string]$c[$k] }
             }
         } catch { }
     }
     return $cfg
 }
 
-function Save-Config {
-    param([hashtable]$Cfg)
-    $cfgDir = Split-Path -Parent $ConfigFile
-    if (-not (Test-Path -LiteralPath $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
-    $lines = @(
-        '@{',
-        ('    ComsolBatch  = ' + "'" + $Cfg.ComsolBatch + "'"),
-        ('    Models      = ' + "'" + $Cfg.Models + "'"),
-        '}'
-    )
+function Save-Config([ValidateSet('ComsolBatch','Models')][string]$field, [string]$value) {
+    [void][IO.Directory]::CreateDirectory($StateDir)
+    $lock = Enter-StateWrite 'config.write.lock'
+    $tmp = $ConfigFile + '.tmp'
     try {
-        Set-Content -LiteralPath $ConfigFile -Value $lines -Encoding UTF8
-    } catch {
-        throw ('写配置失败: ' + $ConfigFile + ' —— ' + $_.Exception.Message)
+        $cfg = Read-Config
+        $cfg[$field] = $value
+        $lines = @('@{', ("    ComsolBatch = '" + $cfg.ComsolBatch.Replace("'","''") + "'"),
+                         ("    Models = '" + $cfg.Models.Replace("'","''") + "'"))
+        if ($cfg.ProgressStyle) { $lines += "    ProgressStyle = '" + $cfg.ProgressStyle.Replace("'","''") + "'" }
+        $lines += '}'
+        [IO.File]::WriteAllLines($tmp,$lines,[Text.Encoding]::UTF8)
+        if ([IO.File]::Exists($ConfigFile)) {
+            for ($attempt = 0; ; $attempt++) {
+                try { [IO.File]::Replace($tmp,$ConfigFile,[Management.Automation.Language.NullString]::Value); break }
+                catch [IO.IOException] {
+                    if ($attempt -ge 10 -or ($_.Exception.GetBaseException().HResult -band 0xffff) -notin @(32,33)) { throw }
+                    Start-Sleep -Milliseconds 50
+                }
+            }
+        } else { [IO.File]::Move($tmp,$ConfigFile) }
+    } finally {
+        try { [IO.File]::Delete($tmp) } finally { $lock.Dispose() }
     }
 }
 
@@ -1090,16 +1111,14 @@ function Start-Setup {
             1 {
                 $all = @(Find-Comsol)
                 $all = @($all | Sort-Object -Unique)
-                if ($all.Count -eq 0) { Write-Host '  没扫到，直接输入完整路径' -ForegroundColor Yellow; $cfg.ComsolBatch = Read-Host '  路径'; Save-Config $cfg; continue }
+                if ($all.Count -eq 0) { Write-Host '  没扫到，直接输入完整路径' -ForegroundColor Yellow; Save-Config 'ComsolBatch' (Read-Host '  路径'); continue }
                 $n = Read-Menu '选择 COMSOL 安装' $all 1
                 if ($n -le 0) { continue }
-                $cfg.ComsolBatch = $all[$n - 1]
-                Save-Config $cfg
+                Save-Config 'ComsolBatch' $all[$n - 1]
             }
             2 {
                 $v = Read-Host '  模型目录（留空=根目录\model）'
-                $cfg.Models = $v.Trim()
-                Save-Config $cfg
+                Save-Config 'Models' $v.Trim()
             }
             3 {
                 $all = @(Find-Comsol)
@@ -1221,9 +1240,7 @@ function Resolve-Comsol {
         if ($n -le 0) { throw '已取消版本选择' }
         $pick = $all[$n - 1]
     }
-    $cfg = Read-Config
-    $cfg.ComsolBatch = $pick
-    Save-Config $cfg
+    Save-Config 'ComsolBatch' $pick
     return $pick
 }
 
@@ -1232,12 +1249,20 @@ function Read-QueueFile([string]$path) {
     $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8)
     try { $raw = $reader.ReadToEnd() } finally { $reader.Dispose() }
     if (-not $raw.TrimStart().StartsWith('[') -or -not $raw.TrimEnd().EndsWith(']')) { throw '队列 JSON 不完整' }
-    $raw | ConvertFrom-Json | ForEach-Object { $_ }
+    $records = $raw | ConvertFrom-Json
+    if ($path -eq $QueueFile) {
+        $script:SavedQueueJson = $raw
+        $script:QueueRecovered = $false
+    }
+    $records | ForEach-Object { $_ }
 }
 
 function Get-Queue {
     $backup = $QueueFile + '.bak'
-    if (-not [IO.File]::Exists($QueueFile) -and -not [IO.File]::Exists($backup)) { return }
+    if (-not [IO.File]::Exists($QueueFile) -and -not [IO.File]::Exists($backup)) {
+        $script:SavedQueueJson = $null; $script:QueueRecovered = $false
+        return
+    }
     try { Read-QueueFile $QueueFile }
     catch {
         if (-not [IO.File]::Exists($backup)) { throw }
@@ -1354,7 +1379,29 @@ function Assert-DriverRuntime([string]$javaPath, [string]$classPath, [int]$timeo
     } finally { $proc.Dispose() }
 }
 
-function Get-ResourceBudget([int]$count) {
+function Confirm-InstalledDriver([string]$javaPath, [string]$root, [string]$driver) {
+    $plugins = Join-Path $root 'plugins'
+    $api = Join-Path $plugins 'com.comsol.api_1.0.0.jar'
+    $util = Join-Path $plugins 'com.comsol.util_1.0.0.jar'
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    if ([IO.File]::Exists($api)) {
+        # 6.2 的反射检查还需要 util，6.4 只用 api。避免 JVM 搜索数百个无关插件。
+        try { Assert-DriverRuntime $javaPath "$driver;$api;$util"; return }
+        catch { if ($_.Exception.Message -notmatch 'NoClassDefFoundError|ClassNotFoundException') { throw } }
+    }
+    # 其他安装布局仍使用完整插件路径进行同一个 API 检查。
+    $remaining = [int][math]::Max(1,60000 - $timer.ElapsedMilliseconds)
+    Assert-DriverRuntime $javaPath ((Join-Path $plugins '*') + ';' + $driver) $remaining
+}
+
+function Get-MemoryPool($jobs, [int]$available) {
+    $minimum = ($jobs | Where-Object { $_.status -eq 'running' -and $_.memoryPoolMB -gt 0 } |
+        Measure-Object -Property memoryPoolMB -Minimum).Minimum
+    if ($minimum) { return [int]$minimum }
+    return $available
+}
+
+function Get-ResourceBudget([int]$count, $jobs = @()) {
     $cpu = [Environment]::ProcessorCount
     try {
         $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
@@ -1364,6 +1411,7 @@ function Get-ResourceBudget([int]$count) {
         $freeMB = [math]::Floor(([Microsoft.VisualBasic.Devices.ComputerInfo]::new()).AvailablePhysicalMemory / 1MB)
     }
     $pool = [int][math]::Floor($freeMB * 0.7)
+    $capacity = Get-MemoryPool $jobs $pool
     $request = $Heap
     if (-not $request) { $request = $env:COMSOL_EXPORT_XMX }
     $heapMB = 0
@@ -1371,21 +1419,22 @@ function Get-ResourceBudget([int]$count) {
         if ($request -notmatch '^(\d+)([kKmMgG]?)$') { throw 'Heap 格式示例 8g 或 2048m' }
         $factor = @{'g'=1024; 'm'=1; 'k'=(1/1024); ''=(1/1MB)}[$Matches[2].ToLowerInvariant()]
         $heapMB = [int][math]::Ceiling([double]$Matches[1] * $factor)
-        if ($heapMB -le 0 -or $heapMB -gt $pool) { throw ("请求堆 {0} MiB，当前总预算 {1} MiB" -f $heapMB,$pool) }
+        if ($heapMB -le 0 -or $heapMB -gt $capacity) { throw ("请求堆 {0} MiB，当前总预算 {1} MiB" -f $heapMB,$capacity) }
     }
     if ($Cores -lt 0 -or $Cores -gt $cpu -or $pool -lt 1) { throw '核数或可用内存超出本机预算' }
     $minHeap = 4096
     if ($heapMB) { $minHeap = $heapMB }
-    $slots = [int][math]::Max(1,[math]::Min([math]::Max(1,$count),[math]::Min(
-            [math]::Floor($cpu / [math]::Max(1,$Cores)), [math]::Floor($pool / $minHeap))))
+    # 单模型默认保留第二个窗口的容量。指定核数或堆上限时继续按请求分配。
+    $slots = [int][math]::Max(1,[math]::Min([math]::Max(2,$count),[math]::Min(
+            [math]::Floor($cpu / [math]::Max(1,$Cores)), [math]::Floor($capacity / $minHeap))))
     if (-not $heapMB) {
-        $share = [math]::Floor($pool/$slots)
+        $share = [math]::Floor($capacity/$slots)
         if ($share -ge 256) { $share -= $share % 256 }
         $heapMB = [int][math]::Min(65536,$share)
     }
     $perCpu = $Cores
     if (-not $perCpu) { $perCpu = [int][math]::Floor($cpu/$slots) }
-    return @{ slots=$slots; cores=$perCpu; heapMB=$heapMB; cpu=$cpu; pool=$pool }
+    return @{ slots=[math]::Min([math]::Max(1,$count),$slots); cores=$perCpu; heapMB=$heapMB; cpu=$cpu; pool=$pool }
 }
 
 function Get-HeapArg($job) {
@@ -1587,29 +1636,38 @@ function Get-ExportState($job) {
 }
 
 $script:ProgState = @{}
-# 每个作业单独保存最近两分钟的观测，每五秒最多留一个样本。
-function Get-RecentEta($job, [string]$series, [double]$done, [double]$total, [datetime]$now) {
+# 近期有连续增长时用近期速度；慢任务和重新打开的窗口用本阶段的累计速度。
+function Get-RecentEta($job, [string]$series, [double]$done, [double]$total, [datetime]$now, $phaseStart = $null) {
     if ($done -lt 0 -or $total -le 0) { return -1 }
+    if ($done -ge $total) { return 0 }
     $key = [string]$job.jobDir
     $st = $script:ProgState[$key]
-    if (-not $st -or $st.Series -ne $series -or $st.Total -ne $total -or $done -lt $st.Last) {
-        $st = @{ Series = $series; Total = $total; Last = $done; Samples = [Collections.Queue]::new(); Saved = [datetime]::MinValue }
+    $samePhase = $st -and $st.Series -eq $series -and $st.Start -eq $phaseStart
+    if (-not $samePhase -or $st.Total -ne $total -or $done -lt $st.Last) {
+        $baseAt = $now
+        $baseValue = $done
+        if (-not $samePhase -and $phaseStart -and $phaseStart -le $now) { $baseAt = $phaseStart; $baseValue = 0.0 }
+        $st = @{ Series=$series; Start=$phaseStart; Total=$total; Last=$done; BaseAt=$baseAt; BaseValue=$baseValue
+                 Recent=[Collections.Queue]::new(); Saved=$now }
+        $st.Recent.Enqueue(@{At=$now; Value=$done})
         $script:ProgState[$key] = $st
     }
-    $st.Last = $done
-    $samples = $st.Samples
-    while ($samples.Count -and ($now - $samples.Peek().At).TotalSeconds -gt 120) { [void]$samples.Dequeue() }
-    if (($now - $st.Saved).TotalSeconds -ge 5) {
-        $samples.Enqueue(@{ At = $now; Value = $done })
+    $recent = $st.Recent
+    while ($recent.Count -and ($now - $recent.Peek().At).TotalSeconds -gt 120) { [void]$recent.Dequeue() }
+    if ($done -gt $st.Last -and ($now - $st.Saved).TotalSeconds -ge 5) {
+        $recent.Enqueue(@{At=$now; Value=$done})
         $st.Saved = $now
     }
-    if ($done -ge $total) { return 0 }
-    if (-not $samples.Count) { return -1 }
-    $base = $samples.Peek()
-    $span = ($now - $base.At).TotalSeconds
-    $delta = $done - $base.Value
-    if ($span -lt 10 -or $delta -le 0) { return -1 }
-    return (($total - $done) * $span / $delta)
+    $st.Last = $done
+    $at = $st.BaseAt
+    $value = $st.BaseValue
+    if ($recent.Count -ge 3 -and ($now - $recent.Peek().At).TotalSeconds -ge 10) {
+        $at = $recent.Peek().At
+        $value = $recent.Peek().Value
+    }
+    $span = ($now - $at).TotalSeconds
+    if ($span -lt 10 -or $done -le $value) { return -1 }
+    return (($total - $done) * $span / ($done - $value))
 }
 
 function Parse-DateOrNull($s) {
@@ -1625,8 +1683,8 @@ function Get-ProgressInfo($job) {
     $phaseStart = $null
     if ($phase -eq 'solve') { $phaseStart = Parse-DateOrNull (Get-JobProp $job 'solveStarted') }
     else { $phaseStart = Parse-DateOrNull (Get-JobProp $job 'exportStarted') }
-    if (-not $phaseStart) { $phaseStart = Parse-DateOrNull $job.started }
     $totStart = Parse-DateOrNull $job.started
+    if (-not $phaseStart -and ($phase -eq 'solve' -or $job.mode -eq 'export')) { $phaseStart = $totStart }
 
     $elapsed = 0.0
     if ($phaseStart) { $elapsed = [math]::Max(0, ($now - $phaseStart).TotalSeconds) }
@@ -1638,6 +1696,7 @@ function Get-ProgressInfo($job) {
     $stageIdx = -1
     $stageName = ''
     $solDone = -1; $solTotal = -1
+    $exportDone = -1.0; $exportTotal = 0.0
     $stageOnly = $false
     $phaseLabel = '导出'
     if ($phase -eq 'solve') {
@@ -1670,7 +1729,8 @@ function Get-ProgressInfo($job) {
         $e = Get-ExportState $job
         $solDone = $e.Done; $solTotal = $e.Total
         if ($e.Total -gt 0 -and $e.Done -ge 0) {
-            $pct = [int][math]::Min(100, [math]::Round(100.0 * $e.Done / $e.Total))
+            $exportDone = $e.Done; $exportTotal = $e.Total
+            $pct = [int][math]::Min(100, [math]::Floor(100.0 * $e.Done / $e.Total))
         }
         if ($e.Unit -eq 'files') { $detail = ('已写 ' + $e.Done + '/' + $e.Total + ' 个文件') }
         elseif ($e.Total -gt 0) { $detail = ('已取 ' + $e.Done + '/' + $e.Total + ' 个解') }
@@ -1679,14 +1739,15 @@ function Get-ProgressInfo($job) {
         if ($e.Blocks -gt 0 -and $e.Block -gt 0) {
             $fraction = 0
             if ($e.Total -gt 0) { $fraction = [math]::Max(0.0,[math]::Min(1.0,$e.Done/[double]$e.Total)) }
-            $pct = [int][math]::Floor(100.0*($e.Block-1+$fraction)/$e.Blocks)
+            $exportDone = $e.Block - 1 + $fraction; $exportTotal = $e.Blocks
+            $pct = [int][math]::Floor(100.0 * $exportDone / $exportTotal)
         }
         $stageName = '导出'
     }
 
     if ($stageOnly) { $eta = -1 }
-    elseif ($phase -eq 'solve') { $eta = Get-RecentEta $job 'solve' $pct 100 $now }
-    else { $eta = Get-RecentEta $job 'export-blocks' $pct 100 $now }
+    elseif ($phase -eq 'solve') { $eta = Get-RecentEta $job 'solve' $pct 100 $now $phaseStart }
+    else { $eta = Get-RecentEta $job 'export-blocks' $exportDone $exportTotal $now $phaseStart }
 
     $phaseNo = 1; $phaseAll = 1
     if ([string]$job.mode -ne 'export') { $phaseAll = 2; if ($phase -eq 'export') { $phaseNo = 2 } }
@@ -1745,10 +1806,10 @@ function Get-Bar([int]$pct, [int]$width) {
 function Format-Eta($sec) {
     if ($sec -lt 0) { return '未知' }
     if ($sec -lt 30) { return '即将完成' }
-    $m = [int][math]::Round($sec / 60.0)
+    $m = [long][math]::Round($sec / 60.0)
     if ($m -lt 1) { return '不到 1 min' }
     if ($m -lt 60) { return ('约 ' + $m + ' min') }
-    $h = [int][math]::Floor($m / 60)
+    $h = [long][math]::Floor($m / 60)
     return ('约 ' + $h + ' 小时 ' + ($m % 60) + ' min')
 }
 
@@ -1951,6 +2012,7 @@ function Test-SolveOk($job) {
 }
 
 function Start-SolvePhase($job) {
+    if ($job.comsolBatch) { $comsolBatch = $job.comsolBatch }
     Set-JobPhase $job 'solve'
     $spec = Read-JobSpec $job.jobDir
     $solved = Get-JobSolvedPath $job
@@ -1974,11 +2036,11 @@ function Start-SolvePhase($job) {
     if (-not [string]::IsNullOrWhiteSpace($study)) { $argList += @('-study', ('"' + $study + '"')) }
     if ($job.cores -gt 0) { $argList += @('-np', [string]$job.cores) }
     $launchInfo = @(
-        'time=' + (Get-Date).ToString('o'),
-        'comsolbatch=' + $comsolBatch,
-        'args=' + ($argList -join ' '),
-        'driver_version=' + $drvVer,
-        'jobdir=' + $job.jobDir
+        ('time=' + (Get-Date).ToString('o'))
+        ('comsolbatch=' + $comsolBatch)
+        ('args=' + ($argList -join ' '))
+        ('driver_version=' + $script:ExpectedDriverVersion)
+        ('jobdir=' + $job.jobDir)
     ) -join "`r`n"
     try { [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'launch-solve.txt'), $launchInfo, (New-Object System.Text.UTF8Encoding($false))) } catch { }
     if (-not (Test-Path -LiteralPath $comsolBatch)) {
@@ -2150,6 +2212,11 @@ function Clear-JobLock($job) {
 }
 
 function Start-ExportPhase($job) {
+    if ($job.comsolBatch) {
+        $comsolRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $job.comsolBatch))
+        $javaExe = Join-Path $comsolRoot 'java\win64\jre\bin\java.exe'
+    }
+    if ($job.driverDir) { $driverDir = $job.driverDir }
     Set-JobPhase $job 'export'
     $logFile = Join-Path $job.jobDir 'driver.log'
     $errFile = Join-Path $job.jobDir 'driver.err'
@@ -2164,12 +2231,12 @@ function Start-ExportPhase($job) {
     $argStr = (Get-HeapArg $job) + ' -XX:ActiveProcessorCount=' + $job.cores + ' -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
     # 启动前把实际用的路径写进 launch.txt，出问题能查
     $launchInfo = @(
-        'time=' + (Get-Date).ToString('o'),
-        'java=' + $javaExe,
-        'java_exists=' + (Test-Path -LiteralPath $javaExe),
-        'cp=' + $cp,
-        'args=' + $argStr,
-        'jobdir=' + $job.jobDir
+        ('time=' + (Get-Date).ToString('o'))
+        ('java=' + $javaExe)
+        ('java_exists=' + (Test-Path -LiteralPath $javaExe))
+        ('cp=' + $cp)
+        ('args=' + $argStr)
+        ('jobdir=' + $job.jobDir)
     ) -join "`r`n"
     try {
         [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'launch.txt'), $launchInfo, (New-Object System.Text.UTF8Encoding($false)))
@@ -2302,7 +2369,7 @@ function Test-SchedulerPresent {
     $lock = Join-Path $StateDir 'cli.lock'
     if (-not [IO.File]::Exists($lock)) { return $false }
     try {
-        $stream = [IO.File]::Open($lock,'Open','Read','Read')
+        $stream = [IO.File]::Open($lock,'Open','Read','None')
         $stream.Dispose()
         return $false
     } catch [IO.IOException] { return (($_.Exception.GetBaseException().HResult -band 0xffff) -in @(32,33)) }
@@ -2336,6 +2403,39 @@ function Watch-Queue {
     } finally { Clear-LiveBox; $script:WatchOnly = $false }
 }
 
+function Restore-JobWorker($job, [switch]$OnlyTransition) {
+    # 窗口可能恰在启动子进程与保存队列之间被关闭。用作业专属命令行接回该进程。
+    $phaseFile = Join-Path $job.jobDir 'phase'
+    if (-not [IO.File]::Exists($phaseFile)) { return }
+    $phase = [IO.File]::ReadAllText($phaseFile).Trim()
+    if ($job.status -eq 'running' -and $phase -eq $job.phase) {
+        if ($OnlyTransition -or (Test-JobAlive $job.pid $job.jobDir $job.workerStartUtc)) { return }
+    }
+    if ($phase -notin @('solve','export')) { return }
+    $workers = @(Get-JobProcIds $job)
+    if ($workers.Count -gt 1) { throw ('同一作业存在多个进程，无法确定归属：' + $job.jobDir) }
+    Set-JobProp $job 'phase' $phase
+    if ($workers.Count) {
+        $job.pid = [int]$workers[0].ProcessId
+        Set-JobProp $job 'workerStartUtc' $workers[0].CreationDate.ToUniversalTime().ToString('o')
+    }
+    elseif ($phase -eq 'export' -and -not [IO.File]::Exists((Join-Path $job.jobDir 'started')) -and
+            -not [IO.File]::Exists((Join-Path $job.jobDir 'killed')) -and
+            -not [IO.File]::Exists((Join-Path $job.jobDir 'exported'))) {
+        # 交接窗口中断且未启动驱动。只允许已存解作业重进导出。
+        if ($job.mode -eq 'export' -or [IO.File]::Exists((Join-Path $job.jobDir 'solved'))) {
+            $job.pid = 0
+            $job.status = 'pending'
+            return
+        }
+    }
+    $startedKey = $phase + 'Started'
+    if (-not (Get-JobProp $job $startedKey)) { Set-JobProp $job $startedKey ([IO.File]::GetLastWriteTime($phaseFile).ToString('o')) }
+    if (-not $job.started) { Set-JobProp $job 'started' (Get-JobProp $job $startedKey) }
+    # 没有活动进程时也先核对已有完成标记，交给常规收尾逻辑，不重新计算。
+    $job.status = 'running'
+}
+
 function Invoke-Scheduler($submitted, $budget) {
     $script:LiveSig = ''
     $script:LiveCount = 0
@@ -2345,53 +2445,37 @@ function Invoke-Scheduler($submitted, $budget) {
     $script:JobLogSig = @{}
     $i = 0
     $t0 = Get-Date
-    $initial = @(Get-Queue)
-    $active = @($initial | Where-Object { $_.status -in @('pending','running') })
-    if ($submitted) {
-        $active = @($active | Where-Object { $_.status -eq 'running' -or $submitted -contains $_.jobDir })
-    }
-    if ($active.Count) {
-        if (-not $budget) { $budget = Get-ResourceBudget $active.Count }
-        foreach ($job in $active) {
-            if (-not $job.cores) { Set-JobProp $job 'cores' $budget.cores }
-            if (-not $job.heapMB) {
-                Set-JobProp $job 'heapMB' $budget.heapMB
-                Set-JobProp $job 'autoHeap' (-not ($Heap -or $env:COMSOL_EXPORT_XMX))
+    $transaction = Enter-StateWrite
+    try {
+        $initial = @(Get-Queue)
+        $active = @($initial | Where-Object { $_.status -in @('pending','running') })
+        if ($submitted) {
+            # 旧窗口可能在启动子进程后关闭。接回活动进程，显示范围仍限本次提交。
+            $active = @($active | Where-Object { $submitted -contains $_.jobDir -or $_.status -eq 'running' -or
+                    [IO.File]::Exists((Join-Path $_.jobDir 'phase')) })
+        }
+        if ($active.Count) {
+            if (-not $budget) { $budget = Get-ResourceBudget $active.Count $active }
+            foreach ($job in $active) {
+                if (-not $job.cores) {
+                    $coresNeeded = if ($job.status -eq 'running') { $budget.cpu } else { $budget.cores }
+                    Set-JobProp $job 'cores' $coresNeeded
+                }
+                if (-not $job.heapMB) {
+                    $heapNeeded = if ($job.status -eq 'running') { $budget.pool } else { $budget.heapMB }
+                    Set-JobProp $job 'heapMB' $heapNeeded
+                    Set-JobProp $job 'autoHeap' (-not ($Heap -or $env:COMSOL_EXPORT_XMX))
+                }
             }
         }
-    }
-    foreach ($job in $active) {
-        # 窗口可能恰在启动子进程与保存队列之间被关闭。用作业专属命令行接回该进程。
-        $phaseFile = Join-Path $job.jobDir 'phase'
-        if (-not [IO.File]::Exists($phaseFile)) { continue }
-        $phase = [IO.File]::ReadAllText($phaseFile).Trim()
-        if ($job.status -eq 'running' -and $phase -eq $job.phase -and (Test-JobAlive $job.pid $job.jobDir $job.workerStartUtc)) { continue }
-        if ($phase -notin @('solve','export')) { continue }
-        $workers = @(Get-JobProcIds $job)
-        if ($workers.Count -gt 1) { throw ('同一作业存在多个进程，无法确定归属：' + $job.jobDir) }
-        Set-JobProp $job 'phase' $phase
-        if ($workers.Count) {
-            $job.pid = [int]$workers[0].ProcessId
-            Set-JobProp $job 'workerStartUtc' $workers[0].CreationDate.ToUniversalTime().ToString('o')
-        }
-        elseif ($phase -eq 'export' -and -not [IO.File]::Exists((Join-Path $job.jobDir 'started')) -and
-                -not [IO.File]::Exists((Join-Path $job.jobDir 'killed')) -and
-                -not [IO.File]::Exists((Join-Path $job.jobDir 'exported'))) {
-            # 交接窗口中断且未启动驱动。只允许已存解作业重进导出。
-            if ($job.mode -eq 'export' -or [IO.File]::Exists((Join-Path $job.jobDir 'solved'))) {
-                $job.pid = 0
-                $job.status = 'pending'
-                continue
-            }
-        }
-        # 没有活动进程时也先核对已有完成标记，交给常规收尾逻辑，不重新计算。
-        $job.status = 'running'
-    }
-    if ($active.Count) { Save-Queue $initial }
-    $sessionIds = @($active | ForEach-Object { $_.jobDir })
-    $total = $sessionIds.Count
+        foreach ($job in $active) { Restore-JobWorker $job }
+        if ($active.Count -or $script:QueueRecovered) { Save-Queue $initial }
+        else { Write-Handoff $initial }
+        if ($submitted) { $sessionIds = @($submitted) }
+        else { $sessionIds = @($active | ForEach-Object { $_.jobDir }) }
+        $total = $sessionIds.Count
+    } finally { $transaction.Dispose() }
     if ($total -eq 0) {
-        if ($script:QueueRecovered) { Save-Queue $initial } else { Write-Handoff $initial }
         $st0 = Read-Stats
         Write-Host ('  队列里没有未完成的作业。历史累计导出 ' + $st0.exported + ' 个。') -ForegroundColor DarkCyan
         return
@@ -2400,101 +2484,111 @@ function Invoke-Scheduler($submitted, $budget) {
         $quitMonitor = $false
         while ($true) {
             $panels = ($total -gt 1 -and -not $script:IsRedirected -and -not $script:BatchTextMode)
-            $q = @(Get-Queue)
-            foreach ($job in $q) {
-                if ($job.status -eq 'running') {
-                    if ((Test-Path -LiteralPath (Join-Path $job.jobDir 'killed')) -and -not (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported'))) {
-                        $message = Stop-OneJob $job
-                        if ($job.status -ne 'killed' -and $job.cancelMessage -ne $message) {
-                            if (-not $panels) {
-                                Clear-LiveBox
-                                Write-Host ('  ' + (Split-Path -Leaf $job.jobDir) + '  ' + $message) -ForegroundColor Yellow
-                            }
-                            Set-JobProp $job 'cancelMessage' $message
-                        }
-                    }
-                    elseif (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported')) {
-                        $job.status = 'done'
-                        if (-not (Test-Path -LiteralPath (Join-Path $job.jobDir 'counted'))) {
-                            [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'counted'), '', (New-Object System.Text.UTF8Encoding($false)))
-                            Add-Stat 'exported' 1
-                        }
-                        if ($job.started) {
-                            try {
-                                $dur = [int](((Get-Date) - [datetime]::Parse([string]$job.started)).TotalSeconds)
-                                if ($dur -ge 1) { Set-JobProp $job 'duration' $dur }
-                            } catch { }
-                        }
-                        $note = Clear-JobLock $job
-                        if (-not $panels -and $note -eq '已清除') { Clear-LiveBox; Write-Host ("`n  已释放锁: " + $job.model) -ForegroundColor DarkGray }
-                    }
-                    elseif (-not (Test-JobAlive $job.pid $job.jobDir $job.workerStartUtc)) {
-                        # 进程刚退出时文件可能还在落盘，等一拍再判
-                        Start-Sleep -Milliseconds 400
-                        $phaseNow = Get-JobPhase $job
-                        if ($phaseNow -eq 'solve' -and -not (Test-Path -LiteralPath (Join-Path $job.jobDir 'killed'))) {
-                            $why = Test-SolveOk $job
-                            if ($why -eq '') {
-                                # 求解成功：写 solved 标记（驱动据此走 resume），接着起导出
-                                [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'solved'), '', (New-Object System.Text.UTF8Encoding($false)))
-                                if (-not $panels) {
+            $transaction = Enter-StateWrite
+            try {
+                $q = @(Get-Queue)
+                foreach ($job in $q) {
+                    # 其他窗口也可能在本轮开始前中断。先核对 phase，再统计跨窗口资源或启动待办。
+                    if ($job.status -in @('pending','running')) { Restore-JobWorker $job -OnlyTransition }
+                    if ($job.status -eq 'running') {
+                        if ((Test-Path -LiteralPath (Join-Path $job.jobDir 'killed')) -and -not (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported'))) {
+                            $message = Stop-OneJob $job
+                            if ($job.status -ne 'killed' -and $job.cancelMessage -ne $message) {
+                                if (-not $panels -and $sessionIds -contains $job.jobDir) {
                                     Clear-LiveBox
-                                    $durTxt = ''
-                                    $ss = Parse-DateOrNull (Get-JobProp $job 'solveStarted')
-                                    if ($ss) { $durTxt = '  用时 ' + (Format-Elapsed ((Get-Date) - $ss).TotalSeconds) }
-                                    Write-Host ('  [求解完成] ' + (Split-Path -Leaf $job.jobDir) + $durTxt + '，开始导出…') -ForegroundColor Green
+                                    Write-Host ('  ' + (Split-Path -Leaf $job.jobDir) + '  ' + $message) -ForegroundColor Yellow
                                 }
-                                Start-ExportPhase $job
-                                Save-Queue $q
-                            } else {
-                                $job.status = 'failed'
-                                Set-JobProp $job 'exitcode' $why
+                                Set-JobProp $job 'cancelMessage' $message
                             }
                         }
                         elseif (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported')) {
-                            # 留给下一拍走"已导出"分支
-                        } elseif (Test-Path -LiteralPath (Join-Path $job.jobDir 'killed')) {
-                            $job.status = 'killed'
-                        } else {
-                            $job.status = 'failed'
-                            $code = '?'
-                            $ef = Join-Path $job.jobDir 'exit'
-                            if (Test-Path -LiteralPath $ef) {
-                                try { $code = ([string](Get-Content -LiteralPath $ef -Raw)).Trim() } catch { }
-                            } elseif (-not (Test-Path -LiteralPath (Join-Path $job.jobDir 'started'))) {
-                                $code = 'no-start'
+                            $job.status = 'done'
+                            if (-not (Test-Path -LiteralPath (Join-Path $job.jobDir 'counted'))) {
+                                [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'counted'), '', (New-Object System.Text.UTF8Encoding($false)))
+                                Add-Stat 'exported' 1
                             }
-                            Set-JobProp $job 'exitcode' $code
+                            if ($job.started) {
+                                try {
+                                    $dur = [int](((Get-Date) - [datetime]::Parse([string]$job.started)).TotalSeconds)
+                                    if ($dur -ge 1) { Set-JobProp $job 'duration' $dur }
+                                } catch { }
+                            }
+                            $note = Clear-JobLock $job
+                            if (-not $panels -and $note -eq '已清除') { Clear-LiveBox; Write-Host ("`n  已释放锁: " + $job.model) -ForegroundColor DarkGray }
+                        }
+                        elseif (-not (Test-JobAlive $job.pid $job.jobDir $job.workerStartUtc)) {
+                            # 进程刚退出时文件可能还在落盘，等一拍再判
+                            Start-Sleep -Milliseconds 400
+                            $phaseNow = Get-JobPhase $job
+                            if ($phaseNow -eq 'solve' -and -not (Test-Path -LiteralPath (Join-Path $job.jobDir 'killed'))) {
+                                $why = Test-SolveOk $job
+                                if ($why -eq '') {
+                                    # 求解成功：写 solved 标记（驱动据此走 resume），接着起导出
+                                    [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'solved'), '', (New-Object System.Text.UTF8Encoding($false)))
+                                    if (-not $panels -and $sessionIds -contains $job.jobDir) {
+                                        Clear-LiveBox
+                                        $durTxt = ''
+                                        $ss = Parse-DateOrNull (Get-JobProp $job 'solveStarted')
+                                        if ($ss) { $durTxt = '  用时 ' + (Format-Elapsed ((Get-Date) - $ss).TotalSeconds) }
+                                        Write-Host ('  [求解完成] ' + (Split-Path -Leaf $job.jobDir) + $durTxt + '，开始导出…') -ForegroundColor Green
+                                    }
+                                    Start-ExportPhase $job
+                                    Save-Queue $q
+                                } else {
+                                    $job.status = 'failed'
+                                    Set-JobProp $job 'exitcode' $why
+                                }
+                            }
+                            elseif (Test-Path -LiteralPath (Join-Path $job.jobDir 'exported')) {
+                                # 留给下一拍走"已导出"分支
+                            } elseif (Test-Path -LiteralPath (Join-Path $job.jobDir 'killed')) {
+                                $job.status = 'killed'
+                            } else {
+                                $job.status = 'failed'
+                                $code = '?'
+                                $ef = Join-Path $job.jobDir 'exit'
+                                if (Test-Path -LiteralPath $ef) {
+                                    try { $code = ([string](Get-Content -LiteralPath $ef -Raw)).Trim() } catch { }
+                                } elseif (-not (Test-Path -LiteralPath (Join-Path $job.jobDir 'started'))) {
+                                    $code = 'no-start'
+                                }
+                                Set-JobProp $job 'exitcode' $code
+                            }
                         }
                     }
                 }
-            }
-            # 续跑时已有进程已占用部分可用内存。最后一个进程退出后，重新核算待办容量。
-            $waiting = @($q | Where-Object { $_.status -eq 'pending' -and $sessionIds -contains $_.jobDir })
-            if ($waiting.Count -and -not @($q | Where-Object { $_.status -eq 'running' }).Count -and
-                -not @($waiting | Where-Object { $_.heapMB -le $budget.pool -and $_.cores -le $budget.cpu }).Count) {
-                $budget = Get-ResourceBudget $waiting.Count
-                foreach ($job in $waiting) {
-                    if ($job.autoHeap -and $job.heapMB -gt $budget.pool) { $job.heapMB = $budget.heapMB }
-                    if ($job.autoCores -and $job.cores -gt $budget.cpu) { $job.cores = $budget.cores }
+                # 续跑时已有进程已占用部分可用内存。最后一个进程退出后，重新核算待办容量。
+                $waiting = @($q | Where-Object { $_.status -eq 'pending' -and $sessionIds -contains $_.jobDir })
+                if ($waiting.Count -and -not @($q | Where-Object { $_.status -eq 'running' }).Count -and
+                    -not @($waiting | Where-Object { $_.heapMB -le $budget.pool -and $_.cores -le $budget.cpu }).Count) {
+                    $budget = Get-ResourceBudget $waiting.Count
+                    foreach ($job in $waiting) {
+                        if ($job.autoHeap -and $job.heapMB -gt $budget.pool) { $job.heapMB = $budget.heapMB }
+                        if ($job.autoCores -and $job.cores -gt $budget.cpu) { $job.cores = $budget.cores }
+                    }
+                    Save-Queue $q
+                    if (-not @($waiting | Where-Object { $_.heapMB -le $budget.pool -and $_.cores -le $budget.cpu }).Count) {
+                        throw '当前可用资源不足以启动剩余作业。队列已保存，资源释放后可用 -Resume 接续。'
+                    }
+                }
+                # 每个模型用独立后台进程。逐个登记 PID，无需等前一个作业结束。
+                foreach ($job in $q) {
+                    if ($job.status -eq 'pending' -and $sessionIds -contains $job.jobDir) {
+                        $occupied = @($q | Where-Object { $_.status -eq 'running' })
+                        $reservedCpu = ($occupied | Measure-Object -Property cores -Sum).Sum
+                        $reservedHeap = ($occupied | Measure-Object -Property heapMB -Sum).Sum
+                        # 已占用的内存在第二个窗口启动时已从可用内存中扣除。沿用首个活动作业的总池，
+                        # 同时检查本窗口的可用额度，避免对同一份内存扣两次。
+                        $pool = Get-MemoryPool $occupied $budget.pool
+                        if ([int64]$reservedCpu + $job.cores -gt $budget.cpu -or $job.heapMB -gt $budget.pool -or
+                            [int64]$reservedHeap + $job.heapMB -gt $pool) { continue }
+                        Set-JobProp $job 'memoryPoolMB' $pool
+                        Start-OneJob $job
+                        Save-Queue $q
+                    }
                 }
                 Save-Queue $q
-                if (-not @($waiting | Where-Object { $_.heapMB -le $budget.pool -and $_.cores -le $budget.cpu }).Count) {
-                    throw '当前可用资源不足以启动剩余作业。队列已保存，资源释放后可用 -Resume 接续。'
-                }
-            }
-            # 每个模型用独立后台进程。逐个登记 PID，无需等前一个作业结束。
-            foreach ($job in $q) {
-                if ($job.status -eq 'pending' -and $sessionIds -contains $job.jobDir) {
-                    $occupied = @($q | Where-Object { $_.status -eq 'running' })
-                    $reservedCpu = ($occupied | Measure-Object -Property cores -Sum).Sum
-                    $reservedHeap = ($occupied | Measure-Object -Property heapMB -Sum).Sum
-                    if ([int64]$reservedCpu + $job.cores -gt $budget.cpu -or [int64]$reservedHeap + $job.heapMB -gt $budget.pool) { continue }
-                    Start-OneJob $job
-                    Save-Queue $q
-                }
-            }
-            Save-Queue $q
+            } finally { $transaction.Dispose() }
 
             $running = @($q | Where-Object { $_.status -eq 'running' })
             $open = @($q | Where-Object { $sessionIds -contains $_.jobDir -and $_.status -in @('pending','running') })
@@ -2612,7 +2706,6 @@ function Invoke-Scheduler($submitted, $budget) {
             ('本次作业 ' + $mine.Count + ' 个（完成 ' + $okN + ' 个）'),
             ('历史累计导出 ' + $stats.exported + ' 个')
         ) 'DarkCyan'
-        Save-Queue $q
         try { $Host.UI.RawUI.WindowTitle = 'COMSOL 导出 CLI' } catch { }
         if (-not $quitMonitor) {
             if (@($mine | Where-Object { $_.status -eq 'failed' -and $_.phase -eq 'solve' }).Count) { $script:CliExit = 3 }
@@ -2652,7 +2745,7 @@ if (-not $KillJob) {
     }
 
     Write-Host ('  正在检查 COMSOL 导出驱动 ' + $comsolRoot) -ForegroundColor DarkGray
-    Assert-DriverRuntime $javaExe ((Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir)
+    Confirm-InstalledDriver $javaExe $comsolRoot $driverDir
 }
 
 $doSolve = $Mode -ne 'export'
@@ -2803,14 +2896,16 @@ if (-not ($Resume -or $KillJob -or $Diag)) {
 
 [IO.Directory]::CreateDirectory($StateDir) | Out-Null
 
-# 队列只有一个写者。独占写句柄随 CLI 进程退出自动释放。
+# 新窗口共享只读句柄。旧版独占写者与该句柄互斥；短时写锁另管队列事务。
 $instFile = Join-Path $StateDir 'cli.lock'
 $guard = $null
 try {
-    $guard = [IO.File]::Open($instFile, 'OpenOrCreate', 'ReadWrite', 'Read')
+    if ($Diag) { $guard = [IO.File]::Open($instFile, 'OpenOrCreate', 'ReadWrite', 'Read') }
+    elseif (-not $DryRun) { $guard = [IO.File]::Open($instFile, 'OpenOrCreate', 'Read', 'Read') }
 } catch [IO.IOException] {
     if (($_.Exception.GetBaseException().HResult -band 0xffff) -notin @(32, 33)) { throw }
-    if (-not $KillJob) { Write-Host '  已有 CLI 正在管理队列。'; exit 0 }
+    if ($Diag) { throw '队列正在使用。诊断会重放作业，请先结束当前调度或诊断。' }
+    if (-not $KillJob) { throw '旧版 CLI 或诊断窗口正在独占队列，退出该窗口后可用本版续跑。' }
 }
 try {
 if ($guard) {
@@ -2820,11 +2915,6 @@ if ($guard) {
     if ($old -match '^\d+$' -and (Get-Process -Id ([int]$old) -ErrorAction SilentlyContinue)) {
         throw '旧版 CLI 正在管理队列，请先从旧窗口退出监视。'
     }
-    $guard.Position = 0
-    $guard.SetLength(0)
-    $bytes = [Text.Encoding]::ASCII.GetBytes("owner=$PID")
-    $guard.Write($bytes, 0, $bytes.Length)
-    $guard.Flush()
 }
 
 $script:HandoffStates = @{}
@@ -2833,35 +2923,38 @@ foreach ($prior in @(Get-Queue)) {
         [IO.File]::Exists((Join-Path $prior.jobDir 'handoff'))) { $script:HandoffStates[$prior.jobDir] = $prior.status }
 }
 if ($KillJob) {
-    $q = @(Get-Queue)
-    if ($KillJob -match '^\d+$') {
-        $index = [int]$KillJob
-        if ($index -lt 1 -or $index -gt $q.Count) { throw '队列历史序号超出范围' }
-        $target = $q[$index-1]
-    } else {
-        $matchesById = @($q | Where-Object { (Split-Path -Leaf $_.jobDir) -eq $KillJob })
-        if ($matchesById.Count -ne 1) { throw ('作业 ID 不存在或不唯一：' + $KillJob) }
-        $target = $matchesById[0]
-    }
-    Write-Host ('  目标: ' + (Split-Path -Leaf $target.jobDir) + '   PID ' + $target.pid) -ForegroundColor Yellow
-    if ($target.status -ne 'running' -or (Test-Path -LiteralPath (Join-Path $target.jobDir 'exported'))) {
-        Write-Host '  目标当前没有可终止的计算。'; exit 0
-    }
-    if ($guard) {
-        $msg = Stop-OneJob $target
-        Save-Queue $q
-        Write-Host ('  ' + $msg)
-    } else {
-        [IO.File]::WriteAllText((Join-Path $target.jobDir 'killed'), (Get-Date).ToString('o'))
-        Write-Host '  已请求终止。'
-        # 调度器可能停在菜单或刚退出。即便如此也能停止后台作业，队列仍只由持锁者写入。
-        Start-Sleep -Seconds 1
-        $latest = @(Get-Queue | Where-Object { $_.jobDir -eq $target.jobDir -and $_.status -eq 'running' })
-        if ($latest.Count -eq 1 -and -not (Test-Path -LiteralPath (Join-Path $target.jobDir 'exported'))) {
-            Write-Host ('  ' + (Stop-OneJob $latest[0]))
+    $transaction = if ($guard) { Enter-StateWrite }
+    try {
+        $q = @(Get-Queue)
+        if ($KillJob -match '^\d+$') {
+            $index = [int]$KillJob
+            if ($index -lt 1 -or $index -gt $q.Count) { throw '队列历史序号超出范围' }
+            $target = $q[$index-1]
+        } else {
+            $matchesById = @($q | Where-Object { (Split-Path -Leaf $_.jobDir) -eq $KillJob })
+            if ($matchesById.Count -ne 1) { throw ('作业 ID 不存在或不唯一：' + $KillJob) }
+            $target = $matchesById[0]
         }
-    }
-    exit 0
+        Write-Host ('  目标: ' + (Split-Path -Leaf $target.jobDir) + '   PID ' + $target.pid) -ForegroundColor Yellow
+        if ($target.status -ne 'running' -or (Test-Path -LiteralPath (Join-Path $target.jobDir 'exported'))) {
+            Write-Host '  目标当前没有可终止的计算。'; exit 0
+        }
+        if ($guard) {
+            $msg = Stop-OneJob $target
+            Save-Queue $q
+            Write-Host ('  ' + $msg)
+        } else {
+            [IO.File]::WriteAllText((Join-Path $target.jobDir 'killed'), (Get-Date).ToString('o'))
+            Write-Host '  已请求终止。'
+            # 调度器可能停在菜单或刚退出。即便如此也能停止后台作业，队列仍只由持锁者写入。
+            Start-Sleep -Seconds 1
+            $latest = @(Get-Queue | Where-Object { $_.jobDir -eq $target.jobDir -and $_.status -eq 'running' })
+            if ($latest.Count -eq 1 -and -not (Test-Path -LiteralPath (Join-Path $target.jobDir 'exported'))) {
+                Write-Host ('  ' + (Stop-OneJob $latest[0]))
+            }
+        }
+        exit 0
+    } finally { if ($transaction) { $transaction.Dispose() } }
 }
 
 if ($Diag) {
@@ -2893,7 +2986,8 @@ if ($Resume) {
 
 # 模型同名或配方生成相同 outname 时，解文件和导出文件会共用路径。
 $usedOutputs = @{}
-foreach ($existing in @(Get-Queue)) {
+$priorJobs = @(Get-Queue)
+foreach ($existing in $priorJobs) {
     if ($existing.status -in @('pending','running')) { $usedOutputs[[string]$existing.id] = $true }
 }
 foreach ($m in $ModelList) {
@@ -2908,14 +3002,13 @@ $batchKey = (Get-Date -Format 'yyyyMMddHHmmss') + '_' + [guid]::NewGuid().ToStri
 $outRoot = Join-Path $Root 'output'
 $batchDir = if ($ModelList.Count -gt 1) { Join-Path $outRoot ('batch_' + $batchKey) }
             else { Join-Path (Join-Path $outRoot $ModelList[0].BaseName) $batchKey }
-$budget = Get-ResourceBudget $ModelList.Count
+$budget = Get-ResourceBudget $ModelList.Count $priorJobs
 Write-Host ('  资源预算：最多同时 {0} 个，每作业 {1} 核、Java 堆 {2} MiB' -f $budget.slots,$budget.cores,$budget.heapMB)
 $jobs = @()
 $jobSpecs = @{}
 foreach ($m in $ModelList) {
     $n = Format-JobName $cfg.NameTemplate @{ task = [string]$cfg.Task; model = $m.BaseName; stamp = $Stamp }
-    $jobDir = Join-Path $JobsDir ($Stamp + '_' + $m.BaseName)
-    if (Test-Path -LiteralPath $jobDir) { $jobDir += '_' + [guid]::NewGuid().ToString('N').Substring(0, 8) }
+    $jobDir = Join-Path $JobsDir ($batchKey + '_' + $m.BaseName)
     $outDir = Join-Path $Root 'output'
 
     $resultDir = if ($ModelList.Count -gt 1) { Join-Path $batchDir (Split-Path -Leaf $jobDir) } else { $batchDir }
@@ -2955,7 +3048,7 @@ foreach ($m in $ModelList) {
     $jobSpecs[$jobDir] = $spec
 
     $jobs += [pscustomobject]@{
-        id = $n; model = $m.FullName; recipe = $r.Name
+        id = $n; model = $m.FullName; recipe = $r.Name; comsolBatch = $comsolBatch; driverDir = $driverDir
         pid = 0; jobDir = $jobDir; outDir = $outDir; resultDir = $resultDir; batchDir = $batchDir
         cores = $budget.cores; heapMB = $budget.heapMB
         autoHeap = -not ($Heap -or $env:COMSOL_EXPORT_XMX); autoCores = -not $Cores
@@ -2979,12 +3072,21 @@ if (-not $ans) {
     exit 0
 }
 
-foreach ($j in $jobs) {
-    [IO.Directory]::CreateDirectory($j.jobDir) | Out-Null
-    [IO.File]::WriteAllLines((Join-Path $j.jobDir 'job.properties'), $jobSpecs[$j.jobDir], [Text.UTF8Encoding]::new($false))
-}
-$queue = @(Get-Queue)
-Save-Queue (@($queue) + @($jobs))
+$transaction = Enter-StateWrite
+try {
+    $queue = @(Get-Queue)
+    foreach ($existing in $queue) {
+        if ($existing.status -in @('pending','running') -and $jobs.id -contains $existing.id) {
+            throw ('另一个窗口已提交相同输出名称：' + $existing.id)
+        }
+    }
+    foreach ($j in $jobs) {
+        if ([IO.Directory]::Exists($j.jobDir)) { throw ('作业目录已存在 ' + $j.jobDir) }
+        [IO.Directory]::CreateDirectory($j.jobDir) | Out-Null
+        [IO.File]::WriteAllLines((Join-Path $j.jobDir 'job.properties'), $jobSpecs[$j.jobDir], [Text.UTF8Encoding]::new($false))
+    }
+    Save-Queue (@($queue) + @($jobs))
+} finally { $transaction.Dispose() }
 Write-Host ''
 Invoke-Scheduler @($jobs | ForEach-Object { $_.jobDir }) $budget
 

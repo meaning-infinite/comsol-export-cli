@@ -93,6 +93,29 @@ public class Probe {
     }
     if ([IO.File]::Exists((Join-Path $state 'queue.json'))) { throw 'Startup checks enqueued a job.' }
     Write-Output 'PASS missing installation and incompatible driver both fail before the first job menu'
+
+    & {
+        $definition = $ast.Find({param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Confirm-InstalledDriver'
+        }, $false)
+        . ([scriptblock]::Create($definition.Extent.Text))
+        $calls = [Collections.Generic.List[string]]::new()
+        function Assert-DriverRuntime($javaPath, $classPath) {
+            $calls.Add($classPath)
+            if ($simulateMissing -and -not $classPath.Contains('*')) { throw 'NoClassDefFoundError: dependency' }
+        }
+        $pluginDir = Join-Path $install 'plugins'
+        [void][IO.Directory]::CreateDirectory($pluginDir)
+        [IO.File]::WriteAllText((Join-Path $pluginDir 'com.comsol.api_1.0.0.jar'),'fixture')
+        $simulateMissing = $false
+        Confirm-InstalledDriver $exe $install $repo
+        if ($calls.Count -ne 1 -or $calls[0].Contains('*') -or $calls[0] -notmatch 'com\.comsol\.api_') { throw 'Slow wildcard preflight' }
+        $simulateMissing = $true
+        $calls.Clear()
+        Confirm-InstalledDriver $exe $install $repo
+        if ($calls.Count -ne 2 -or -not $calls[1].Contains('*')) { throw 'Missing alternate-layout fallback' }
+    }
+    Write-Output 'PASS standard preflight uses API jars and alternate dependencies fall back to all plugins'
 } finally {
     $env:PSModulePath = $previousModules
     $env:LOCALAPPDATA = $previousLocal

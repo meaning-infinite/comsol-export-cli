@@ -3,7 +3,7 @@
 <p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
 <p align="center">
-  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.9.4-2AA0B0"></a>
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.10.0-2AA0B0"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
   <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
   <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.1~6.4-368CCB">
@@ -30,7 +30,7 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 2. 双击 `run.bat`，等待 COMSOL 安装和驱动检查通过，再依次选择模式、模型和配方
 3. 结束后从 `output/` 取结果
 
-适配 Windows PowerShell 5.1 和 COMSOL 6.1–6.4。6.2、6.4 已在本机从正式入口导出已有解。6.1、6.3 已核对公共 API，仍待对应安装实测。模型文件须与所选 COMSOL 版本兼容。启动时优先检查已保存的安装路径。首次使用或原路径失效时会查找本机安装，找到多个版本时先让你选择。导出驱动预检会显示当前路径，最多等待 60 秒。
+适配 Windows PowerShell 5.1 和 COMSOL 6.1–6.4。6.2、6.4 已在本机从正式入口导出已有解。6.1、6.3 已核对公共 API，仍待对应安装实测。模型文件须与所选 COMSOL 版本兼容。启动时优先检查已保存的安装路径。首次使用或原路径失效时会查找本机安装，找到多个版本时先让你选择。模式菜单前会用所选安装的 Java 实测驱动接口。标准安装只加载预检所需的 API 库。
 
 ## 命令行
 
@@ -47,7 +47,11 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 | `run.bat -Heap 8g` | 每作业 Java 堆上限 |
 | `run.bat -Modules` | 列出预制模块与可覆盖参数 |
 
-多选后按逻辑核数和可用物理内存的 70% 分配预算，资源足够即并行，其余排队。每个模型有独立状态框。K 终止所选作业，Q 退出监视，`-Resume` 接回后台作业。波长域和频域求解按最近两分钟的进度估时。特征频率求解显示阶段和已用时间，日志提供时显示迭代与已收敛特征值数。导出显示当前块计数、各块合计进度和剩余时间估算。
+可以多次打开 `run.bat`，每个窗口选自己的模型。所有窗口共用一份队列和核数、内存预算。资源足够时，单模型默认最多分到一半逻辑核和一半 Java 堆预算，留出第二个作业的空间。需要更多作业同时运行时，可用 `-Cores` 和 `-Heap` 指定每个作业的份额。资源不足的作业自动排队。`-Mode watch` 可查看活动作业，`-Resume` 可接回后台作业。
+
+波长域、频域求解和导出在进度变化较快时用近期速度估时，变化慢时用当前阶段的累计完成量和耗时。重开窗口也能用已记录的阶段起点估时。特征频率求解仍显示阶段、已用时间及日志提供的迭代信息。
+
+**GPU 求解**　CLI 使用模型中启用的求解器，沿用运行账户和 COMSOL 版本的默认首选项。6.4 电磁频域或特征频率模型需要在实际使用的直接线性求解器中选择 **NVIDIA cuDSS**，才能用 GPU 加速该步。图形渲染加速只作用于显示。运行时可在作业目录核对 `launch-solve.txt` 的命令和 `solve.log` 的求解器信息。[COMSOL 批处理说明](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_running.38.31.html) · [GPU 求解器说明](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_solver.36.173.html)
 
 ## 配方
 
@@ -108,7 +112,7 @@ set COMSOL=D:\COMSOL\COMSOL62\Multiphysics
 
 脚本与模块文件须存为 UTF-8 带 BOM，否则 PowerShell 5.1 按 GBK 解码导致整份脚本无法解析。发布驱动使用 Java 11 类文件格式。
 
-队列和离线回归分别运行 `tests/queue.ps1`、`tests/package.ps1`，均使用独立临时目录。
+`tests/menu.ps1` 检查启动，`tests/queue.ps1` 检查队列和估时，`tests/concurrent.ps1` 用模拟求解器验证多窗口并发与续跑，`tests/package.ps1` 验证离线更新。这些测试使用独立临时目录。
 
 ## 文档
 

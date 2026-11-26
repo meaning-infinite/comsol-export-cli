@@ -1,6 +1,6 @@
 ﻿# COMSOL 导出 CLI · API 文档
 
-> 最后更新：2026-11-26 · 对应 v1.9.4 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
+> 最后更新：2026-11-26 · 对应 v1.10.0 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
 > 接口与内部约定的参考手册，随版本持续更新。使用说明见 [README.md](../README.md)，配方写法见 [recipes/README.md](../recipes/README.md)。
 
 ## 1. 分层与调用链
@@ -54,7 +54,7 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 
 ### 2.3 交互键
 
-交互启动时，CLI 先确定 COMSOL 安装，再用该安装的 Java 检查导出驱动。通过后才显示模式菜单。选择求解或导出模式后，直接显示模型列表，再选配方。预检超过 60 秒会结束并显示 Java 路径。`-Resume` 和 `-Diag` 也先预检。`-Mode watch` 与 `-KillJob` 直接操作已有队列。
+交互启动时，CLI 先确定 COMSOL 安装，再用该安装的 Java 检查导出驱动。标准安装的预检类路径仅包含驱动、COMSOL API 及 util 库。其他布局或缺少传递依赖时回退到完整插件路径。检查通过后显示模式菜单。选择求解或导出模式后，直接显示模型列表，再选配方。预检超过 60 秒会结束并显示 Java 路径。`-Resume` 和 `-Diag` 也先预检。`-Mode watch` 与 `-KillJob` 直接操作已有队列。
 
 | 键 | 场景 | 行为 |
 |---|---|---|
@@ -294,13 +294,13 @@ static void exportFoo(Job j, int i) throws Exception {
 | `model` | 模型绝对路径 |
 | `recipe` | 配方名 |
 | `pid` | 驱动进程号，0 = 未启动 |
-| `jobDir` | 作业目录 `script\logs\<stamp>_<model>` |
+| `jobDir` | 作业目录 `script\logs\<时间戳>_<批次随机标识>_<模型>` |
 | `outDir` | 输出目录 |
 | `created` / `started` | ISO 时间 |
 | `status` | `pending` `running` `done` `failed` `killed` `disconnected` |
 | `duration` | 用时（秒），用于估算 |
 
-新记录还保存 resultDir、batchDir、cores、heapMB、workerStartUtc。状态变更先刷新临时文件至磁盘，再替换主文件并保留 .bak。主文件损坏时读最近的完整备份。两份都不可读时停止，只读监视不会触发修复。单一写者负责状态迁移。
+新记录还保存 resultDir、batchDir、cores、heapMB、memoryPoolMB、workerStartUtc、comsolBatch 和 driverDir，用于资源核算及按提交时的安装衔接导出。状态变更先刷新临时文件至磁盘，再替换主文件并保留 .bak。主文件损坏时读最近的完整备份。两份都不可读时停止，只读监视不会触发修复。同一 Windows 账户下的窗口共享队列。提交、资源预留、启动工作进程、登记 PID 及状态交接由 `queue.write.lock` 串行保护。窗口在显示进度和等待期间释放写锁。`cli.lock` 允许新版调度窗口共享读取，兼容旧版独占写者。新窗口显示自己提交的作业，续跑窗口可接管已有作业。
 
 ### 6.2 标记文件
 
@@ -320,27 +320,29 @@ static void exportFoo(Job j, int i) throws Exception {
 
 求解与导出拆成两个进程，CLI 负责交接：
 
-1. **求解阶段**：`comsolbatch.exe -inputfile <原模型> -outputfile <solvedfile> -batchlog <jobDir>\solve.log -batchlogout -alivetime 5`（配方给了 `Study` 就加 `-study`，`-Cores` 给了就加 `-np`）。
+1. **求解阶段**：`comsolbatch.exe -inputfile <原模型> -outputfile <solvedfile> -batchlog <jobDir>\solve.log -batchlogout -alivetime 5`（配方给了 `Study` 就加 `-study`，`-np` 取本作业分配的核数）。
    - 不弹 COMSOL 窗口，headless；**不在原模型旁留 `.lock`**（实测只有它自己的输出模型会被写）。
    - 成功后 CLI 写 `solved` 标记，立刻起导出阶段，不需要人工干预。
 2. **导出阶段**：直接导出用 solve=0，求解后按 solved 标记读取 solvedfile，流程为打开 → 清点解 → 分块导出。
 
 作业目录里的 `phase` 文件记录当前在 `solve` 还是 `export`，重启 CLI 后据此续跑。
 
+**GPU 与首选项**　`comsolbatch.exe` 按所选研究和模型中启用的求解器执行。CLI 传入核数，GPU 设备选择、精度和首选项目录交由 COMSOL 处理。同一 Windows 账户、同版本、默认首选项目录时，批处理沿用该账户已保存的 GPU 库设置。GUI 使用自定义 `-prefsdir` 或不同账户时需要核对目录。6.4 的 NVIDIA cuDSS 可加速稀疏线性方程求解，PARDISO 和 MUMPS 使用 CPU。6.3 起的部分时域显式声学求解也支持 GPU。公共电脑可在运行中的作业目录查看 `launch-solve.txt` 和 `solve.log`，并通过 `nvidia-smi` 核对对应 COMSOL 进程的显存使用。[Windows 批处理](https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_running.38.31.html) · [6.4 GPU 支持范围](https://www.comsol.com/release/6.4/gpu-acceleration) · [6.3 求解器说明](https://doc.comsol.com/6.3/doc/com.comsol.help.comsol/comsol_release_text.06.011.html)
+
 ### 6.5 进度显示（v1.7 起）
 
 | 阶段 | 来源 | 口径 |
 |---|---|---|
-| 波长域、频域求解 | 所选研究启用的步骤与 `solve.log` | 显示 COMSOL 日志进度，按近期变化估时 |
+| 波长域、频域求解 | 所选研究启用的步骤与 `solve.log` | 显示 COMSOL 日志进度，优先用近期速度，慢任务用阶段累计速度估时 |
 | 含特征频率或特征值步骤的求解 | 当前阶段、已用时间，日志可选的 Iter、Nconv | 显示最近一次迭代及该次已收敛的特征值数。研究类型无法确认时也只显示阶段，不推算求解百分比或 ETA |
 | 导出 | `jobDir\progress.txt`（驱动写 done / total / block / blocks / unit / label） | 当前块按解或图片计数，显示导出总进度 |
 
 - **总时长**到秒（从作业启动算起，定态显示，数字在走就说明进程还活着）；**剩余时间**到分钟。不再单独显示阶段用时，也不再给「完成时刻」（`21:08` 那种），一行只放一个时间。
-- 每个作业按最近 120 秒的进度增量估算剩余时间，每 5 秒留一个样本。波长域、频域求解按日志百分比，导出按已完成块数加当前块完成比例，各块等权。观测不足 10 秒或窗口内没有增量时显示“未知”。切换阶段或计数回退时重新采样。
+- 每个作业独立估时。最近 120 秒内有至少 3 个不同进度样本时优先按近期速度估算，增长样本至少相隔 5 秒。进度稀疏或重开窗口时，按本阶段累计完成量与耗时估算。两种口径均需至少 10 秒和正增量。例如阶段已用 20 分钟、完成 4%，累计速度对应约 8 小时剩余。阶段切换、计数回退或总量变化后重新取基线。导出保留块内小数进度，各块等权。
 - 阶段名由日志里的短语归类：准备 / 网格与建模 / 编译 / 建立求解器 / 组装矩阵 / 矩阵分解 / 解方程 / 收尾。
 - 输出被重定向（日志、管道）时自动降级为「阶段变化才打一行」，不会刷屏。
 
-每作业独立进程。调度器按可用物理内存的 70% 和逻辑核数划分预算，自动规划以每槽 4 GiB 为参考。Java 堆和 COMSOL 本机内存分别分配，因此堆预算不能限制全部进程的实际占用。watch 只读，Resume 接回后台进程并按资源启动待办。每个模型有一个固定位置的状态框，阶段、进度、完成、失败和终止均原地更新。小窗口优先压缩为三行一框，仍放不下时可用 PgUp/PgDn 翻页。单作业保留三套样式（`-ProgressStyle`）。
+每作业独立进程。调度器按可用物理内存的 70% 和逻辑核数划分预算，自动规划以每槽 4 GiB 为参考。资源足够时，即使只提交一个模型也按至少两个作业分摊默认核数和堆预算。后开的窗口沿用首个活动作业记录的总预算，按当前可用内存决定能否启动。显式核数或堆上限按请求预留。Java 堆和 COMSOL 本机内存分别分配，因此堆预算不能限制全部进程的实际占用。watch 只读，Resume 接回后台进程并按资源启动待办。每个模型有一个固定位置的状态框，阶段、进度、完成、失败和终止均原地更新。小窗口优先压缩为三行一框，仍放不下时可用 PgUp/PgDn 翻页。单作业保留三套样式（`-ProgressStyle`）。
 
 | 样式 | 形态 | 适合 |
 |---|---|---|
@@ -373,6 +375,7 @@ static void exportFoo(Job j, int i) throws Exception {
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.10.0 | 2026-11-26 | 启动驱动预检只加载必要库。多窗口共享队列和资源预算，可并行求解、独立取消及续跑。慢进度与重开窗口使用阶段累计估时。补充 GPU 批处理口径。 |
 | v1.9.4 | 2026-11-26 | 阶段序号与名称之间使用中文冒号。 |
 | v1.9.3 | 2026-11-26 | 移除启动前逐模型打印的 [作业] 行，进度框中的阶段序号置于名称前。 |
 | v1.9.2 | 2026-11-25 | 交互启动在模式菜单前完成 COMSOL 安装和驱动预检。安装或驱动有误时立即报告，通过后直接选择模式、模型和配方。 |
