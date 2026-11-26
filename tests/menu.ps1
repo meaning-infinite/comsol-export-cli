@@ -70,6 +70,7 @@ public class Probe {
     $env:PSModulePath = $sandbox
     $output = ('2','1','1' | & $launcher -DryRun) -join [Environment]::NewLine
     if ($LASTEXITCODE -ne 0) { throw "Preview failed: $output" }
+    if ($output.Contains('[作业]')) { throw 'Preview printed a redundant per-job line.' }
     $offset = 0
     foreach ($label in @('正在检查 COMSOL 安装', '正在检查 COMSOL 导出驱动', '选择模式', '选择模型', $modelName, '选择配方', '预览：共 1 个作业')) {
         $pos = $output.IndexOf($label, $offset, [StringComparison]::Ordinal)

@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.9.2'
+$script:CliVersion = 'v1.9.3'
 $script:CliExit = 0
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
@@ -1753,7 +1753,7 @@ function Format-Eta($sec) {
 }
 
 function Get-PhaseTag($info) {
-    if ($info.PhaseAll -gt 1) { return ($info.PhaseLabel + ' ' + $info.PhaseNo + '/' + $info.PhaseAll) }
+    if ($info.PhaseAll -gt 1) { return ('{0}/{1} {2}' -f $info.PhaseNo, $info.PhaseAll, $info.PhaseLabel) }
     return $info.PhaseLabel
 }
 
@@ -1849,7 +1849,7 @@ function Show-BatchProgress($jobs) {
             $info = Get-ProgressInfo $job
             if ($textMode) { Write-JobProgressLog $job $info; continue }
             $status = (Get-PhaseTag $info) + '  ' + (Get-PctText $info) + ' · ' + (Format-TimeLine $info)
-            if ($info.StageOnly) { $status = $info.PhaseLabel + ' · 已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info) }
+            if ($info.StageOnly) { $status = (Get-PhaseTag $info) + ' · 已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info) }
             $detail = $info.Detail
             if ($job.cancelMessage) { $status = $job.cancelMessage; $color = 'Yellow' }
         } else {
@@ -1892,8 +1892,8 @@ function Show-ProgressJob($job, $ord, $total) {
     if ($script:IsRedirected) { Write-JobProgressLog $job $info; return }
     if ($info.StageOnly) {
         $time = '已用 ' + (Format-Elapsed $info.TotalElapsed) + ' · ' + (Format-TimeLine $info)
-        if ($style -eq '1') { Show-StatusLine ($info.PhaseLabel + ' · ' + $time + ' · ' + $info.Detail) $info.Fg $info.Bg }
-        else { Show-LiveBox ($info.PhaseLabel + ' · ' + $nm) @($info.Detail, $time, 'Q 退出监视   K 终止作业') $info.Bg }
+        if ($style -eq '1') { Show-StatusLine ((Get-PhaseTag $info) + ' · ' + $time + ' · ' + $info.Detail) $info.Fg $info.Bg }
+        else { Show-LiveBox ((Get-PhaseTag $info) + ' · ' + $nm) @($info.Detail, $time, 'Q 退出监视   K 终止作业') $info.Bg }
         return
     }
     if ($style -eq '1') { Render-Progress1 $info $nm $ord $total }
@@ -2954,9 +2954,6 @@ foreach ($m in $ModelList) {
     }
     $jobSpecs[$jobDir] = $spec
 
-    $tag = ''
-    if (-not $doSolve) { $tag = '（只导出）' }
-    Write-Host ('  [作业]' + $tag + ' ' + $m.Name + '  ID ' + (Split-Path -Leaf $jobDir))
     $jobs += [pscustomobject]@{
         id = $n; model = $m.FullName; recipe = $r.Name
         pid = 0; jobDir = $jobDir; outDir = $outDir; resultDir = $resultDir; batchDir = $batchDir
