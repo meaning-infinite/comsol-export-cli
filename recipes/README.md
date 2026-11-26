@@ -8,7 +8,7 @@
 @{
     Task         = '任务名'          # 只用于命名
     Study        = 'std1'            # 要跑的研究标签（GUI 里研究节点右键可看到）
-    NameTemplate = '{task}_{model}_{stamp}'
+    NameTemplate = '{model}'
     Export = @( <块1>, <块2>, ... )
 }
 ```
@@ -20,7 +20,7 @@
 ```powershell
 @{
     Task = 'ITO-LN-ITO'; Study = 'std1'
-    NameTemplate = '{task}_{model}_{stamp}'
+    NameTemplate = '{model}'
     Use = @(
         @{ Module = 'spectrum'; Name = 'spectrum' }
         @{ Module = 'slice2d';  Name = 'field'; Planes = @('xy','zx','yz') }
@@ -38,7 +38,7 @@
 Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 ```
 
-`NameTemplate` 里的占位符：`{task}` 配方 Task、`{model}` 模型文件名、`{stamp}` 时间戳 yyyyMMddHHmm。
+`NameTemplate` 里的占位符：`{task}` 配方 Task、`{model}` 模型文件名、`{stamp}` 时间戳 yyyyMMddHHmm，仅在配方主动写入该占位符时加入文件名。
 一个作业有多个导出块时，文件名是 `<outname>_<块 Name>`。
 
 ## 解范围与取数预算
@@ -46,12 +46,12 @@ Export = @( @{ Type='spectrum'; Name='spectrum'; Plot='true' } )
 | 字段 | 默认 | 用途 |
 |---|---|---|
 | `Chunk` | `200` | 每次向 COMSOL 要多少个解。解数上千、内存紧时调小（如 `Chunk = 100`）；机器内存富余可调大 |
-| `Heap`（命令行 `-Heap`） | 全部并发作业共享可用物理内存的 70% | Java 堆。解数据总量 ≈ 解数 × 单解大小（本仓约 8.25MB/解，651 解≈5.4GB），堆不够会取数失败 |
+| `Heap`（命令行 `-Heap`） | JVM 默认值，可用 `-Heap` 或 `COMSOL_EXPORT_XMX` 指定 | Java 堆。解数据总量 ≈ 解数 × 单解大小（本仓约 8.25MB/解，651 解≈5.4GB），堆不够会取数失败 |
 
 ```powershell
 @{
     Task = 'ITO-LN-ITO'; Study = 'std1'
-    NameTemplate = '{task}_{model}_{stamp}'
+    NameTemplate = '{model}'
     Chunk = 100
     Use = @( @{ Module = 'bigtable'; Name = 'bigtable' } )
 }

@@ -66,6 +66,15 @@ public class Probe {
     $config = "@{ Models = '" + $models.Replace("'", "''") + "'; ComsolBatch = '" + $batch.Replace("'", "''") + "' }"
     [IO.File]::WriteAllText((Join-Path $state 'config.psd1'), $config, [Text.Encoding]::UTF8)
     $launcher = Join-Path $repo 'run.bat'
+    # Declining after the recipe also works if queue/history storage is unavailable.
+    $queueFile=Join-Path $state 'queue.json'
+    [IO.File]::WriteAllText($queueFile,'invalid queue fixture')
+    $cancel=('1','2' | & $launcher -Mode export -ModelIndex 1) -join [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0 -or $cancel -notmatch '开始导出' -or $cancel -notmatch '已取消' -or $cancel -match '资源预算' -or
+        [IO.File]::Exists((Join-Path $state 'cli.lock'))) { throw "Unexpected confirmation path: $cancel" }
+    [IO.File]::Delete($queueFile)
+    Write-Output 'PASS selecting a recipe reaches confirmation without reading the queue or acquiring a job lock'
+
     # A parent shell can pass a module path without the Windows PowerShell modules.
     $env:PSModulePath = $sandbox
     $output = ('2','1','1' | & $launcher -DryRun) -join [Environment]::NewLine

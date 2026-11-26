@@ -2,7 +2,7 @@
     # 示例配方：演示全部导出类型。把常用字段抄到自己的配方里即可。
     Task         = '示例-全导出'
     Study        = 'std1'
-    NameTemplate = 'demo_{model}_{stamp}'
+    NameTemplate = 'demo_{model}'
 
     Export = @(
         # ① 表：任意表达式的 CSV，扫描变量自动放最前两列

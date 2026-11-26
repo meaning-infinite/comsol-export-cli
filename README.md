@@ -3,7 +3,7 @@
 <p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
 <p align="center">
-  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.11.0-2AA0B0"></a>
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.12.0-2AA0B0"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
   <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
   <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.1~6.4-368CCB">
@@ -47,7 +47,7 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 | `run.bat -Heap 8g` | 每作业 Java 堆上限 |
 | `run.bat -Modules` | 列出预制模块与可覆盖参数 |
 
-可以多次打开 `run.bat`，每个窗口选自己的模型。所有窗口共用一份队列和核数、内存预算。资源足够时，单模型默认最多分到一半逻辑核和一半 Java 堆预算，留出第二个作业的空间。需要更多作业同时运行时，可用 `-Cores` 和 `-Heap` 指定每个作业的份额。资源不足的作业自动排队。`-Mode watch` 可查看活动作业，`-Resume` 可接回后台作业。
+可以多次打开 `run.bat`，每个窗口选自己的模型。选好配方后直接确认。在 Windows 上，COMSOL 使用首选项指定的核数，未指定时默认使用可用物理核。导出用的 Java 堆由 JVM 管理。需要限制单个作业时，可指定 `-Cores` 或 `-Heap`。所有窗口共用队列，`-Mode watch` 查看活动作业，`-Resume` 接回后台作业。[COMSOL 多核说明](https://www.comsol.com/support/knowledgebase/1096)
 
 波长域、频域求解和导出在进度变化较快时用近期速度估时，变化慢时用当前阶段的累计完成量和耗时。重开窗口也能用已记录的阶段起点估时。特征频率求解仍显示阶段、已用时间及日志提供的迭代信息。
 
@@ -64,7 +64,7 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 ```powershell
 @{
     Task = 'ITO-LN-ITO'; Study = 'std1'
-    NameTemplate = 'ITO-LN-ITO_{model}_{stamp}'
+    NameTemplate = '{model}'
     Use = @(
         @{ Module = 'spectrum'; Name = 'spectrum' }
         @{ Module = 'slice2d';  Name = 'field'; Planes = @('xy','zx','yz') }
@@ -89,13 +89,17 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 
 ```text
 output/
-  <模型名>/<批次ID>/EXPORT_MANIFEST.md
-  batch_<批次ID>/
+  模型A/
+    模型A.csv
     EXPORT_MANIFEST.md
-    <作业ID>/EXPORT_MANIFEST.md
+  模型B/
+    模型B.csv
+    EXPORT_MANIFEST.md
 ```
 
-单模型回传本次目录，多模型回传整个批次目录。作业清单列出实际输入、研究和解节点、配方快照、运行版本、文件、表格行数及缺件。批次清单列出每个作业的状态和交付链接。求解产生的新模型保存在模型目录的 `solved` 子目录，文件名包含批次 ID。
+勾选一个或多个模型时，每个模型各占一个文件夹。CSV、场图、求解记录和 `EXPORT_MANIFEST.md` 都直接放在里面。文件名前缀由配方的 `NameTemplate` 决定，求解后的模型保存为 `models/solved/<输出名>.mph`。
+
+如果已有同名结果，CLI 使用同层的 `模型A (2)`、`模型A (3)` 文件夹，里面的结果文件保留原名。已占用的同名解文件也按此规则另存。旧作业续跑时使用提交时记录的路径。
 
 每行 CSV 保留研究、解节点、节点内序号及全局序号。复现单点场图时，把 `solution_index` 填入 `SolNum`。宽谱吸收使用含全部衍射级的总透射和总反射。
 

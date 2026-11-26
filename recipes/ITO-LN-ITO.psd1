@@ -4,7 +4,7 @@
     #      这里的世界只有模型；参数、波长窗口都在 .mph 里设好。
     Task        = 'ITO-LN-ITO'
     Study       = 'std1'
-    NameTemplate = 'ITO-LN-ITO_{model}_{stamp}'
+    NameTemplate = 'ITO-LN-ITO_{model}'
 
     Export = @(
         @{

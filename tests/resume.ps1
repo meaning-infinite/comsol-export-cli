@@ -10,6 +10,7 @@ $scriptDir = Join-Path $box 'script'
 $models = Join-Path $box 'models'
 $oldLocal = $env:LOCALAPPDATA
 $controllers = @()
+$success = $false
 function Read-Jobs {
     if (-not [IO.File]::Exists($queuePath)) { return }
     $stream = [IO.File]::Open($queuePath,'Open','Read',[IO.FileShare]'ReadWrite, Delete')
@@ -74,9 +75,11 @@ try {
     if (($q.status -join ',') -ne 'done,killed,done' -or $resumed.ExitCode -ne 4) { throw ('unexpected terminal states '+($q.status -join ',')+' '+$trace) }
     if ((Get-FileHash -LiteralPath $launch).Hash -ne $launchHash) { throw 'resumed worker launched twice' }
     foreach ($j in $q) { if (-not [IO.File]::Exists((Join-Path $j.resultDir 'EXPORT_MANIFEST.md'))) { throw 'job manifest missing' } }
-    $manifest=[IO.File]::ReadAllText((Join-Path $active.batchDir 'EXPORT_MANIFEST.md'))
-    if ($manifest -notmatch 'killed' -or ($manifest -split '\| done \|').Count -ne 3) { throw 'batch manifest stale' }
-    Write-Output 'PASS budget queues 3 jobs, closing scheduler leaves worker intact, resume reattaches once, stable ID kills only B, independent C finishes, all handoffs published'
+    foreach ($j in $q) {
+        if ($j.resultDir -ne (Join-Path (Join-Path $box 'output') $j.id)) { throw 'Unexpected nested model directory' }
+    }
+    $success=$true
+    Write-Output 'PASS explicit limits queue 3 jobs, resume reattaches, only B is cancelled, each model has its flat handoff'
 } finally {
     foreach ($p in $controllers) { if (-not $p.HasExited) { $p.Kill(); $p.WaitForExit() }; $p.Dispose() }
     # On a failed assertion keep the evidence and terminate only workers owned by this test queue.
@@ -87,6 +90,6 @@ try {
     }
     $env:LOCALAPPDATA=$oldLocal
     $target=[IO.Path]::GetFullPath($box)
-    if ($manifest -and [IO.Path]::GetDirectoryName($target) -eq $tempRoot.TrimEnd('\') -and
+    if ($success -and [IO.Path]::GetDirectoryName($target) -eq $tempRoot.TrimEnd('\') -and
         [IO.Path]::GetFileName($target) -like 'TEMP_comsol_resume_*') { Remove-Item -LiteralPath $target -Recurse -Force }
 }

@@ -2,7 +2,7 @@
     # 示例：只用预制模块。字段含义见 recipes/README.md，模块清单 `run.bat -Modules`
     Task         = '示例-模块'
     Study        = 'std1'
-    NameTemplate = 'demo_{model}_{stamp}'
+    NameTemplate = 'demo_{model}'
 
     Use = @(
         # ① 数据表：模型参数 + 指定表达式，每个解一行

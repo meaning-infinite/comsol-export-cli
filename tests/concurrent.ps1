@@ -31,6 +31,7 @@ function Start-Controller([string]$options, [switch]$Direct) {
     $si.UseShellExecute = $false
     $si.CreateNoWindow = $true
     $si.EnvironmentVariables['LOCALAPPDATA'] = $local
+    $si.EnvironmentVariables.Remove('COMSOL_EXPORT_XMX')
     $si.RedirectStandardInput = $si.RedirectStandardOutput = $si.RedirectStandardError = $true
     $proc = [Diagnostics.Process]::Start($si)
     $stdout = $proc.StandardOutput.ReadToEndAsync()
@@ -60,7 +61,7 @@ try {
     }
     $recipe = "@{ Task='test'; Study='std1'; NameTemplate='{model}'; Export=@(@{Type='global'; Name='identity'; Expr=@('1'); Cols=@('value')}) }"
     [IO.File]::WriteAllText((Join-Path $scriptDir 'recipes/test.psd1'),$recipe,[Text.Encoding]::UTF8)
-    foreach ($id in 'A','B','C','D') { [IO.File]::WriteAllText((Join-Path $models ($id + '.mph')),'fixture') }
+    foreach ($id in 'A','B','C','D','E','F') { [IO.File]::WriteAllText((Join-Path $models ($id + '.mph')),'fixture') }
 
     $batch = Join-Path $box 'installation/bin/win64/comsolbatch.exe'
     $java = Join-Path $box 'installation/java/win64/jre/bin/java.exe'
@@ -90,6 +91,8 @@ class Worker {
             File.WriteAllText("started","test");
             string dir = File.ReadAllLines("job.properties").First(x => x.StartsWith("resultdir=")).Substring(10);
             Directory.CreateDirectory(dir);
+            string name = File.ReadAllLines("job.properties").First(x => x.StartsWith("outname=")).Substring(8);
+            File.WriteAllText(Path.Combine(dir,name + ".csv"),"fixture");
             File.WriteAllText(Path.Combine(dir,"EXPORT_MANIFEST.md"),"fixture");
             File.WriteAllText("exported","ok");
         }
@@ -99,10 +102,8 @@ class Worker {
 "@
     Add-Type -TypeDefinition $worker -OutputAssembly $java -OutputType ConsoleApplication
     [IO.File]::Copy($java,$batch)
-    $common = '-ComsolPath "'+$batch+'" -Models "'+$models+'" -Recipe test -Mode solve -ModelIndex '
-    $share = ''
-    $free = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory
-    if ($free * 0.7 -lt 8 * 1024 * 1024) { $share = ' -Cores 1 -Heap 64m' }
+    $common = '-ComsolPath "'+$batch+'" -Models "..\models" -Recipe test -Mode solve -ModelIndex '
+    $share = ' -Cores 1 -Heap 64m'
 
     $a = Start-Controller ($common + '1' + $share) -Direct
     $controllers += $a
@@ -163,6 +164,41 @@ class Worker {
         throw 'Nonzero solver exit was accepted as a completed job'
     }
     Write-Output 'PASS native exit 17 persists with no controller and blocks export despite a saved partial result and Done'
+    $plain = Start-Controller ($common + '5,6')
+    $controllers += $plain
+    $je = Wait-State 'E' 'running' $plain
+    $jf = Wait-State 'F' 'running' $plain
+    $output = Join-Path $box 'output'
+    foreach ($j in $je,$jf) {
+        if ($j.resultDir -ne (Join-Path $output $j.id) -or $j.solvedFile -ne (Join-Path $models ('solved\'+$j.id+'.mph'))) {
+            throw 'Unexpected result or solved model name'
+        }
+        if ([IO.File]::ReadAllText((Join-Path $j.jobDir 'launch-solve.txt')) -match '(?:^|\s)-np\s') { throw 'Default solver cores overridden' }
+        [IO.File]::WriteAllText((Join-Path $j.jobDir 'TEMP_finish_solve'),'ok')
+    }
+    Wait-ExitCode $plain 0
+    foreach ($j in $je,$jf) {
+        if ([IO.File]::ReadAllText((Join-Path $j.jobDir 'launch.txt')) -match '-Xmx|-XX:ActiveProcessorCount' -or
+            -not [IO.File]::Exists((Join-Path $j.resultDir 'EXPORT_MANIFEST.md'))) { throw 'Default export limits or handoff incorrect' }
+    }
+    Write-Output 'PASS two default solve/export workers overlap, keep plain names and inherit CPU/heap defaults'
+    $legacyModels=Join-Path $box 'legacy\solved'
+    [void][IO.Directory]::CreateDirectory($legacyModels)
+    $friendly='模型_202611251125'
+    foreach ($tail in '20261126081530_12abcd88','20261126082530_face11aa') {
+        [IO.File]::WriteAllText((Join-Path $legacyModels ($friendly+'_'+$tail+'.mph')),'fixture')
+    }
+    $legacy=Start-Controller ('-ComsolPath "'+$batch+'" -Models "'+$legacyModels+'" -Recipe test -Mode export -ModelIndex a')
+    $controllers+=$legacy
+    Wait-ExitCode $legacy 0
+    $exports=@(Read-Jobs | Where-Object { $_.model.StartsWith($legacyModels) })
+    if ($exports.Count -ne 2) { throw 'Expected two saved models' }
+    foreach ($folder in $friendly,($friendly+' (2)')) {
+        $dest=Join-Path $output $folder
+        if (-not [IO.File]::Exists((Join-Path $dest ($friendly+'.csv'))) -or
+            @(Get-ChildItem -LiteralPath $dest -Directory).Count) { throw 'Legacy IDs or nesting in new output' }
+    }
+    Write-Output 'PASS two legacy solved inputs with the same readable name export without IDs or overwriting each other'
     $success = $true
 } finally {
     # Release any fixture worker on assertion failure without touching other processes.

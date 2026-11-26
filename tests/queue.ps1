@@ -130,9 +130,7 @@ try {
     $job.pid=4242
     $job | Add-Member NoteProperty workerStartUtc $start.ToString('o')
     $script:worker = [pscustomobject]@{Name='java.exe';ProcessId=4242;CreationDate=$start;CommandLine=('java ExportDriver "'+(Join-Path $jobDir 'job.properties')+'"')}
-    $script:testFreeKB = 16777216
     function Get-CimInstance { param($ClassName,$Filter,$ErrorAction)
-        if ($ClassName -eq 'Win32_OperatingSystem') { return @{FreePhysicalMemory=$script:testFreeKB} }
         if ($script:worker) { $script:worker }
     }
     function Test-JobAlive { return $false }
@@ -161,26 +159,43 @@ try {
                 $handoff.exportStarted) 'a second window recovers the export PID if the phase change was not committed'
     }
 
-    $Cores=1; $Heap='5g'
-    $budget=Get-ResourceBudget 9
-    Assert ($budget.slots -le 2 -and $budget.slots*$budget.heapMB -le $budget.pool -and
-            $budget.slots*$budget.cores -le $budget.cpu) 'shared CPU and RAM ceiling'
-    $Heap=''; $Cores=0
-    $single = Get-ResourceBudget 1
-    if ($single.cpu -ge 2 -and $single.pool -ge 8192) {
-        Assert ($single.slots -eq 1 -and $single.cores*2 -le $single.cpu -and $single.heapMB*2 -le $single.pool) 'single automatic job leaves room for another window'
-    }
-    $script:testFreeKB = 8388608
-    $active = [pscustomobject]@{ status='running'; memoryPoolMB=$single.pool }
-    $second = Get-ResourceBudget 1 @($active)
-    Assert ($second.pool -lt $single.pool -and $second.cores -eq $single.cores -and
-            $second.heapMB -eq $single.heapMB) 'a second window sizes automatic shares against the original pool'
-    $Heap='8g'
-    $queued = Get-ResourceBudget 1 @($active)
-    Assert ($queued.heapMB -gt $queued.pool) 'an explicit request within the shared pool can wait for memory'
-    $Heap='32g'; $caught=$false
-    try { $null=Get-ResourceBudget 2 } catch { $caught=$true }
-    Assert $caught 'oversized per-job heap rejected'
+    $env:COMSOL_EXPORT_XMX = $null
+    $Heap = ''
+    Assert ((Get-RequestedHeapMB) -eq 0 -and -not (Get-HeapArg ([pscustomobject]@{heapMB=0}))) 'default leaves Java heap to the JVM'
+    $env:COMSOL_EXPORT_XMX='2g'
+    Assert ((Get-HeapArg) -eq '-Xmx2048m') 'environment heap is explicit'
+    $Heap='768m'
+    Assert ((Get-HeapArg) -eq '-Xmx768m' -and (Get-HeapArg ([pscustomobject]@{heapMB=512})) -eq '-Xmx512m') 'CLI and saved job heap overrides'
+    $Heap='invalid'; $caught=$false
+    try { $null=Get-RequestedHeapMB } catch { $caught=$true }
+    Assert $caught 'invalid explicit heap rejected'
+    Assert ((Get-MemoryPool @([pscustomobject]@{status='running';memoryPoolMB=9000}) 4000) -eq 9000) 'running reservation retains its pool across windows'
+
+    $reserve=@{}
+    $a=Join-Path $sandbox '模型 A'
+    [void][IO.Directory]::CreateDirectory($a)
+    Assert ((Get-UnusedJobPath $sandbox '模型 A' '' $reserve -ReuseEmpty) -eq $a) 'empty model folder may be reused'
+    Assert ((Get-UnusedJobPath $sandbox '模型 A' '' $reserve -ReuseEmpty) -eq ($a+' (2)')) 'in-flight path prevents a second writer'
+    [IO.File]::WriteAllText((Join-Path $a 'sentinel'),'original')
+    Assert ((Get-UnusedJobPath $sandbox '模型 A' '' @{} -ReuseEmpty) -eq ($a+' (2)')) 'repeat export preserves the existing model folder'
+    [IO.File]::WriteAllText(($a+'.mph'),'existing')
+    Assert ((Get-UnusedJobPath $sandbox '模型 A' '.mph' @{}) -eq ($a+' (2).mph')) 'existing solved model is protected'
+    $base='模型_202611251125'
+    $legacyName=$base+'_20261126235500_12ab34cd'
+    $m=[pscustomobject]@{BaseName=$legacyName;FullName=(Join-Path $sandbox ('solved\'+$legacyName+'.mph'))}
+    Assert ((Get-ResultModelName $m) -eq $base) 'known legacy solved suffix is removed from deliverable names'
+    $m.BaseName='alias'
+    Assert ((Get-ResultModelName $m) -eq 'alias') 'explicit shortcut alias is preserved'
+    $m.BaseName=$legacyName; $m.FullName=Join-Path $sandbox ($legacyName+'.mph')
+    Assert ((Get-ResultModelName $m) -eq $legacyName) 'original model name outside solved is preserved'
+
+    $legacyBatch=Join-Path $sandbox 'output\batch_old'
+    $legacyDir=Join-Path $legacyBatch 'old_job'
+    $legacyJob=[pscustomobject]@{status='killed';jobDir=$jobDir;resultDir=$legacyDir;batchDir=$legacyBatch;mode='export'}
+    $script:HandoffStates=@{}
+    Write-Handoff @($legacyJob)
+    Assert (([IO.File]::ReadAllText((Join-Path $legacyBatch 'EXPORT_MANIFEST.md'))) -match 'old_job/EXPORT_MANIFEST.md' -and
+            [IO.File]::Exists((Join-Path $legacyDir 'EXPORT_MANIFEST.md'))) 'legacy queue still publishes its recorded batch and model manifests'
 
     $ModuleDir=Join-Path $repo 'modules'
     $map=Get-ModuleDefs

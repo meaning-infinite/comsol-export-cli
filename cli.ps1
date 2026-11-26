@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.11.0'
+$script:CliVersion = 'v1.12.0'
 $script:CliExit = 0
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
@@ -757,8 +757,8 @@ function Show-Help {
     Write-Host '    -DryRun          只打印计划，不写队列、不启动计算'
     Write-Host '    -Mode <solve|export|watch>  求解并导出 / 导出模式 / 监视模式'
     Write-Host '    -ProgressStyle 1|2|3  进度样式：1 单行 / 2 方框仪表 / 3 阶段链'
-    Write-Host '    -Cores <n>       每作业核数（默认按并发数分配）'
-    Write-Host '    -Heap <6g>       每作业 Java 堆（默认共用可用内存的 70%）'
+    Write-Host '    -Cores <n>       指定每作业核数（默认由 COMSOL/JVM 管理）'
+    Write-Host '    -Heap <6g>       指定导出 Java 堆上限（默认由 JVM 管理）'
     Write-Host '    -WinWidth <n>    控制台宽度（列），默认 88；高度自动占满'
     Write-Host '    -WinDebug        打印窗口实际尺寸（排查“窗口没铺满”）'
     Write-Host '    -Resume          接管未完成作业，启动资源足够的待办'
@@ -981,6 +981,35 @@ function Format-JobName {
     if ($name -match '\{(\w+)\}') { throw ('命名模板含未知字段: ' + $Matches[0]) }
     return $name
 }
+
+# 旧版求解副本的名字为 <outname>_<14 位时间>_<8 位随机码>。保留原模型名和快捷方式别名。
+function Get-ResultModelName($model) {
+    $name = $model.BaseName
+    if ([IO.Path]::GetFileName([IO.Path]::GetDirectoryName($model.FullName)) -eq 'solved' -and
+        $name -eq [IO.Path]::GetFileNameWithoutExtension($model.FullName)) {
+        return ($name -replace '(?<=.)_20\d{12}_[0-9a-f]{8}$','')
+    }
+    return $name
+}
+
+# 在队列写锁内分配路径。同名只在实际占用时加 (2)、(3)，结果文件保持配方名。
+function Get-UnusedJobPath([string]$parent, [string]$name, [string]$extension, $reserved, [switch]$ReuseEmpty) {
+    $stem = $name
+    for ($i = 2; ; $i++) {
+        $path = [IO.Path]::Combine($parent, $stem + $extension)
+        $occupied = $reserved.ContainsKey($path) -or [IO.File]::Exists($path)
+        if (-not $occupied -and [IO.Directory]::Exists($path)) {
+            $occupied = -not $ReuseEmpty -or ([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) -or
+                        @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Select-Object -First 1).Count -gt 0
+        }
+        if (-not $occupied) {
+            $reserved[$path] = $true
+            return $path
+        }
+        $stem = $name + ' (' + $i + ')'
+    }
+}
+
 
 function Read-Choice {
     param([string]$Prompt, [int]$Max)
@@ -1334,9 +1363,6 @@ function Get-JobStates {
     return $res
 }
 
-# Java 堆大小：解数据大的模型（如 651 个波长解 ≈ 5.4GB）用 4GB 堆取不全，
-# 会静默少给解。这里按物理内存自动给（默认 70%，不少于 4GB），
-# 可用参数 -Heap 8g 或环境变量 COMSOL_EXPORT_XMX 覆盖。
 # 驱动 class 里的版本串（DRIVER_VERSION 常量），用来发现「只更新了脚本、没更新 driver」的情况：
 # 远程出现过 cli.ps1 是新的、driver 还是旧 class，于是同样的 bug 反复报。
 $script:ExpectedDriverVersion = 'v1.11.0'
@@ -1404,45 +1430,25 @@ function Get-MemoryPool($jobs, [int]$available) {
     return $available
 }
 
-function Get-ResourceBudget([int]$count, $jobs = @()) {
-    $cpu = [Environment]::ProcessorCount
-    try {
-        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-        $freeMB = [math]::Floor([double]$os.FreePhysicalMemory / 1024)
-    } catch {
-        Add-Type -AssemblyName Microsoft.VisualBasic
-        $freeMB = [math]::Floor(([Microsoft.VisualBasic.Devices.ComputerInfo]::new()).AvailablePhysicalMemory / 1MB)
-    }
-    $pool = [int][math]::Floor($freeMB * 0.7)
-    $capacity = Get-MemoryPool $jobs $pool
+function Get-RequestedHeapMB {
     $request = $Heap
     if (-not $request) { $request = $env:COMSOL_EXPORT_XMX }
-    $heapMB = 0
-    if ($request) {
-        if ($request -notmatch '^(\d+)([kKmMgG]?)$') { throw 'Heap 格式示例 8g 或 2048m' }
-        $factor = @{'g'=1024; 'm'=1; 'k'=(1/1024); ''=(1/1MB)}[$Matches[2].ToLowerInvariant()]
-        $heapMB = [int][math]::Ceiling([double]$Matches[1] * $factor)
-        if ($heapMB -le 0 -or $heapMB -gt $capacity) { throw ("请求堆 {0} MiB，当前总预算 {1} MiB" -f $heapMB,$capacity) }
-    }
-    if ($Cores -lt 0 -or $Cores -gt $cpu -or $pool -lt 1) { throw '核数或可用内存超出本机预算' }
-    $minHeap = 4096
-    if ($heapMB) { $minHeap = $heapMB }
-    # 单模型默认保留第二个窗口的容量。指定核数或堆上限时继续按请求分配。
-    $slots = [int][math]::Max(1,[math]::Min([math]::Max(2,$count),[math]::Min(
-            [math]::Floor($cpu / [math]::Max(1,$Cores)), [math]::Floor($capacity / $minHeap))))
-    if (-not $heapMB) {
-        $share = [math]::Floor($capacity/$slots)
-        if ($share -ge 256) { $share -= $share % 256 }
-        $heapMB = [int][math]::Min(65536,$share)
-    }
-    $perCpu = $Cores
-    if (-not $perCpu) { $perCpu = [int][math]::Floor($cpu/$slots) }
-    return @{ slots=[math]::Min([math]::Max(1,$count),$slots); cores=$perCpu; heapMB=$heapMB; cpu=$cpu; pool=$pool }
+    if (-not $request) { return 0 }
+    if ($request -notmatch '^(\d+)([kKmMgG]?)$') { throw 'Heap 格式示例 8g 或 2048m' }
+    $factor = @{'g'=1024; 'm'=1; 'k'=(1/1024); ''=(1/1MB)}[$Matches[2].ToLowerInvariant()]
+    $mb = [math]::Ceiling([double]$Matches[1] * $factor)
+    if ($mb -lt 1 -or $mb -gt [int]::MaxValue) { throw 'Java 堆大小超出范围' }
+    return [int]$mb
+}
+
+function Get-AvailableHeapPool {
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    return [int][math]::Floor([Microsoft.VisualBasic.Devices.ComputerInfo]::new().AvailablePhysicalMemory * 0.7 / 1MB)
 }
 
 function Get-HeapArg($job) {
-    if ($job -and $job.heapMB) { return ('-Xmx' + $job.heapMB + 'm') }
-    return ('-Xmx' + (Get-ResourceBudget 1).heapMB + 'm')
+    $mb = if ($job) { $job.heapMB } else { Get-RequestedHeapMB }
+    if ($mb -gt 0) { return ('-Xmx' + $mb + 'm') }
 }
 
 # ---------------- 两阶段：comsolbatch 求解 -> 驱动导出 ----------------
@@ -2179,6 +2185,18 @@ if ($Help) { Show-Help; exit 0 }
 if ($Modules) { Show-Modules; exit 0 }
 if ($Setup) { Start-Setup; exit 0 }
 
+$script:HandoffStates = @{}
+function Initialize-HandoffStates($queue, [switch]$Recover) {
+    foreach ($prior in $queue) {
+        if ($prior.status -in @('done','failed','killed') -and $prior.resultDir) {
+            # 正常提交只看活动作业。显式续跑时再修复上次中断的历史交接。
+            if (-not $Recover -or -not [IO.Directory]::Exists($prior.jobDir) -or [IO.File]::Exists([IO.Path]::Combine($prior.jobDir,'handoff'))) {
+                $script:HandoffStates[$prior.jobDir] = $prior.status
+            }
+        }
+    }
+}
+
 function Write-Handoff($q) {
     $changedBatches = @{}
     $changes = @()
@@ -2303,7 +2321,10 @@ function Start-ExportPhase($job) {
         $drvMsg = '  [警告] driver 目录不是最新：class 版本 ' + $drvVer + '，期望 ' + $script:ExpectedDriverVersion + '。请重跑 update.bat（或手动覆盖 script\driver）'
         Write-Host $drvMsg -ForegroundColor Yellow
     }
-    $argStr = (Get-HeapArg $job) + ' -XX:ActiveProcessorCount=' + $job.cores + ' -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
+    $opts = @(Get-HeapArg $job)
+    if ($job.cores -gt 0) { $opts += '-XX:ActiveProcessorCount=' + $job.cores }
+    $driverArgs = '-Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -cp "' + $cp + '" ExportDriver "' + (Join-Path $job.jobDir 'job.properties') + '"'
+    $argStr = ($opts + $driverArgs) -join ' '
     # 启动前把实际用的路径写进 launch.txt，出问题能查
     $launchInfo = @(
         ('time=' + (Get-Date).ToString('o'))
@@ -2520,7 +2541,7 @@ function Restore-JobWorker($job, [switch]$OnlyTransition) {
     $job.status = 'running'
 }
 
-function Invoke-Scheduler($submitted, $budget) {
+function Invoke-Scheduler($submitted) {
     $script:LiveSig = ''
     $script:LiveCount = 0
     $reported = @{}
@@ -2538,20 +2559,10 @@ function Invoke-Scheduler($submitted, $budget) {
             $active = @($active | Where-Object { $submitted -contains $_.jobDir -or $_.status -eq 'running' -or
                     [IO.File]::Exists((Join-Path $_.jobDir 'phase')) })
         }
-        if ($active.Count) {
-            if (-not $budget) { $budget = Get-ResourceBudget $active.Count $active }
-            foreach ($job in $active) {
-                if (-not $job.cores) {
-                    $coresNeeded = if ($job.status -eq 'running') { $budget.cpu } else { $budget.cores }
-                    Set-JobProp $job 'cores' $coresNeeded
-                }
-                if (-not $job.heapMB) {
-                    $heapNeeded = if ($job.status -eq 'running') { $budget.pool } else { $budget.heapMB }
-                    Set-JobProp $job 'heapMB' $heapNeeded
-                    Set-JobProp $job 'autoHeap' (-not ($Heap -or $env:COMSOL_EXPORT_XMX))
-                }
-            }
-        }
+        if (-not $submitted) { Initialize-HandoffStates $initial -Recover }
+        $cpu = [Environment]::ProcessorCount
+        $pool = 0
+        if (@($active | Where-Object { $_.heapMB -gt 0 }).Count) { $pool = Get-AvailableHeapPool }
         foreach ($job in $active) { Restore-JobWorker $job }
         if ($active.Count -or $script:QueueRecovered) { Save-Queue $initial }
         else { Write-Handoff $initial }
@@ -2645,35 +2656,35 @@ function Invoke-Scheduler($submitted, $budget) {
                         }
                     }
                 }
-                # 续跑时已有进程已占用部分可用内存。最后一个进程退出后，重新核算待办容量。
+                $occupied = @($q | Where-Object { $_.status -eq 'running' })
+                $reservedCpu = [int64](($occupied | Where-Object { $_.cores -gt 0 } | Measure-Object -Property cores -Sum).Sum)
+                $reservedHeap = [int64](($occupied | Where-Object { $_.heapMB -gt 0 } | Measure-Object -Property heapMB -Sum).Sum)
                 $waiting = @($q | Where-Object { $_.status -eq 'pending' -and $sessionIds -contains $_.jobDir })
-                if ($waiting.Count -and -not @($q | Where-Object { $_.status -eq 'running' }).Count -and
-                    -not @($waiting | Where-Object { $_.heapMB -le $budget.pool -and $_.cores -le $budget.cpu }).Count) {
-                    $budget = Get-ResourceBudget $waiting.Count
+                # 旧队列保留已申请的额度。先启动能容纳的待办，再报告剩余请求。
+                if ($waiting.Count -and -not $occupied.Count) {
+                    if (@($waiting | Where-Object { $_.heapMB -gt $pool }).Count) { $pool = Get-AvailableHeapPool }
                     foreach ($job in $waiting) {
-                        if ($job.autoHeap -and $job.heapMB -gt $budget.pool) { $job.heapMB = $budget.heapMB }
-                        if ($job.autoCores -and $job.cores -gt $budget.cpu) { $job.cores = $budget.cores }
+                        if ($job.autoHeap -and $job.heapMB -gt $pool) { $job.heapMB = $pool }
+                        if ($job.autoCores -and $job.cores -gt $cpu) { $job.cores = $cpu }
                     }
-                    Save-Queue $q
-                    if (-not @($waiting | Where-Object { $_.heapMB -le $budget.pool -and $_.cores -le $budget.cpu }).Count) {
-                        throw '当前可用资源不足以启动剩余作业。队列已保存，资源释放后可用 -Resume 接续。'
+                    if (-not @($waiting | Where-Object { $_.cores -le $cpu -and $_.heapMB -le $pool }).Count) {
+                        throw '当前资源不足，队列已保存。资源释放后可用 -Resume 接续。'
                     }
                 }
-                # 每个模型用独立后台进程。逐个登记 PID，无需等前一个作业结束。
-                foreach ($job in $q) {
-                    if ($job.status -eq 'pending' -and $sessionIds -contains $job.jobDir) {
-                        $occupied = @($q | Where-Object { $_.status -eq 'running' })
-                        $reservedCpu = ($occupied | Measure-Object -Property cores -Sum).Sum
-                        $reservedHeap = ($occupied | Measure-Object -Property heapMB -Sum).Sum
-                        # 已占用的内存在第二个窗口启动时已从可用内存中扣除。沿用首个活动作业的总池，
-                        # 同时检查本窗口的可用额度，避免对同一份内存扣两次。
-                        $pool = Get-MemoryPool $occupied $budget.pool
-                        if ([int64]$reservedCpu + $job.cores -gt $budget.cpu -or $job.heapMB -gt $budget.pool -or
-                            [int64]$reservedHeap + $job.heapMB -gt $pool) { continue }
-                        Set-JobProp $job 'memoryPoolMB' $pool
-                        Start-OneJob $job
-                        Save-Queue $q
+                foreach ($job in $waiting) {
+                    if ($job.cores -gt 0 -and $reservedCpu + $job.cores -gt $cpu) { continue }
+                    if ($job.heapMB -gt 0) {
+                        $capacity = Get-MemoryPool $occupied $pool
+                        if ($job.heapMB -gt $pool -or $reservedHeap + $job.heapMB -gt $capacity) { continue }
+                        Set-JobProp $job 'memoryPoolMB' $capacity
                     }
+                    Start-OneJob $job
+                    if ($job.status -eq 'running') {
+                        $occupied += $job
+                        $reservedCpu += $job.cores
+                        $reservedHeap += $job.heapMB
+                    }
+                    Save-Queue $q
                 }
                 Save-Queue $q
             } finally { $transaction.Dispose() }
@@ -2861,6 +2872,7 @@ if (-not ($Resume -or $KillJob -or $Diag)) {
         $sib = Join-Path (Split-Path -Parent $Models) 'models'
         if (Test-Path -LiteralPath $sib) { $Models = $sib }
     }
+    $Models = Convert-Path -LiteralPath $Models -ErrorAction Stop
     Write-Host ('  读取模型目录 ' + $Models) -ForegroundColor DarkGray
     $modelFiles = @(Get-ModelFiles $Models)
     $solvedDir = Join-Path $Models 'solved'
@@ -2980,8 +2992,39 @@ if (-not ($Resume -or $KillJob -or $Diag)) {
 
     $cfg = $r.Data
     if (-not $cfg.NameTemplate) { throw ('配方缺少 NameTemplate: ' + $r.Name) }
-    $blocks = @(Expand-Blocks $cfg (Get-ModuleDefs))
+    $solScope = if ($cfg.SolScope) { ([string]$cfg.SolScope).ToLowerInvariant() } else { 'study' }
+    if ($solScope -notin @('study','all')) { throw 'SolScope 取 study 或 all' }
+    if ($Cores -lt 0 -or $Cores -gt [Environment]::ProcessorCount) { throw '核数超出本机范围' }
+    $heapMB = Get-RequestedHeapMB
+    $plans = @(foreach ($m in $ModelList) {
+        $modelName = Get-ResultModelName $m
+        $n = Format-JobName $cfg.NameTemplate @{ task = [string]$cfg.Task; model = $modelName; stamp = $Stamp }
+        foreach ($leaf in $modelName,$n) {
+            if ([string]::IsNullOrWhiteSpace($leaf) -or $leaf.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+                $leaf -match '[. ]$|^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw ('作业输出文件名无效 ' + $leaf) }
+        }
+        [pscustomobject]@{ model=$m; modelName=$modelName; outName=$n }
+    })
+    $seen = @{}
+    foreach ($plan in $plans) {
+        $key = $plan.model.FullName + '|' + $plan.outName
+        if ($seen.ContainsKey($key)) { throw ('重复选择同一模型和输出名 ' + $plan.outName) }
+        $seen[$key] = $true
+    }
+
+    Write-Host ''
+    if (-not $DryRun) {
+        $ans = Read-Confirm ('开始导出？共 ' + $plans.Count + ' 个作业')
+        if (-not $ans) { Write-Host '  已取消。' -ForegroundColor Yellow; exit 0 }
+    }
+    $moduleDefs = if ($cfg.Use) { Get-ModuleDefs } else { @{} }
+    $blocks = @(Expand-Blocks $cfg $moduleDefs)
     if ($blocks.Count -eq 0) { throw ('配方没有任何导出内容（Use 或 Export 为空）: ' + $r.Name) }
+    if ($DryRun) {
+        foreach ($cfgBlock in $blocks) { Write-Host ('  导出块: ' + $cfgBlock.Type + ' / ' + $cfgBlock.Name) }
+        Write-Host ('  预览：共 ' + $plans.Count + ' 个作业，未写入队列、未启动计算。')
+        exit 0
+    }
 }
 
 [IO.Directory]::CreateDirectory($StateDir) | Out-Null
@@ -3007,15 +3050,11 @@ if ($guard) {
     }
 }
 
-$script:HandoffStates = @{}
-foreach ($prior in @(Get-Queue)) {
-    if ($prior.status -in @('done','failed','killed') -and $prior.resultDir -and
-        [IO.File]::Exists((Join-Path $prior.jobDir 'handoff'))) { $script:HandoffStates[$prior.jobDir] = $prior.status }
-}
 if ($KillJob) {
     $transaction = if ($guard) { Enter-StateWrite }
     try {
         $q = @(Get-Queue)
+        Initialize-HandoffStates $q
         if ($KillJob -match '^\d+$') {
             $index = [int]$KillJob
             if ($index -lt 1 -or $index -gt $q.Count) { throw '队列历史序号超出范围' }
@@ -3058,7 +3097,8 @@ if ($Diag) {
     Write-Host ('  直接输出到本窗口，崩溃信息会留在屏幕上') -ForegroundColor DarkGray
     $cpD = (Join-Path $comsolRoot 'plugins\*') + ';' + $driverDir
     Push-Location $jd
-    & $javaExe (Get-HeapArg) '-Dfile.encoding=UTF-8' '-Dsun.stdout.encoding=UTF-8' '-Dsun.stderr.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' '-cp' $cpD 'ExportDriver' (Join-Path $jd 'job.properties')
+    $heapArgs = @(Get-HeapArg)
+    & $javaExe @heapArgs '-Dfile.encoding=UTF-8' '-Dsun.stdout.encoding=UTF-8' '-Dsun.stderr.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' '-cp' $cpD 'ExportDriver' (Join-Path $jd 'job.properties')
     $rc = $LASTEXITCODE
     Pop-Location
     Write-Host ('  退出码: ' + $rc) -ForegroundColor Yellow
@@ -3074,111 +3114,97 @@ if ($Resume) {
     exit $script:CliExit
 }
 
-# 模型同名或配方生成相同 outname 时，解文件和导出文件会共用路径。
-$usedOutputs = @{}
-$priorJobs = @(Get-Queue)
-foreach ($existing in $priorJobs) {
-    if ($existing.status -in @('pending','running')) { $usedOutputs[[string]$existing.id] = $true }
-}
-foreach ($m in $ModelList) {
-    $name = Format-JobName $cfg.NameTemplate @{ task = [string]$cfg.Task; model = $m.BaseName; stamp = $Stamp }
-    if (-not $name -or $name -in @('.','..') -or $name.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) { throw ('作业输出文件名无效 ' + $name) }
-    if ($usedOutputs.ContainsKey($name)) { throw ('作业输出名称重复：' + $name + '。请区分模型名或配方的 NameTemplate。') }
-    $usedOutputs[$name] = $true
-}
-$solScope = if ($cfg.SolScope) { ([string]$cfg.SolScope).ToLowerInvariant() } else { 'study' }
-if ($solScope -notin @('study','all')) { throw 'SolScope 取 study 或 all' }
-$batchKey = (Get-Date -Format 'yyyyMMddHHmmss') + '_' + [guid]::NewGuid().ToString('N').Substring(0,8)
-$outRoot = Join-Path $Root 'output'
-$batchDir = if ($ModelList.Count -gt 1) { Join-Path $outRoot ('batch_' + $batchKey) }
-            else { Join-Path (Join-Path $outRoot $ModelList[0].BaseName) $batchKey }
-$budget = Get-ResourceBudget $ModelList.Count $priorJobs
-Write-Host ('  资源预算：最多同时 {0} 个，每作业 {1} 核、Java 堆 {2} MiB' -f $budget.slots,$budget.cores,$budget.heapMB)
-$jobs = @()
-$jobSpecs = @{}
-foreach ($m in $ModelList) {
-    $n = Format-JobName $cfg.NameTemplate @{ task = [string]$cfg.Task; model = $m.BaseName; stamp = $Stamp }
-    $jobDir = Join-Path $JobsDir ($batchKey + '_' + $m.BaseName)
-    $outDir = Join-Path $Root 'output'
-
-    $resultDir = if ($ModelList.Count -gt 1) { Join-Path $batchDir (Split-Path -Leaf $jobDir) } else { $batchDir }
-    $spec = New-Object System.Collections.Generic.List[string]
-    $spec.Add('model='    + $m.FullName)
-    $spec.Add('study='    + $cfg.Study)
-    $spec.Add('outdir='   + $outDir)
-    $spec.Add('modelsdir=' + $Models)
-    $spec.Add('outname='  + $n)
-    $spec.Add('solver=batch')
-    if ($doSolve) { $spec.Add('solvedfile=' + (Join-Path (Join-Path $Models 'solved') ($n + '_' + $batchKey + '.mph'))) }
-    $spec.Add('cli=' + $script:CliVersion)
-    $spec.Add('recipe=' + $r.Name)
-    $spec.Add('solscope=' + $solScope)
-    $spec.Add('resultdir=' + $resultDir)
-    if ($cfg.Solution) { $spec.Add('solution=' + $cfg.Solution) }
-    $spec.Add('blocks='   + $blocks.Count)
-    $spec.Add('solve='    + $(if ($doSolve) { '1' } else { '0' }))
-    # 每块取多少个解（默认 200）；解特别多又内存紧张时可在配方里写 Chunk = 100
-    $chunkVal = 200
-    if ($cfg.Chunk) { $chunkVal = [int]$cfg.Chunk }
-    $spec.Add('chunk='    + $chunkVal)
-    for ($i = 0; $i -lt $blocks.Count; $i++) {
-        $b = $blocks[$i]
-        $k = $i + 1
-        # 通用：任何额外字段都原样写入 job.properties（小写键），
-        # 这样新增导出类型不需要再改这里
-        foreach ($key in $b.Keys) {
-            $val = $b[$key]
-            if ($null -eq $val) { continue }
-            if ($val -is [array]) { $val = ($val -join '|') }
-            $name = ([string]$key).ToLowerInvariant()
-            if ($name -eq 'type' -or $name -eq 'name') { $val = [string]$val }
-            $spec.Add('block.' + $k + '.' + $name + '=' + [string]$val)
-        }
-    }
-    $jobSpecs[$jobDir] = $spec
-
-    $jobs += [pscustomobject]@{
-        id = $n; model = $m.FullName; recipe = $r.Name; comsolBatch = $comsolBatch; driverDir = $driverDir
-        pid = 0; jobDir = $jobDir; outDir = $outDir; resultDir = $resultDir; batchDir = $batchDir
-        cores = $budget.cores; heapMB = $budget.heapMB
-        autoHeap = -not ($Heap -or $env:COMSOL_EXPORT_XMX); autoCores = -not $Cores
-        solveKind = $(if ($doSolve) { Get-StudyProgressKind $m.FullName ([string]$cfg.Study) } else { '' })
-        created = (Get-Date).ToString('o'); started = ''
-        status = 'pending'; mode = $(if ($doSolve) { 'solve' } else { 'export' })
-    }
-}
-
-Write-Host ''
-if ($DryRun) {
-    # 预览模式：只报计划，绝不写队列、绝不启动计算
-    foreach ($cfgBlock in $blocks) { Write-Host ('  导出块: ' + $cfgBlock.Type + ' / ' + $cfgBlock.Name) }
-    Write-Host ('  预览：共 ' + $jobs.Count + ' 个作业，未写入队列、未启动计算。')
-    exit 0
-}
-
-$ans = Read-Confirm ('开始导出？共 ' + $jobs.Count + ' 个作业')
-if (-not $ans) {
-    Write-Host '  已取消。' -ForegroundColor Yellow
-    exit 0
-}
-
+$outDir = Join-Path $Root 'output'
+$solvedRoot = Join-Path $Models 'solved'
+$createdDirs = [Collections.Generic.List[string]]::new()
 $transaction = Enter-StateWrite
 try {
     $queue = @(Get-Queue)
-    foreach ($existing in $queue) {
-        if ($existing.status -in @('pending','running') -and $jobs.id -contains $existing.id) {
-            throw ('另一个窗口已提交相同输出名称：' + $existing.id)
+    Initialize-HandoffStates $queue
+    $active = @($queue | Where-Object { $_.status -in @('pending','running') })
+    $reserved = @{}
+    foreach ($existing in $queue) { $reserved[[string]$existing.jobDir] = $true }
+    foreach ($existing in $active) {
+        if ($seen.ContainsKey(([string]$existing.model + '|' + $existing.id))) { throw ('另一个窗口已提交同一模型和输出名：' + $existing.id) }
+        $dest = $existing.resultDir
+        if (-not $dest -and $existing.outDir -and $existing.model) {
+            $dest = [IO.Path]::Combine($existing.outDir,[IO.Path]::GetFileNameWithoutExtension($existing.model))
+        }
+        if ($dest) { $reserved[$dest] = $true }
+        if ($doSolve -and $existing.mode -ne 'export') {
+            $savedModel = $existing.solvedFile
+            if (-not $savedModel) { $savedModel = Get-JobSolvedPath $existing }
+            if ($savedModel) { $reserved[$savedModel] = $true }
         }
     }
-    foreach ($j in $jobs) {
-        if ([IO.Directory]::Exists($j.jobDir)) { throw ('作业目录已存在 ' + $j.jobDir) }
-        [IO.Directory]::CreateDirectory($j.jobDir) | Out-Null
-        [IO.File]::WriteAllLines((Join-Path $j.jobDir 'job.properties'), $jobSpecs[$j.jobDir], [Text.UTF8Encoding]::new($false))
-    }
+    if ($heapMB -gt 0 -and $heapMB -gt (Get-MemoryPool $active (Get-AvailableHeapPool))) { throw '请求的 Java 堆超出可用内存预算' }
+    $jobs = @(foreach ($plan in $plans) {
+        $m = $plan.model
+        $n = $plan.outName
+        $logName = $plan.modelName
+        if ($logName -match '^\d+$') { $logName = 'job-' + $logName }
+        $jobDir = Get-UnusedJobPath $JobsDir $logName '' $reserved
+        $resultDir = Get-UnusedJobPath $outDir $plan.modelName '' $reserved -ReuseEmpty
+        $solvedFile = if ($doSolve) { Get-UnusedJobPath $solvedRoot $n '.mph' $reserved }
+        $spec = New-Object System.Collections.Generic.List[string]
+        $spec.Add('model='    + $m.FullName)
+        $spec.Add('study='    + $cfg.Study)
+        $spec.Add('outdir='   + $outDir)
+        $spec.Add('modelsdir=' + $Models)
+        $spec.Add('outname='  + $n)
+        $spec.Add('solver=batch')
+        if ($doSolve) { $spec.Add('solvedfile=' + $solvedFile) }
+        $spec.Add('cli=' + $script:CliVersion)
+        $spec.Add('recipe=' + $r.Name)
+        $spec.Add('solscope=' + $solScope)
+        $spec.Add('resultdir=' + $resultDir)
+        if ($cfg.Solution) { $spec.Add('solution=' + $cfg.Solution) }
+        $spec.Add('blocks='   + $blocks.Count)
+        $spec.Add('solve='    + $(if ($doSolve) { '1' } else { '0' }))
+        # 每块取多少个解（默认 200）；解特别多又内存紧张时可在配方里写 Chunk = 100
+        $chunkVal = 200
+        if ($cfg.Chunk) { $chunkVal = [int]$cfg.Chunk }
+        $spec.Add('chunk='    + $chunkVal)
+        for ($i = 0; $i -lt $blocks.Count; $i++) {
+            $b = $blocks[$i]
+            $k = $i + 1
+            # 通用：任何额外字段都原样写入 job.properties（小写键），
+            # 这样新增导出类型不需要再改这里
+            foreach ($key in $b.Keys) {
+                $val = $b[$key]
+                if ($null -eq $val) { continue }
+                if ($val -is [array]) { $val = ($val -join '|') }
+                $name = ([string]$key).ToLowerInvariant()
+                if ($name -eq 'type' -or $name -eq 'name') { $val = [string]$val }
+                $spec.Add('block.' + $k + '.' + $name + '=' + [string]$val)
+            }
+        }
+        [IO.Directory]::CreateDirectory($jobDir) | Out-Null
+        $createdDirs.Add($jobDir)
+        [IO.File]::WriteAllLines((Join-Path $jobDir 'job.properties'), $spec, [Text.UTF8Encoding]::new($false))
+        [pscustomobject]@{
+            id = $n; model = $m.FullName; recipe = $r.Name; comsolBatch = $comsolBatch; driverDir = $driverDir
+            pid = 0; jobDir = $jobDir; outDir = $outDir; resultDir = $resultDir; solvedFile = $solvedFile
+            cores = $Cores; heapMB = $heapMB
+            created = (Get-Date).ToString('o'); started = ''
+            status = 'pending'; mode = $(if ($doSolve) { 'solve' } else { 'export' })
+        }
+    })
     Save-Queue (@($queue) + @($jobs))
+} catch {
+    # Save-Queue 可能已替换队列、随后才在写交接清单时失败。只清理确实未入队的规格。
+    if ($createdDirs.Count) {
+        $publishedDirs = @(Get-Queue | ForEach-Object { $_.jobDir })
+        foreach ($dir in $createdDirs) {
+            if ($publishedDirs -contains $dir) { continue }
+            [IO.File]::Delete([IO.Path]::Combine($dir,'job.properties'))
+            [IO.Directory]::Delete($dir,$false)
+        }
+    }
+    throw
 } finally { $transaction.Dispose() }
 Write-Host ''
-Invoke-Scheduler @($jobs | ForEach-Object { $_.jobDir }) $budget
+Invoke-Scheduler @($jobs | ForEach-Object { $_.jobDir })
 
 } finally { if ($guard) { $guard.Dispose() } }
 exit $script:CliExit
