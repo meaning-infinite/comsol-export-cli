@@ -180,6 +180,36 @@ try {
     Assert ((Get-UnusedJobPath $sandbox '模型 A' '' @{} -ReuseEmpty) -eq ($a+' (2)')) 'repeat export preserves the existing model folder'
     [IO.File]::WriteAllText(($a+'.mph'),'existing')
     Assert ((Get-UnusedJobPath $sandbox '模型 A' '.mph' @{}) -eq ($a+' (2).mph')) 'existing solved model is protected'
+    $orphan=Join-Path $sandbox 'orphan.mph'
+    [IO.File]::WriteAllText(($orphan+'.recovery'),'recover me')
+    Assert ((Get-UnusedJobPath $sandbox 'orphan' '.mph' @{}) -ne $orphan) 'a missing MPH with a recovery pointer cannot be reused'
+
+    $oldDir=Join-Path $sandbox 'old job'
+    [void][IO.Directory]::CreateDirectory($oldDir)
+    $oldModel=Join-Path $sandbox '模型 [old].mph'
+    [IO.File]::WriteAllText((Join-Path $oldDir 'job.properties'),('solvedfile='+$oldModel))
+    [IO.File]::WriteAllText($oldModel,'stored model')
+    [IO.File]::WriteAllText(($oldModel+'.status'),'Done')
+    [IO.File]::WriteAllText(($oldModel+'.recovery'),'original')
+    $old=[pscustomobject]@{mode='solve';jobDir=$oldDir;status='failed';resultDir=''}
+    $mark=Join-Path $oldDir 'solved'
+    [IO.File]::WriteAllText($mark,'')
+    $end=[datetime]::UtcNow.AddSeconds(3)
+    [IO.File]::SetLastWriteTimeUtc($mark,$end)
+    [IO.File]::SetLastWriteTimeUtc(($oldModel+'.recovery'),$end.AddSeconds(5))
+    Initialize-HandoffStates @($old) -Recover
+    Assert ([IO.File]::Exists($oldModel+'.status') -and [IO.File]::Exists($oldModel+'.recovery')) 'historical recovery never claims a newer run'
+    [IO.File]::SetLastWriteTimeUtc(($oldModel+'.recovery'),$end.AddSeconds(-1))
+    [IO.File]::WriteAllText(($oldModel+'.status'),'Running')
+    Initialize-HandoffStates @($old) -Recover
+    Assert ([IO.File]::Exists($oldModel+'.recovery')) 'historical recovery keeps native interrupted recovery in place'
+    [IO.File]::WriteAllText(($oldModel+'.status'),'Done')
+    Initialize-HandoffStates @($old) -Recover
+    Initialize-HandoffStates @($old) -Recover
+    Assert (-not [IO.File]::Exists($oldModel+'.status') -and -not [IO.File]::Exists($oldModel+'.recovery') -and
+        [IO.File]::ReadAllText((Join-Path $oldDir 'solve.recovery')) -ceq 'original' -and
+        (Test-SolveOk $old) -eq '') 'resume archives a proven successful legacy solve once and can read its archived status'
+
     $base='模型_202611251125'
     $legacyName=$base+'_20261126235500_12ab34cd'
     $m=[pscustomobject]@{BaseName=$legacyName;FullName=(Join-Path $sandbox ('solved\'+$legacyName+'.mph'))}

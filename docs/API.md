@@ -1,6 +1,6 @@
 ﻿# COMSOL 导出 CLI · API 文档
 
-> 最后更新：2026-11-27 · 对应 v1.13.1 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
+> 最后更新：2026-11-27 · 对应 v1.13.2 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
 > 接口与内部约定的参考手册，随版本持续更新。使用说明见 [README.md](../README.md)，配方写法见 [recipes/README.md](../recipes/README.md)。
 
 ## 1. 分层与调用链
@@ -54,7 +54,7 @@ run.bat  →  cli.ps1  →  job.properties  →  ExportDriver.java  →  handler
 
 ### 2.3 交互键
 
-交互启动时，CLI 先确定 COMSOL 安装，再用该安装的 Java 检查导出驱动。标准安装的预检类路径仅包含驱动、COMSOL API 及 util 库。其他布局或缺少传递依赖时回退到完整插件路径。检查通过后显示模式菜单。选完模型和配方即显示确认框，确认后展开导出块并登记作业。预演只展开配方。预检超过 60 秒会结束并显示 Java 路径。`-Resume` 和 `-Diag` 也先预检。`-Mode watch` 与 `-KillJob` 直接操作已有队列。
+交互启动和 `-Resume` 先核对所选安装的批处理程序、Java 路径、驱动版本、内部类和插件包中的导出接口类。标准安装只读 API 包，其他布局按需查找。普通启动检查完成后直接显示模式菜单。首屏按行输出，方向键和空格可用于选择。`-Diag` 重放作业前额外启动 Java 反射检查接口，进程及输出管道共用 60 秒限时。`-Mode watch` 与 `-KillJob` 直接操作已有队列。
 
 | 键 | 场景 | 行为 |
 |---|---|---|
@@ -341,6 +341,7 @@ static void exportFoo(Job j, int i) throws Exception {
    - 不弹 COMSOL 窗口，headless；**不在原模型旁留 `.lock`**（实测只有它自己的输出模型会被写）。
    - `driver/Invoke-BatchSolve.ps1` 在后台启动并等待 `comsolbatch.exe`，原样转存标准输出和标准错误。求解阶段的队列 PID 指向这个后台进程。即使关闭 CLI，退出码仍会写入作业目录的 `solve.exit`。
    - CLI 核对退出码、求解日志、输出文件和完成标记。退出码为零、输出文件非空，且有 `Done` 或总时间记录时才交接导出。中英文求解错误或失败状态优先于完成标记。失败时窗口和 `EXPORT_MANIFEST.md` 记录原因，队列记录 `solveError` 和已取得的 `solveExitCode`。
+   - 确认求解成功并写入 `solved` 标记后，CLI 将该模型的 `.mph.status` 与 `.mph.recovery` 原样移入作业目录，文件名为 `solve.status` 与 `solve.recovery`。未完成的求解保留原生恢复指针。`-Resume` 同时检查历史队列，只归档仍有解文件、成功标记、`Done` 状态且文件未被后续作业更新的记录。
    - 旧版本启动的作业可直接监视或续跑，结束时依据已有的日志、状态和输出文件判定。
 2. **导出阶段**：直接导出用 solve=0，求解后按 solved 标记读取 solvedfile，流程为打开 → 清点解 → 分块导出。
 
@@ -394,6 +395,7 @@ static void exportFoo(Job j, int i) throws Exception {
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.13.2 | 2026-11-27 | 模式菜单前直接核对安装和驱动文件，诊断预检同时限制进程与管道的等待时间。求解成功后归档批处理状态和恢复指针。 |
 | v1.13.1 | 2026-11-27 | 修复外部参数扫描导出的解号越界及首末参数点重复计数。导出失败时 CLI 显示已保存模型的补导路径。 |
 | v1.13.0 | 2026-11-27 | 单模型、多模型和只读监视共用完整进度框，按整框分页。配方支持菜单和命令行多选，每个模型复用一次加载，各配方独立选解和命名。 |
 | v1.12.0 | 2026-11-27 | 单模型和多模型均按模型名平铺产物，移除自动批次标识。配方选择后直接确认，默认由 COMSOL/JVM 管理资源。 |

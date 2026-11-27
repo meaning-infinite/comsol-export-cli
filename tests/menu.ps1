@@ -34,20 +34,32 @@ try {
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($batch)) | Out-Null
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($exe)) | Out-Null
     [IO.File]::WriteAllBytes($batch, [byte[]]@())
+    $apiJar = Join-Path $install 'plugins/com.comsol.api_1.0.0.jar'
+    & (Join-Path $PSScriptRoot 'New-TestApiJar.ps1') $apiJar
     $code = @"
 using System;
 using System.Threading;
 public class Probe {
     public static int Main(string[] args) {
+        if (args.Length == 1 && args[0] == "hold") { Thread.Sleep(4500); return 0; }
         if (args.Length != 4 || args[0] != "-cp" || args[2] != "ExportDriver" || args[3] != "--check-runtime") return 3;
         // Windows PowerShell may put an encoding preamble on the closed pipe.
         using (var input = new System.IO.StreamReader(Console.OpenStandardInput(), System.Text.Encoding.UTF8, true)) {
             if (input.Read() != -1) { Console.Error.WriteLine("probe received menu input"); return 4; }
         }
+        if (args[1] == "held-open") {
+            var child = new System.Diagnostics.ProcessStartInfo(typeof(Probe).Assembly.Location,"hold");
+            child.UseShellExecute=false; child.CreateNoWindow=true; child.RedirectStandardInput=true;
+            using (var p=System.Diagnostics.Process.Start(child)) p.StandardInput.Close();
+        }
         if (args[1] == "timeout") Thread.Sleep(30000);
         if (args[1] == "failure") { Console.Error.WriteLine("test diagnostic"); return 9; }
-        bool broken = System.IO.File.Exists(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "TEMP_bad_driver"));
-        Console.WriteLine(args[1] == "wrong-version" || broken ? "old-version" : "$script:ExpectedDriverVersion ready");
+        var flag = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"TEMP_stall");
+        if (System.IO.File.Exists(flag)) {
+            System.IO.File.WriteAllText(flag + ".launched","yes");
+            Thread.Sleep(8000);
+        }
+        Console.WriteLine(args[1] == "wrong-version" ? "old-version" : "$script:ExpectedDriverVersion ready");
         return 0;
     }
 }
@@ -61,11 +73,23 @@ public class Probe {
         try { Assert-DriverRuntime $exe $case $timeout } catch { $message = $_.Exception.Message }
         if ($message -notmatch $expected[$case]) { throw "Unexpected $case diagnostic [$message]" }
     }
-    Write-Output 'PASS driver probe receives closed stdin, accepts matching versions, reports failures and times out'
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
+    $message = ''
+    try { Assert-DriverRuntime $exe 'held-open' 700 } catch { $message = $_.Exception.Message }
+    if ($message -notmatch '预检超时' -or $elapsed.ElapsedMilliseconds -gt 3500) { throw "Unbounded diagnostic pipe wait $message / $($elapsed.ElapsedMilliseconds) ms" }
+    Write-Output 'PASS runtime diagnostic bounds the process and inherited output pipes'
+
+    $flag = Join-Path ([IO.Path]::GetDirectoryName($exe)) 'TEMP_stall'
+    [IO.File]::WriteAllText($flag,'')
 
     $config = "@{ Models = '" + $models.Replace("'", "''") + "'; ComsolBatch = '" + $batch.Replace("'", "''") + "' }"
     [IO.File]::WriteAllText((Join-Path $state 'config.psd1'), $config, [Text.Encoding]::UTF8)
-    $launcher = Join-Path $repo 'run.bat'
+    $privateCli = Join-Path $sandbox 'script'
+    [void][IO.Directory]::CreateDirectory($privateCli)
+    foreach ($rel in 'cli.ps1','run.bat','modules','recipes','driver') {
+        Copy-Item -LiteralPath (Join-Path $repo $rel) -Destination $privateCli -Recurse
+    }
+    $launcher = Join-Path $privateCli 'run.bat'
     # Declining after the recipe also works if queue/history storage is unavailable.
     $queueFile=Join-Path $state 'queue.json'
     [IO.File]::WriteAllText($queueFile,'invalid queue fixture')
@@ -89,7 +113,8 @@ public class Probe {
     if ([regex]::Matches($output, '正在检查 COMSOL 导出驱动').Count -ne 1 -or $output -match '正在找 COMSOL') {
         throw "Saved installation was not used exactly once: $output"
     }
-    Write-Output 'PASS saved installation and driver checked once before mode, model, and recipe menus'
+    if ([IO.File]::Exists($flag+'.launched')) { throw 'The startup path waited on Java' }
+    Write-Output 'PASS a stalled Java cannot block the first menu; installation and driver files are checked first'
 
     $pair = @((Get-ChildItem -LiteralPath (Join-Path $repo 'recipes') -Filter '*.psd1' | Sort-Object Name | Select-Object -First 2).BaseName)
     $viaMenu = ('2','1','1,2' | & $launcher -DryRun) -join [Environment]::NewLine
@@ -105,13 +130,28 @@ public class Probe {
     Write-Output 'PASS menu and comma-separated names select two recipes once in one model job'
 
     $missingBatch = Join-Path $sandbox 'missing-comsolbatch.exe'
-    [IO.File]::WriteAllText((Join-Path ([IO.Path]::GetDirectoryName($exe)) 'TEMP_bad_driver'), '')
-    foreach ($path in @($missingBatch, $batch)) {
-        $output = ('' | & $launcher -DryRun -ComsolPath $path) -join [Environment]::NewLine
-        $expectedError = if ($path -eq $missingBatch) { 'comsolbatch 不存在' } else { '驱动预检失败.*old-version' }
-        if ($LASTEXITCODE -ne 1 -or $output -notmatch $expectedError -or $output -match '选择模式|选择模型|选择配方') {
-            throw "Expected a startup failure before any job menu: $output"
+    $privateDriver = Join-Path $privateCli 'driver/ExportDriver.class'
+    $inner = Join-Path $privateCli 'driver/ExportDriver$Job.class'
+    $javaRelease = Join-Path $install 'java/win64/jre/release'
+    foreach ($case in 'missing-batch','old-java','missing-api','missing-class','wrong-version') {
+        $path=$batch
+        switch ($case) {
+            'missing-batch' { $path=$missingBatch; $expectedError='comsolbatch 不存在' }
+            'old-java' { [IO.File]::WriteAllText($javaRelease,'JAVA_VERSION="1.8.0"'); $expectedError='需要 Java 11' }
+            'missing-api' { [IO.File]::Move($apiJar,$apiJar+'.saved'); $expectedError='缺少导出接口' }
+            'missing-class' { [IO.File]::Move($inner,$inner+'.saved'); $expectedError='导出驱动缺少' }
+            'wrong-version' {
+                [IO.File]::WriteAllBytes($privateDriver,([byte[]](202,254,186,190,0,0,0,55)+[Text.Encoding]::ASCII.GetBytes('v0.0.1')))
+                $expectedError='版本不符.*v0.0.1'
+            }
         }
+        $output = ('' | & $launcher -DryRun -ComsolPath $path) -join [Environment]::NewLine
+        if ($LASTEXITCODE -ne 1 -or $output -notmatch $expectedError -or $output -match '选择模式|选择模型|选择配方') {
+            throw "Expected $case before the menus: $output"
+        }
+        if ($case -eq 'old-java') { [IO.File]::Delete($javaRelease) }
+        if ($case -eq 'missing-api') { [IO.File]::Move($apiJar+'.saved',$apiJar) }
+        if ($case -eq 'missing-class') { [IO.File]::Move($inner+'.saved',$inner) }
     }
     if ([IO.File]::Exists((Join-Path $state 'queue.json'))) { throw 'Startup checks enqueued a job.' }
     Write-Output 'PASS missing installation and incompatible driver both fail before the first job menu'

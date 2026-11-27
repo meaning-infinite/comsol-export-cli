@@ -3,7 +3,7 @@
 <p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
 <p align="center">
-  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.13.1-2AA0B0"></a>
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.13.2-2AA0B0"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
   <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
   <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.1~6.4-368CCB">
@@ -30,7 +30,7 @@ git clone https://github.com/meaning-infinite/comsol-export-cli.git
 2. 双击 `run.bat`，等待 COMSOL 安装和驱动检查通过，再依次选择模式、模型和配方
 3. 结束后从 `output/` 取结果
 
-适配 Windows PowerShell 5.1 和 COMSOL 6.1–6.4。6.2、6.4 已在本机从正式入口导出已有解。6.1、6.3 已核对公共 API，仍待对应安装实测。模型文件须与所选 COMSOL 版本兼容。启动时优先检查已保存的安装路径。首次使用或原路径失效时会查找本机安装，找到多个版本时先让你选择。模式菜单前会用所选安装的 Java 实测驱动接口。标准安装只加载预检所需的 API 库。
+适配 Windows PowerShell 5.1 和 COMSOL 6.1–6.4。6.2、6.4 已在本机从正式入口导出已有解。6.1、6.3 已核对公共 API，仍待对应安装实测。模型文件须与所选 COMSOL 版本兼容。启动时优先检查已保存的安装路径。首次使用或原路径失效时会查找本机安装，找到多个版本时先让你选择。模式菜单前会核对批处理程序、Java 路径、导出驱动版本、内部类文件和 COMSOL API 包。普通启动直接读取这些文件。
 
 ## 命令行
 
@@ -105,6 +105,8 @@ output/
 勾选一个或多个模型时，每个模型各占一个文件夹。CSV、场图、求解记录和 `EXPORT_MANIFEST.md` 都直接放在里面。文件名前缀由配方的 `NameTemplate` 决定，求解后的模型保存为 `models/solved/<输出名>.mph`。
 
 如果已有同名结果，CLI 使用同层的 `模型A (2)`、`模型A (3)` 文件夹，里面的结果文件保留原名。已占用的同名解文件也按此规则另存。旧作业续跑时使用提交时记录的路径。
+
+求解成功后，批处理的 `.mph.status` 和 `.mph.recovery` 分别归档到 `script/logs/<作业>/solve.status` 和 `solve.recovery`。求解中断时，恢复文件保留在原位。`-Resume` 会顺带整理旧队列中可确认已完成求解的作业。
 
 每行 CSV 保留研究、解节点、节点内序号及全局序号。复现单点场图时，把 `solution_index` 填入 `SolNum`。宽谱吸收使用含全部衍射级的总透射和总反射。
 

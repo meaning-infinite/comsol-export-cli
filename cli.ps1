@@ -141,7 +141,7 @@ function Write-BoxRows([string]$title, $rows, [string]$border = 'Cyan') {
 # 开场字标：ANSI 阴影块字（6 行）＋对角渐变（白 → 亮青 → 青 → 深青）
 # 渐变靠 24 位 ANSI 逐字符上色，需要 VT 打开；拿不到 VT 时退化成 DarkCyan 单色，字形不变。
 # 字模里 C 自带 1 格尾空、O 自带 1 格首空，所以 C 与第一个 O 之间不再额外留空（视觉间距与其它字母一致）。
-$script:CliVersion = 'v1.13.1'
+$script:CliVersion = 'v1.13.2'
 $script:CliExit = 0
 $script:ArtRows = @(
     ' ██████╗  ██████╗   ███╗   ███╗  ███████╗   ██████╗   ██╗     ',
@@ -294,11 +294,14 @@ function Clear-ConsoleRows([int]$top, [int]$count) {
 function Write-LiveFrame($disp) {
     $raw = $Host.UI.RawUI
     $size = $raw.BufferSize
+    if ($size.Height -lt 2 -or $size.Width -lt 1) { throw '控制台未提供可用缓冲区' }
     $count = [math]::Min($disp.Count, $size.Height - 1)
     $prev = [math]::Min($script:LiveCount, [Console]::CursorTop)
     if ($prev -eq 0 -and [Console]::CursorLeft -ne 0) { Write-Host '' }
-    # 先预留屏幕行，让必要的滚屏发生在定位之前。
-    for ($i = $prev; $i -lt $count; $i++) { Write-Host '' }
+    # 首屏直接向下写，在远程终端也先显示菜单。只有重绘已显示的框才需要定位。
+    if ($prev -gt 0) {
+        for ($i = $prev; $i -lt $count; $i++) { Write-Host '' }
+    }
     $height = [math]::Max($count, $prev)
     $top = [Console]::CursorTop - $height
     $width = Get-BoxWidth 0
@@ -312,7 +315,7 @@ function Write-LiveFrame($disp) {
         $keys += $key
         if ($sameArea -and $i -lt $script:LiveKeys.Count -and $script:LiveKeys[$i] -ceq $key) { continue }
         $wrote = $true
-        [Console]::SetCursorPosition(0, $top + $i)
+        if ($prev -gt 0) { [Console]::SetCursorPosition(0, $top + $i) }
         foreach ($seg in $disp[$i].Segs) {
             if ($seg.Bg) {
                 Write-Host $seg.Text -NoNewline -ForegroundColor $seg.Color -BackgroundColor $seg.Bg
@@ -320,8 +323,10 @@ function Write-LiveFrame($disp) {
                 Write-Host $seg.Text -NoNewline -ForegroundColor $seg.Color
             }
         }
+        if ($prev -eq 0) { Write-Host '' }
     }
-    if ($wrote -or $prev -ne $count) { [Console]::SetCursorPosition(0, $top + $count) }
+    if ($prev -eq 0) { $top = [Console]::CursorTop - $count }
+    elseif ($wrote -or $prev -ne $count) { [Console]::SetCursorPosition(0, $top + $count) }
     $script:LiveTop = $top
     $script:LiveKeys = $keys
     $script:LiveWidth = $size.Width
@@ -998,6 +1003,9 @@ function Get-UnusedJobPath([string]$parent, [string]$name, [string]$extension, $
     for ($i = 2; ; $i++) {
         $path = [IO.Path]::Combine($parent, $stem + $extension)
         $occupied = $reserved.ContainsKey($path) -or [IO.File]::Exists($path)
+        if (-not $occupied -and $extension -eq '.mph') {
+            $occupied = [IO.File]::Exists($path + '.status') -or [IO.File]::Exists($path + '.recovery')
+        }
         if (-not $occupied -and [IO.Directory]::Exists($path)) {
             $occupied = -not $ReuseEmpty -or ([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) -or
                         @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Select-Object -First 1).Count -gt 0
@@ -1372,11 +1380,48 @@ function Get-DriverClassVersion([string]$dir) {
     if (-not (Test-Path -LiteralPath $p)) { return '' }
     try {
         $bytes = [System.IO.File]::ReadAllBytes($p)
+        if ($bytes.Length -lt 8 -or [BitConverter]::ToString($bytes,0,4) -ne 'CA-FE-BA-BE') { return '' }
         $txt = [System.Text.Encoding]::ASCII.GetString($bytes)
         $m = [regex]::Match($txt, 'v\d+\.\d+\.\d+')
         if ($m.Success) { return $m.Value }
     } catch { }
     return ''
+}
+
+# 正常入口只核对已安装的文件。完整的 JVM 反射检查用于显式诊断。
+function Assert-DriverFiles([string]$root, [string]$driver) {
+    $release = Join-Path $root 'java/win64/jre/release'
+    if ([IO.File]::Exists($release) -and [IO.File]::ReadAllText($release) -match '(?m)^JAVA_VERSION="(?:1\.)?(\d+)' -and [int]$Matches[1] -lt 11) {
+        throw ('导出驱动需要 Java 11 或更高版本，安装内 Java 版本为 ' + $Matches[1])
+    }
+    $actual = Get-DriverClassVersion $driver
+    if ($actual -ne $script:ExpectedDriverVersion) {
+        throw ('导出驱动版本不符或主类损坏，实得 {0}，需要 {1}。请运行 update.bat' -f $actual,$script:ExpectedDriverVersion)
+    }
+    foreach ($inner in 'Job','Handler','SolUse','CsvStream','SliceSink','JobFailure') {
+        $file = [IO.Path]::Combine($driver,('ExportDriver$' + $inner + '.class'))
+        if (-not [IO.File]::Exists($file)) { throw ('导出驱动缺少 ' + $file + '，请运行 update.bat') }
+    }
+    $plugins = Join-Path $root 'plugins'
+    if (-not [IO.Directory]::Exists($plugins)) { throw ('找不到 COMSOL 插件目录 ' + $plugins) }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $required = @('util/ModelUtil','SolverSequence','SolutionInfo','Study','NumericalFeature','PropFeature')
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    # 标准布局只打开一个 API 包。其他布局可以把接口分布在多个包。
+    foreach ($pattern in 'com.comsol.api_*.jar','*.jar') {
+        foreach ($file in [IO.Directory]::EnumerateFiles($plugins,$pattern)) {
+            if (-not $seen.Add($file)) { continue }
+            $jar = $null
+            try {
+                $jar = [IO.Compression.ZipFile]::OpenRead($file)
+                $required = @($required | Where-Object { -not $jar.GetEntry('com/comsol/model/' + $_ + '.class') })
+                if (-not $required.Count) { return }
+            } catch [IO.InvalidDataException] {
+                # 其他插件包仍有可能提供所需接口。
+            } finally { if ($jar) { $jar.Dispose() } }
+        }
+    }
+    throw ('COMSOL 插件中缺少导出接口 ' + ($required -join '、') + '，请核对安装 ' + $plugins)
 }
 
 function Assert-DriverRuntime([string]$javaPath, [string]$classPath, [int]$timeoutMs = 60000) {
@@ -1389,15 +1434,18 @@ function Assert-DriverRuntime([string]$javaPath, [string]$classPath, [int]$timeo
     $start.RedirectStandardInput = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
+    $clock = [Diagnostics.Stopwatch]::StartNew()
     $proc = [Diagnostics.Process]::Start($start)
     try {
         $proc.StandardInput.Close()
         $stdout = $proc.StandardOutput.ReadToEndAsync()
         $stderr = $proc.StandardError.ReadToEndAsync()
-        if (-not $proc.WaitForExit($timeoutMs)) {
-            # 仅清理本次启动的预检进程，避免因刚好自行退出而隐藏超时原因。
-            try { $proc.Kill() } catch [InvalidOperationException] { }
-            [void]$proc.WaitForExit(1000)
+        $remaining = [int][math]::Max(0,$timeoutMs - $clock.ElapsedMilliseconds)
+        $exited = $proc.WaitForExit($remaining)
+        $remaining = [int][math]::Max(0,$timeoutMs - $clock.ElapsedMilliseconds)
+        # 子进程可以继承输出句柄。等待两个 EOF 也必须共用同一截止时间。
+        if (-not $exited -or -not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout,$stderr),$remaining)) {
+            if (-not $exited) { try { $proc.Kill() } catch [InvalidOperationException] { } }
             throw ('COMSOL 驱动预检超时（{0:g} 秒），请核对 Java 路径 {1}' -f ($timeoutMs/1000),$javaPath)
         }
         $version = $stdout.GetAwaiter().GetResult().Trim()
@@ -2005,6 +2053,37 @@ function Format-SolveError($lines) {
     return ($text.Substring(0,252) + ' … ' + $text.Substring($text.Length - 256))
 }
 
+# COMSOL writes these two files next to its batch output. Keep their bytes in the owning job.
+function Move-SolvedBatchFiles($job, [switch]$Historical) {
+    if ($job.mode -ne 'solve') { return }
+    $marker = [IO.Path]::Combine($job.jobDir,'solved')
+    if (-not [IO.File]::Exists($marker)) { return }
+    try {
+        $saved = Get-JobSolvedPath $job
+        if (-not $saved -or [IO.Path]::GetExtension($saved) -ne '.mph' -or -not [IO.File]::Exists($saved)) { return }
+        if ($Historical) {
+            # An old queue entry must not claim a later run's model or recovery pointer.
+            if ([IO.File]::Exists($saved + '.lock')) { return }
+            $finished = [IO.File]::GetLastWriteTimeUtc($marker)
+            foreach ($file in $saved,($saved + '.status'),($saved + '.recovery')) {
+                if ([IO.File]::Exists($file) -and [IO.File]::GetLastWriteTimeUtc($file) -gt $finished) { return }
+            }
+            $statusFile = $saved + '.status'
+            if (-not [IO.File]::Exists($statusFile)) { $statusFile = [IO.Path]::Combine($job.jobDir,'solve.status') }
+            if ((Read-FileTailText $statusFile 4096) -notmatch '(?im)^[ \t]*(?:(?:status|状态)[ \t]*[:：=][ \t]*)?Done\b') { return }
+        }
+        foreach ($ext in 'status','recovery') {
+            $source = $saved + '.' + $ext
+            if (-not [IO.File]::Exists($source)) { continue }
+            $dest = [IO.Path]::Combine($job.jobDir,('solve.' + $ext))
+            [IO.File]::Move($source,$dest)
+        }
+    } catch {
+        # A busy file or an existing archive stays in place. Resume can retry without overwriting.
+        Write-Warning ('求解已保存，批处理辅助文件归档未完成 ' + $saved + ' · ' + $_.Exception.GetBaseException().Message)
+    }
+}
+
 function Test-SolveOk($job) {
     $dir = $job.jobDir
     $marker = Join-Path $dir 'solve.exit'
@@ -2019,6 +2098,9 @@ function Test-SolveOk($job) {
     $diagnostic = Get-SolveErrorLine $job -Final
     $solved = Get-JobSolvedPath $job
     $state = if ($solved) { Read-FileTailText ($solved + '.status') 4096 } else { '' }
+    if (-not $state -and [IO.File]::Exists((Join-Path $dir 'solved'))) {
+        $state = Read-FileTailText (Join-Path $dir 'solve.status') 4096
+    }
     if (-not $diagnostic -and $state -match '(?im)^[ \t]*(?:(?:status|状态)[ \t]*[:：=][ \t]*)?(?:failed|failure|error|aborted|cancelled|canceled|失败|错误|已取消)\b[^\r\n]*') {
         $diagnostic = $Matches[0].Trim()
     }
@@ -2055,7 +2137,8 @@ function Start-SolvePhase($job) {
     $study = [string]$spec['study']
     $solvedDir = Split-Path -Parent $solved
     if (-not (Test-Path -LiteralPath $solvedDir)) { New-Item -ItemType Directory -Path $solvedDir -Force | Out-Null }
-    if ([IO.File]::Exists($solved) -or [IO.Path]::GetFullPath($model) -eq [IO.Path]::GetFullPath($solved)) {
+    if ([IO.File]::Exists($solved) -or [IO.File]::Exists($solved + '.recovery') -or [IO.File]::Exists($solved + '.status') -or
+        [IO.Path]::GetFullPath($model) -eq [IO.Path]::GetFullPath($solved)) {
         $job.status = 'failed'
         Set-JobProp $job 'exitcode' 'solve-output-exists'
         return
@@ -2117,6 +2200,7 @@ function Start-OneJob($job) {
     }
     if ($hasSolvedMarker -and $hasSolvedFile) {
         # 上一轮已经算完（例如导出阶段失败过）：直接重跑导出
+        Move-SolvedBatchFiles $job -Historical
         Set-JobPhase $job 'export'
         Start-ExportPhase $job
         return
@@ -2149,6 +2233,7 @@ if ($Setup) { Start-Setup; exit 0 }
 $script:HandoffStates = @{}
 function Initialize-HandoffStates($queue, [switch]$Recover) {
     foreach ($prior in $queue) {
+        if ($Recover -and $prior.status -in @('done','failed')) { Move-SolvedBatchFiles $prior -Historical }
         if ($prior.status -in @('done','failed','killed') -and $prior.resultDir) {
             # 正常提交只看活动作业。显式续跑时再修复上次中断的历史交接。
             if (-not $Recover -or -not [IO.Directory]::Exists($prior.jobDir) -or [IO.File]::Exists([IO.Path]::Combine($prior.jobDir,'handoff'))) {
@@ -2585,6 +2670,7 @@ function Invoke-Scheduler($submitted) {
                                 if ($why -eq '') {
                                     # 求解成功：写 solved 标记（驱动据此走 resume），接着起导出
                                     [System.IO.File]::WriteAllText((Join-Path $job.jobDir 'solved'), '', (New-Object System.Text.UTF8Encoding($false)))
+                                    Move-SolvedBatchFiles $job
                                     if (-not $panels -and $sessionIds -contains $job.jobDir) {
                                         Clear-LiveBox
                                         $durTxt = ''
@@ -2811,8 +2897,10 @@ if (-not $KillJob) {
         throw ('驱动未编译，先运行: comsolcompile ' + (Join-Path $driverDir 'ExportDriver.java'))
     }
 
-    Write-Host ('  正在检查 COMSOL 导出驱动 ' + $comsolRoot) -ForegroundColor DarkGray
-    Confirm-InstalledDriver $javaExe $comsolRoot $driverDir
+    Write-Host ('  正在检查 COMSOL 导出驱动 ' + $comsolRoot) -ForegroundColor DarkGray -NoNewline
+    Assert-DriverFiles $comsolRoot $driverDir
+    if ($Diag) { Confirm-InstalledDriver $javaExe $comsolRoot $driverDir }
+    Write-Host '  通过' -ForegroundColor Green
 }
 
 $doSolve = $Mode -ne 'export'

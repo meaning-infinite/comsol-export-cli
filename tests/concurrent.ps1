@@ -67,6 +67,7 @@ try {
     $java = Join-Path $box 'installation/java/win64/jre/bin/java.exe'
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($batch))
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($java))
+    & (Join-Path $PSScriptRoot 'New-TestApiJar.ps1') (Join-Path $box 'installation/plugins/com.comsol.api_1.0.0.jar')
     $source = [IO.File]::ReadAllText((Join-Path $repo 'driver/ExportDriver.java'))
     $version = [regex]::Match($source,'DRIVER_VERSION\s*=\s*"([^"]+)"').Groups[1].Value
     $worker = @"
@@ -80,11 +81,12 @@ class Worker {
         bool solve = a.Contains("-inputfile");
         File.AppendAllText(solve ? "TEMP_solve_count" : "TEMP_export_count", "1");
         if (solve) {
+            string dest = a[Array.IndexOf(a,"-outputfile")+1];
+            File.WriteAllText(dest+".status","Running"); File.WriteAllText(dest+".recovery","recovery-location");
             File.WriteAllText(a[Array.IndexOf(a,"-batchlog")+1],"Current progress: 4 % - active");
             DateTime limit = DateTime.UtcNow.AddSeconds(90);
             while (!File.Exists("TEMP_finish_solve") && DateTime.UtcNow < limit) Thread.Sleep(70);
             if (!File.Exists("TEMP_finish_solve")) return 8;
-            string dest = a[Array.IndexOf(a,"-outputfile")+1];
             File.WriteAllText(dest,"fixture"); File.WriteAllText(dest+".status","Done");
             if (Path.GetFileName(a[Array.IndexOf(a,"-inputfile")+1]) == "D.mph") return 17;
         } else {
@@ -164,6 +166,7 @@ class Worker {
         $manifest -notmatch 'comsolbatch 退出码 17' -or [IO.File]::Exists((Join-Path $jd.jobDir 'TEMP_export_count'))) {
         throw 'Nonzero solver exit was accepted as a completed job'
     }
+    if (-not [IO.File]::Exists($failed.solvedFile+'.recovery') -or -not [IO.File]::Exists($failed.solvedFile+'.status')) { throw 'Failed solve lost its recovery files' }
     Write-Output 'PASS native exit 17 persists with no controller and blocks export despite a saved partial result and Done'
     [IO.File]::WriteAllText((Join-Path $scriptDir 'recipes/second.psd1'),$recipe.Replace("Task='test'","Task='second'; SolScope='all'; Chunk=7"),[Text.Encoding]::UTF8)
     $plain = Start-Controller ($common.Replace('-Recipe test ', '-Recipe "test,second" ') + '5,6')
@@ -195,6 +198,14 @@ class Worker {
     Wait-ExitCode $g 4
     if (-not $g.Out.Result.Contains('run.bat -Mode export') -or -not $g.Out.Result.Contains($jg.solvedFile) -or
         -not [IO.File]::Exists($jg.solvedFile)) { throw 'A failed export must identify the saved batch result for recovery' }
+    foreach ($completed in $je,$jf,$jg) {
+        if ([IO.File]::Exists($completed.solvedFile+'.status') -or [IO.File]::Exists($completed.solvedFile+'.recovery') -or
+            [IO.File]::ReadAllText((Join-Path $completed.jobDir 'solve.status')) -ne 'Done' -or
+            [IO.File]::ReadAllText((Join-Path $completed.jobDir 'solve.recovery')) -ne 'recovery-location') {
+            throw 'Completed solve metadata must be archived before export, including when export fails'
+        }
+    }
+    Write-Output 'PASS native recovery and status stay with a failed solve; successful solves archive both before export'
     Write-Output 'PASS an export failure reports the existing solved model and the export-only command'
 
     $legacyModels=Join-Path $box 'legacy\solved'
