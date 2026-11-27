@@ -1,6 +1,6 @@
 ﻿# COMSOL 导出 CLI · API 文档
 
-> 最后更新：2026-11-27 · 对应 v1.13.0 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
+> 最后更新：2026-11-27 · 对应 v1.13.1 · COMSOL 侧 API 见 [COMSOL-API.md](COMSOL-API.md)
 > 接口与内部约定的参考手册，随版本持续更新。使用说明见 [README.md](../README.md)，配方写法见 [recipes/README.md](../recipes/README.md)。
 
 ## 1. 分层与调用链
@@ -132,6 +132,8 @@ CLI 生成，驱动逐行 `key=value` 读（不用 `java.util.Properties`，避�
 |---|---|---|
 | `Expr` | — | `|` 分隔的表达式列表 |
 | `Cols` | — | 列名，数量必须与 Expr 一致 |
+
+对于外部参数扫描，驱动按 COMSOL 的外部解顺序定位每个参数点的存储节点，再按该节点实际解数分块读取。扫描汇总节点以及与存储点共享同一份解数据和保存点的工作节点只作为引用。模态数可以逐点变化。`sol_tag` 和 `sol_num` 标识实际存储节点及其局部解号，`solution_index` 跨参数点连续编号。
 
 每行对应一个已存解。启用的扫描参数置于最前，后接表达式列、可取时的 lambda_nm，以及 study_tag、sol_tag、sol_num、solution_index。双精度写出，数值相同的解保留各自编号。Units 与 Expr 一一对应，空项沿用表达式单位。波长可写 `(c_const/real(freq))/1[nm]` 或指定 `Units=nm`，每列选一种换算写法。旧配方中 `c_const/freq` 或 `c_const/ewfd.freq` 配合 _nm 后缀也按 nm 输出。
 
@@ -392,6 +394,7 @@ static void exportFoo(Job j, int i) throws Exception {
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.13.1 | 2026-11-27 | 修复外部参数扫描导出的解号越界及首末参数点重复计数。导出失败时 CLI 显示已保存模型的补导路径。 |
 | v1.13.0 | 2026-11-27 | 单模型、多模型和只读监视共用完整进度框，按整框分页。配方支持菜单和命令行多选，每个模型复用一次加载，各配方独立选解和命名。 |
 | v1.12.0 | 2026-11-27 | 单模型和多模型均按模型名平铺产物，移除自动批次标识。配方选择后直接确认，默认由 COMSOL/JVM 管理资源。 |
 | v1.11.0 | 2026-11-26 | 新增 `99_求解器历史记录导出` 配方及 `solverlog` 模块，支持读取已存求解日志、研究耗时和本作业原始批处理日志。 |

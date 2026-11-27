@@ -61,7 +61,7 @@ try {
     }
     $recipe = "@{ Task='test'; Study='std1'; NameTemplate='{model}'; Export=@(@{Type='global'; Name='identity'; Expr=@('1'); Cols=@('value')}) }"
     [IO.File]::WriteAllText((Join-Path $scriptDir 'recipes/test.psd1'),$recipe,[Text.Encoding]::UTF8)
-    foreach ($id in 'A','B','C','D','E','F') { [IO.File]::WriteAllText((Join-Path $models ($id + '.mph')),'fixture') }
+    foreach ($id in 'A','B','C','D','E','F','G') { [IO.File]::WriteAllText((Join-Path $models ($id + '.mph')),'fixture') }
 
     $batch = Join-Path $box 'installation/bin/win64/comsolbatch.exe'
     $java = Join-Path $box 'installation/java/win64/jre/bin/java.exe'
@@ -92,6 +92,7 @@ class Worker {
             string dir = File.ReadAllLines("job.properties").First(x => x.StartsWith("resultdir=")).Substring(10);
             Directory.CreateDirectory(dir);
             string name = File.ReadAllLines("job.properties").First(x => x.StartsWith("outname=")).Substring(8);
+            if (name == "G") { File.WriteAllText("exit","4"); return 4; }
             File.WriteAllText(Path.Combine(dir,name + ".csv"),"fixture");
             File.WriteAllText(Path.Combine(dir,"EXPORT_MANIFEST.md"),"fixture");
             File.WriteAllText("exported","ok");
@@ -187,6 +188,15 @@ class Worker {
             -not [IO.File]::Exists((Join-Path $j.resultDir 'EXPORT_MANIFEST.md'))) { throw 'Default export limits or handoff incorrect' }
     }
     Write-Output 'PASS two default solve/export workers overlap, keep plain names and inherit CPU/heap defaults'
+    $g = Start-Controller ($common + '7')
+    $controllers += $g
+    $jg = Wait-State 'G' 'running' $g
+    [IO.File]::WriteAllText((Join-Path $jg.jobDir 'TEMP_finish_solve'),'ok')
+    Wait-ExitCode $g 4
+    if (-not $g.Out.Result.Contains('run.bat -Mode export') -or -not $g.Out.Result.Contains($jg.solvedFile) -or
+        -not [IO.File]::Exists($jg.solvedFile)) { throw 'A failed export must identify the saved batch result for recovery' }
+    Write-Output 'PASS an export failure reports the existing solved model and the export-only command'
+
     $legacyModels=Join-Path $box 'legacy\solved'
     [void][IO.Directory]::CreateDirectory($legacyModels)
     $friendly='模型_202611251125'

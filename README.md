@@ -3,7 +3,7 @@
 <p align="center"><b>在远程或公共电脑上批量求解 COMSOL 模型、自动导出数据，只回传结果</b></p>
 
 <p align="center">
-  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.13.0-2AA0B0"></a>
+  <a href="https://github.com/meaning-infinite/comsol-export-cli/releases"><img alt="version" src="https://img.shields.io/badge/version-v1.13.1-2AA0B0"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078D6">
   <img alt="powershell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
   <img alt="comsol" src="https://img.shields.io/badge/COMSOL-6.1~6.4-368CCB">
@@ -107,6 +107,8 @@ output/
 如果已有同名结果，CLI 使用同层的 `模型A (2)`、`模型A (3)` 文件夹，里面的结果文件保留原名。已占用的同名解文件也按此规则另存。旧作业续跑时使用提交时记录的路径。
 
 每行 CSV 保留研究、解节点、节点内序号及全局序号。复现单点场图时，把 `solution_index` 填入 `SolNum`。宽谱吸收使用含全部衍射级的总透射和总反射。
+
+参数扫描按每个参数点实际保存的解数导出。若作业目录的 `solve.exit` 为 `0`、`solved` 标记存在，且导出 `exit` 为 `4`，可运行 `run.bat -Mode export`，选 `solved` 目录中的已求解 `.mph` 和原配方，直接补导。
 
 ## 离线更新
 

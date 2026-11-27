@@ -16,19 +16,23 @@ import com.comsol.model.Model;
 import com.comsol.model.PropFeature;
 import com.comsol.model.SolverFeature;
 import com.comsol.model.Study;
+import com.comsol.model.SolutionInfo;
 import com.comsol.model.util.ModelUtil;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
+import java.util.zip.ZipFile;
+import javax.xml.stream.*;
 
 public class ExportDriver {
 
     // ---------- 作业上下文 ----------
     static class Job {
         Map<String, String> p;
-        Path jobDir, outdir, modelsDir, tmpdir, batchLog;
+        Path jobDir, outdir, modelsDir, tmpdir, batchLog, solutionFile;
+        final Map<String,String> solutionAliases = new HashMap<>();
         String outname, dataset, study, component = "";
         int blocks, firstBlock = 1, currentBlock, skipped;
         String recipePrefix = "", activeRecipe = "";
@@ -111,7 +115,7 @@ public class ExportDriver {
     }
 
     // 驱动版本：远程日志里没有这行就说明跑的是旧 class（更新没覆盖到 driver 目录）
-    static final String DRIVER_VERSION = "v1.13.0";
+    static final String DRIVER_VERSION = "v1.13.1";
 
     static int progressBlock, progressBlocks, progressTotal, progressDone;
     static boolean progressFiles;
@@ -154,6 +158,10 @@ public class ExportDriver {
             try {
                 ModelUtil.class.getMethod("loadCopy", String.class, String.class);
                 com.comsol.model.SolverSequence.class.getMethod("study");
+                com.comsol.model.SolverSequence.class.getMethod("getSequenceType");
+                com.comsol.model.SolverSequence.class.getMethod("getSavePointTag");
+                SolutionInfo.class.getMethod("getOuterSolnum");
+                SolutionInfo.class.getMethod("getSol", int.class);
                 com.comsol.model.Study.class.getMethod("getSolverSequences", String.class);
                 com.comsol.model.NumericalFeature.class.getMethod("getReal");
                 Study.class.getMethod("getLastComputationTime");
@@ -231,6 +239,7 @@ public class ExportDriver {
         if (!Files.isRegularFile(load)) throw new JobFailure(2, "找不到模型 " + load);
         if (solve && !resume && "batch".equals(j.p.get("solver")))
             throw new JobFailure(3, "批处理求解未完成，缺少 solved 标记");
+        j.solutionFile = load;
         j.loadedModel = load.toString();
         ModelUtil.initStandalone(false);
         j.runtime = ModelUtil.getComsolVersion();
@@ -242,6 +251,7 @@ public class ExportDriver {
             catch (Exception e) { throw new JobFailure(3, errText(e)); }
             Files.createDirectories(solved.getParent());
             j.model.save(solved.toString());
+            j.solutionFile = solved;
             Files.writeString(j.jobDir.resolve("solved"), "ok");
         }
         Files.writeString(j.jobDir.resolve("exporting"), "ok");
@@ -296,6 +306,7 @@ public class ExportDriver {
                 throw new JobFailure(2, "多配方规格不完整 " + n);
             part.model = job.model;
             part.loadedModel = job.loadedModel;
+            part.solutionFile = job.solutionFile;
             part.runtime = job.runtime;
             part.jobDir = job.jobDir;
             part.outdir = job.outdir;
@@ -333,8 +344,8 @@ public class ExportDriver {
         if (needsSolutions) {
             j.sols = listSols(j);
             if (j.sols.isEmpty()) throw new JobFailure(4, "所选研究 " + j.study + " 没有已存解，请选择含有所需解的模型");
-            if (!wanted.isEmpty() && (!hasDataset(j, wanted) || j.sols.stream().noneMatch(
-                    u -> u.tag.equals(j.model.result().dataset(wanted).getString("solution")))))
+            if (!wanted.isEmpty() && (!hasDataset(j, wanted) ||
+                    selectedSolution(j, j.model.result().dataset(wanted).getString("solution")) == null))
                 throw new JobFailure(2, "指定数据集不属于所选解范围 " + wanted);
         }
         j.pnames = studyParamNames(j.model, j.study);
@@ -556,7 +567,7 @@ public class ExportDriver {
     // 为什么不直接用“所有解”(innerinput=all) 一次取完：
     // 远程 651 个解（λ 400→1050 步 1）的模型只写出了前 400 行。COMSOL 在解多、堆紧张时
     // 会静默少给列，而旧代码对 NaN 一律 continue 跳过，于是短表被当成正常结果落盘。
-    // 现在先读每个解节点的解数 getSize()[1]，再按块显式指定解编号（manualindices）逐块取，
+    // 先定位每个参数点真正存解的节点，再按其解数分块指定解编号（manualindices）取数，
     // 每块都校验列数；取不满就报错，绝不静默写出不完整的表。
     static final class SolUse {
         String tag, study;
@@ -635,27 +646,136 @@ public class ExportDriver {
         return activeFamilies.contains(family) || activeFamilies.contains("");
     }
 
-    static List<SolUse> listSols(Job j) {
-        List<SolUse> list = new ArrayList<>();
-        boolean all = "all".equalsIgnoreCase(j.setting("solscope", "study"));
-        int offset = 0;
-        Set<String> related = new HashSet<>(Arrays.asList(j.model.study(j.study).getSolverSequences("All")));
-        for (String t : j.model.sol().tags()) {
-            String study;
-            try { study = j.model.sol(t).study(); }
-            catch (RuntimeException e) { study = ""; } // Unattached stored solution.
+    // Two nodes can share a save point (geometry) or equal eigenvalues without sharing vectors.
+    // Only an identical reference to native solution data identifies a working copy of a sweep point.
+    static Map<String,String> nativeSolutionIds(Path model) {
+        Map<String,String> ids = new HashMap<>();
+        XMLInputFactory factory = XMLInputFactory.newFactory();
+        factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+        factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
+        try (ZipFile zip = new ZipFile(model.toFile())) {
+            var entry = zip.getEntry("dmodel.xml");
+            if (entry == null) return ids;
+            try (InputStream in = zip.getInputStream(entry)) {
+                XMLStreamReader xml = factory.createXMLStreamReader(in);
+                try {
+                    String tag = null;
+                    int depth = 0, sequenceDepth = -1;
+                    while (xml.hasNext()) {
+                        int event = xml.next();
+                        if (event == XMLStreamConstants.START_ELEMENT) {
+                            depth++;
+                            String name = xml.getLocalName();
+                            if ("SolverSequence".equals(name)) {
+                                tag = xml.getAttributeValue(null, "tag");
+                                sequenceDepth = depth;
+                            } else if (tag != null && depth == sequenceDepth + 1 && "solutionnative".equals(name)) {
+                                String id = xml.getElementText().trim();
+                                if (id.startsWith("/soldata/")) ids.put(tag, id);
+                                depth--; // getElementText consumed the end element.
+                            }
+                        } else if (event == XMLStreamConstants.END_ELEMENT) {
+                            if (depth == sequenceDepth) { tag = null; sequenceDepth = -1; }
+                            if ("SolverSequenceList".equals(xml.getLocalName())) break;
+                            depth--;
+                        }
+                    }
+                } finally { xml.close(); }
+            }
+        } catch (IOException | XMLStreamException e) {
+            // Without a proven identity, keep independently addressable solver sequences.
+            log("[driver] 无法核对扫描工作解的存储引用，保留独立解节点：" + e.getMessage());
+            ids.clear();
+        }
+        return ids;
+    }
 
-            if (!all && !(j.study.equals(study) || ((study == null || study.isEmpty()) && related.contains(t)))) continue;
-            if (j.model.sol(t).isEmpty()) continue;
-            if (!all && !activeSequence(j.model, j.study, t)) {
-                j.details.add("未选择解 " + t + " · 研究步已停用或存储解归属不唯一");
+    static String storageKey(Job j, String tag, Map<String,String> studies, Map<String,String> nativeIds) {
+        return studies.get(tag) + "/" + j.model.sol(tag).getSavePointTag() + "/" + nativeIds.get(tag);
+    }
+
+    static SolUse selectedSolution(Job j, String tag) {
+        String target = j.solutionAliases.getOrDefault(tag, tag);
+        for (SolUse u : j.sols) if (u.tag.equals(target)) return u;
+        return null;
+    }
+
+    static List<SolUse> listSols(Job j) {
+        j.solutionAliases.clear();
+        boolean all = "all".equalsIgnoreCase(j.setting("solscope", "study"));
+        Set<String> related = new HashSet<>(Arrays.asList(j.model.study(j.study).getSolverSequences("All")));
+        Map<String,String> eligible = new LinkedHashMap<>();
+        Set<String> tags = new LinkedHashSet<>(Arrays.asList(j.model.sol().tags()));
+        for (String tag : tags) {
+            var seq = j.model.sol(tag);
+            String study;
+            try { study = seq.study(); }
+            catch (RuntimeException e) { study = ""; }
+            if ((study == null || study.isEmpty()) && related.contains(tag)) study = j.study;
+            if ((!all && !j.study.equals(study)) || seq.isEmpty()) continue;
+            if (!all && !activeSequence(j.model, j.study, tag)) {
+                j.details.add("未选择解 " + tag + " · 研究步已停用或存储解归属不唯一");
                 continue;
             }
-            int[] size = j.model.sol(t).getSize();
+            eligible.put(tag, study == null ? "" : study);
+        }
+
+        // On a Parametric container getSize()[1] describes the last point, whereas getReal()
+        // defaults to the first. Its SolutionInfo maps each outer point to a concrete saved sequence.
+        Map<String,List<String>> sweeps = new LinkedHashMap<>();
+        Set<String> stored = new LinkedHashSet<>();
+        for (String tag : eligible.keySet()) {
+            var seq = j.model.sol(tag);
+            if (!"Parametric".equals(seq.getSequenceType())) continue;
+            SolutionInfo info = seq.getSolutioninfo();
+            int[] outer = info.getOuterSolnum();
+            if (outer.length == 0) continue;
+            List<String> points = new ArrayList<>();
+            Set<String> mapped = new HashSet<>();
+            for (int o : outer) {
+                String point = info.getSol(o);
+                if (!tags.contains(point) || tag.equals(point) || !mapped.add(point))
+                    throw new JobFailure(4, "无法定位独立存储解：" + tag + " 外部解 " + o + " → " + point);
+                if (eligible.containsKey(point)) {
+                    points.add(point);
+                    stored.add(point);
+                    // COMSOL uses the first outer point for an explicit aggregate without an outer index.
+                    if (o == outer[0]) j.solutionAliases.put(tag, point);
+                }
+            }
+            sweeps.put(tag, points);
+        }
+
+        if (!stored.isEmpty()) {
+            Map<String,String> nativeIds = nativeSolutionIds(j.solutionFile);
+            Map<String,String> leafById = new HashMap<>();
+            for (String point : stored) {
+                if (nativeIds.containsKey(point))
+                    leafById.putIfAbsent(storageKey(j, point, eligible, nativeIds), point);
+            }
+            for (String tag : eligible.keySet()) {
+                if (!"SolverSequence".equals(j.model.sol(tag).getSequenceType()) || !nativeIds.containsKey(tag)) continue;
+                String leaf = leafById.get(storageKey(j, tag, eligible, nativeIds));
+                if (leaf != null && !leaf.equals(tag)) j.solutionAliases.put(tag, leaf);
+            }
+        }
+
+        Set<String> order = new LinkedHashSet<>();
+        for (String tag : eligible.keySet()) {
+            if (sweeps.containsKey(tag)) order.addAll(sweeps.get(tag));
+            else if (!stored.contains(tag) && !j.solutionAliases.containsKey(tag)) order.add(tag);
+        }
+        List<SolUse> list = new ArrayList<>();
+        int offset = 0;
+        for (String tag : order) {
+            int[] size = j.model.sol(tag).getSize();
             if (size.length < 2 || size[1] <= 0) continue;
             SolUse u = new SolUse();
-            u.tag = t; u.study = study == null || study.isEmpty() ? (related.contains(t) ? j.study : "") : study;
-            u.n = size[1]; u.offset = offset; offset += u.n;
+            u.tag = tag;
+            u.study = eligible.get(tag);
+            u.n = size[1];
+            u.offset = offset;
+            offset += u.n;
             list.add(u);
         }
         return list;
@@ -1164,11 +1284,11 @@ public class ExportDriver {
         String[] pick;
         if (solTag.isEmpty()) pick = pickSol(j, solnum);
         else {
-            SolUse selected = j.sols.stream().filter(u -> solTag.equals(u.tag)).findFirst()
-                    .orElseThrow(() -> new IllegalArgumentException("所选研究中没有解 " + solTag));
+            SolUse selected = selectedSolution(j, solTag);
+            if (selected == null) throw new IllegalArgumentException("所选研究中没有解 " + solTag);
             int local = Integer.parseInt(solnum);
             if (local < 1 || local > selected.n) throw new IllegalArgumentException("解号超出 " + solTag + " 的范围");
-            pick = new String[]{solTag, Integer.toString(local)};
+            pick = new String[]{selected.tag, Integer.toString(local)};
         }
         if (tagSfx.isEmpty() || tagSfx.equals("_0")) {
             SolUse u = j.sols.stream().filter(x -> x.tag.equals(pick[0])).findFirst().get();

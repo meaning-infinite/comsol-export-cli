@@ -27,6 +27,7 @@ public class ExportContractTest {
     static SolverSequence sol(String tag) {
         return stub(SolverSequence.class, (name, a) -> {
             switch (name) {
+                case "getSequenceType": return "SolverSequence";
                 case "study": return tag.equals("other") ? "std2" : "std1";
                 case "getType": return tag.equals("oldStore") ? "Eigenvalue" : "Stationary";
                 case "isEmpty": return tag.equals("empty");
@@ -92,6 +93,64 @@ public class ExportContractTest {
         check(rejected, "a truncated multi-recipe specification fails before exporting");
     }
 
+    // Ragged outer sweep, a working alias of its last point, and two genuinely separate solutions.
+    static void checkSweep(Path temp) throws Exception {
+        Map<String,Integer> counts = new LinkedHashMap<>();
+        counts.put("working", 4);
+        counts.put("outer", 4); // This count is valid only at the last point.
+        counts.put("pointB", 3);
+        counts.put("pointA", 2);
+        counts.put("pointC", 4);
+        counts.put("independent", 4);
+        counts.put("differentGeometry", 4);
+        String[] points = {"pointA", "pointB", "pointC"};
+        StringBuilder xml = new StringBuilder("<Model><SolverSequenceList>");
+        for (String tag : counts.keySet()) {
+            String nativeId = Arrays.asList("outer","working","differentGeometry").contains(tag) ? "pointC" : tag;
+            xml.append("<SolverSequence tag='").append(tag).append("'><solutionnative>/soldata/")
+                    .append(nativeId).append("</solutionnative></SolverSequence>");
+        }
+        Path archive = temp.resolve("fixture.mph");
+        try (var zip = new java.util.zip.ZipOutputStream(Files.newOutputStream(archive))) {
+            zip.putNextEntry(new java.util.zip.ZipEntry("dmodel.xml"));
+            zip.write(xml.append("</SolverSequenceList></Model>").toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+
+        ExportDriver.Job j = new ExportDriver.Job();
+        j.solutionFile = archive;
+        j.study = "std1";
+        j.p = Map.of("solscope", "all");
+        j.model = stub(Model.class, (name, a) -> {
+            if (name.equals("study")) return stub(Study.class, (n,b) -> counts.keySet().toArray(new String[0]));
+            if (a.length == 0) return stub(SolverSequenceList.class, (n,b) -> counts.keySet().toArray(new String[0]));
+            String tag = (String)a[0];
+            return stub(SolverSequence.class, (n,b) -> {
+                switch (n) {
+                    case "study": return "std1";
+                    case "isEmpty": return false;
+                    case "getSequenceType": return tag.equals("outer") ? "Parametric" :
+                            tag.startsWith("point") ? "ParametricStore" : "SolverSequence";
+                    case "getSavePointTag": return tag.equals("differentGeometry") ? "geom2" : "geom1";
+                    case "getSize":
+                        if (tag.equals("outer")) throw new AssertionError("aggregate must never be counted as a leaf");
+                        return new int[]{50, counts.get(tag)};
+                    case "getSolutioninfo": return stub(SolutionInfo.class, (op, args) ->
+                            op.equals("getOuterSolnum") ? new int[]{1,2,3} : points[(Integer)args[0]-1]);
+                    default: throw new UnsupportedOperationException(n);
+                }
+            });
+        });
+        j.sols = ExportDriver.listSols(j);
+        List<String> order = new ArrayList<>();
+        for (ExportDriver.SolUse point : j.sols) order.add(point.tag + "/" + point.n + "/" + point.offset);
+        check(order.equals(Arrays.asList("pointA/2/0","pointB/3/2","pointC/4/5","independent/4/9","differentGeometry/4/13")),
+                "sweep uses stored points in outer order with local counts and keeps independent data and geometry");
+        check(ExportDriver.selectedSolution(j,"outer").tag.equals("pointA") &&
+                ExportDriver.selectedSolution(j,"working").tag.equals("pointC") &&
+                Arrays.equals(ExportDriver.pickSol(j,"6"),new String[]{"pointC","1"}),
+                "explicit aggregate/working tags and global field indices resolve to the correct stored solution");
+    }
+
     static void checkSolverHistory(Path temp) throws Exception {
         ExportDriver.Job j = new ExportDriver.Job();
         j.jobDir = temp;
@@ -153,6 +212,7 @@ public class ExportContractTest {
               "zero incident power yields undefined percentage");
         j.outdir=Files.createTempDirectory("TEMP_comsol_contract_");
         try {
+            checkSweep(j.outdir);
             checkSolverHistory(j.outdir);
             checkRecipeSelection(j.outdir);
             Path file=j.outdir.resolve("rows.csv");
